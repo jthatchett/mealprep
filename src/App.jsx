@@ -397,6 +397,9 @@ export default function App() {
   const [debugLog, setDebugLog] = useState([]);
   const [session, setSession] = useState(null);     // null = not yet checked
   const [sessionChecked, setSessionChecked] = useState(false);
+  const [loadError, setLoadError] = useState(false); // true = load threw; block saving so we can't overwrite good data
+  const [reloadNonce, setReloadNonce] = useState(0); // bump to retry a failed load
+  const [saveError, setSaveError] = useState(null);  // last save error message, shown as a banner
   const dbg = (msg) => setDebugLog((prev) => [`${new Date().toLocaleTimeString()}: ${msg}`, ...prev.slice(0, 19)]);
 
   // restore session from local storage on mount (per-device, just holds the token)
@@ -431,11 +434,29 @@ export default function App() {
   };
 
   const signOut = async () => {
+    // Flush any pending (debounced) edit before tearing down. Without this, the 400ms save
+    // timer is cancelled by the teardown below, silently dropping the user's last edit.
+    try {
+      if (loaded && store && session && !loadError) {
+        await sbSaveAppData(session, store);
+      }
+    } catch (e) {
+      dbg("final save on signOut FAILED: " + e.message);
+      const proceed = window.confirm(
+        "Your most recent changes could not be saved. Sign out anyway and lose them?"
+      );
+      if (!proceed) return; // abort sign-out so the user can stay and retry
+    }
     localStorage.removeItem(SESSION_KEY);
     setSession(null);
     setStore(null);
     setLoaded(false);
+    setLoadError(false);
+    setSaveError(null);
   };
+
+  // retry a failed load without a full page reload
+  const retryLoad = () => { setLoadError(false); setReloadNonce((n) => n + 1); };
 
   // convenience destructure — safe because render is gated on loaded+store
   const foods  = store ? store.foods  : SEED_ALL;
@@ -449,7 +470,9 @@ export default function App() {
   // load — from Supabase, once session is available
   useEffect(() => {
     if (!session) return;
+    let cancelled = false;
     (async () => {
+      setLoadError(false);
       const seedWeek = () => {
         const w = {};
         DAYS.forEach((d) => (w[d] = newDay("phase-maintenance")));
@@ -464,6 +487,7 @@ export default function App() {
       };
       try {
         const row = await sbLoadAppData(session);
+        if (cancelled) return;
         dbg("supabase load: " + (row ? "found row" : "no row yet — new user"));
         if (row && row.foods) {
           const loadedFoods = (row.foods && row.foods.length) ? row.foods : SEED_ALL;
@@ -488,28 +512,32 @@ export default function App() {
 
           setStore({ foods: loadedFoods, phases: loadedPhases, week: loadedWeek });
         } else {
-          // new user — seed defaults, will be saved on first change
+          // new user (query SUCCEEDED, returned no row) — seed defaults, saved on first change
           setStore({ foods: SEED_ALL, phases: SEED_PHASES, week: seedWeek() });
         }
+        setLoaded(true); // only mark loaded on a SUCCESSFUL read — this is what enables saving
       } catch (e) {
+        if (cancelled) return;
+        // Load FAILED (network / permission / transient). Deliberately do NOT seed defaults
+        // and do NOT setLoaded(true): doing so would let the save effect fire and overwrite
+        // the real DB row with seed data. Surface a recoverable error instead.
         dbg("LOAD FAILED: " + e.message);
-        setStore({ foods: SEED_ALL, phases: SEED_PHASES, week: (() => { const w = {}; DAYS.forEach((d) => (w[d] = newDay("phase-maintenance"))); return w; })() });
-      } finally {
-        setLoaded(true);
+        setLoadError(true);
       }
     })();
-  }, [session]);
+    return () => { cancelled = true; };
+  }, [session, reloadNonce]);
 
-  // save — to Supabase, triggered by store changes
+  // save — to Supabase, triggered by store changes (debounced)
   useEffect(() => {
-    if (!loaded || !store || !session) return;
+    if (!loaded || !store || !session || loadError) return;
     const t = setTimeout(() => {
       sbSaveAppData(session, store)
-        .then(() => dbg("saved to supabase — foods:" + store.foods?.length + " phases:" + store.phases?.length))
-        .catch((e) => dbg("SAVE FAILED: " + e.message));
+        .then(() => { dbg("saved to supabase — foods:" + store.foods?.length + " phases:" + store.phases?.length); setSaveError(null); })
+        .catch((e) => { dbg("SAVE FAILED: " + e.message); setSaveError(e.message || "save failed"); });
     }, 400);
     return () => clearTimeout(t);
-  }, [store, loaded, session]);
+  }, [store, loaded, session, loadError]);
 
   // not checked session yet — brief splash
   if (!sessionChecked) {
@@ -526,6 +554,34 @@ export default function App() {
     return <AuthScreen onAuthed={handleAuthed} />;
   }
 
+  // load failed — recoverable error screen. Critical: this must come BEFORE the SYNCING
+  // gate, because on load failure `loaded` stays false and we'd otherwise hang on SYNCING.
+  if (loadError) {
+    return (
+      <div style={{...S.app, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh", padding:16}}>
+        <Style />
+        <div style={{...S.modal, maxWidth: 380, position:"static"}}>
+          <div style={{padding: 24, textAlign:"center"}}>
+            <div style={{fontSize: 28, marginBottom: 8}}>⚠</div>
+            <div style={{fontFamily:"'Archivo',sans-serif", fontWeight:800, letterSpacing:1, fontSize:15, marginBottom:8}}>
+              COULDN'T LOAD YOUR DATA
+            </div>
+            <p style={{...S.note, marginBottom: 16}}>
+              Your saved data was <strong style={{color:"#e8efe9"}}>not touched</strong> — the app just
+              couldn't reach it. Usually a network blip or an expired session.
+            </p>
+            <button style={{...S.primaryBtn, width:"100%", marginBottom: 8}} onClick={retryLoad}>
+              retry
+            </button>
+            <button style={{...S.ghostBtn, width:"100%"}} onClick={signOut}>
+              sign out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // signed in but data not yet loaded from Supabase
   if (!loaded || !store) {
     return (
@@ -539,6 +595,12 @@ export default function App() {
   return (
     <div style={S.app}>
       <Style />
+      {saveError && (
+        <div style={S.saveBanner}>
+          <span>⚠ last change didn't save — {saveError}</span>
+          <button style={S.saveBannerBtn} onClick={() => setSaveError(null)}>dismiss</button>
+        </div>
+      )}
       <header style={S.header}>
         <div style={S.brand}>
           <span style={S.brandMark}>◢</span>
@@ -1657,6 +1719,29 @@ const S = {
     padding: "10px 12px",
     fontSize: 12,
     marginBottom: 14,
+  },
+  saveBanner: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    background: "rgba(255,93,122,0.12)",
+    borderBottom: "1px solid rgba(255,93,122,0.4)",
+    color: "#ff5d7a",
+    padding: "10px 16px",
+    fontSize: 12.5,
+    fontWeight: 600,
+  },
+  saveBannerBtn: {
+    background: "transparent",
+    border: "1px solid rgba(255,93,122,0.5)",
+    color: "#ff5d7a",
+    borderRadius: 7,
+    padding: "4px 10px",
+    fontSize: 11,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    flexShrink: 0,
   },
   foodGrid: {
     display: "grid",
