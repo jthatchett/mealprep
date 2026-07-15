@@ -1237,6 +1237,14 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
                   <span>{r1(computed.c)}C</span>
                 </div>
               </div>
+              <label style={S.checkRow}>
+                <input
+                  type="checkbox"
+                  checked={draft.verify}
+                  onChange={(e) => set("verify", e.target.checked)}
+                />
+                <span>flag “needs verification”</span>
+              </label>
             </>
           )}
         </div>
