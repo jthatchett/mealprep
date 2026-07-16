@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 
 /* ============================================================
    MEAL PREP — SPINE (Foods + Plan)
@@ -637,6 +637,7 @@ export default function App() {
             week={week}
             setWeek={setWeek}
             foods={foods}
+            setFoods={setFoods}
             phases={phases}
             activeDay={activeDay}
             setActiveDay={setActiveDay}
@@ -667,10 +668,12 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, phases, activeDay, setActiveDay }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay }) {
   const day = week[activeDay];
   const phase = phases.find((p) => p.id === day.phaseId) || null;
   const [picker, setPicker] = useState(null); // slotId being edited
+  const [scanningSlot, setScanningSlot] = useState(null); // slotId being scanned
+  const [pendingScan, setPendingScan] = useState(null); // { slotId, barcode }
 
   const dayTotal = useMemo(() => {
     let t = ZERO;
@@ -757,6 +760,7 @@ function Plan({ week, setWeek, foods, phases, activeDay, setActiveDay }) {
             update((d) => d.slots.splice(si, 1))
           }
           onAdd={() => setPicker(slot.id)}
+          onScan={() => setScanningSlot(slot.id)}
           onQty={(ei, qty) =>
             update((d) => (d.slots[si].entries[ei].qty = qty))
           }
@@ -791,6 +795,57 @@ function Plan({ week, setWeek, foods, phases, activeDay, setActiveDay }) {
               slot.entries.push({ foodId, qty: 1 });
             });
             setPicker(null);
+          }}
+        />
+      )}
+
+      {scanningSlot && (
+        <BarcodeScanner
+          onDetected={(barcode) => {
+            const slotId = scanningSlot;
+            setScanningSlot(null);
+            setPendingScan({ slotId, barcode });
+          }}
+          onClose={() => setScanningSlot(null)}
+        />
+      )}
+
+      {pendingScan && (
+        <ScanConfirm
+          barcode={pendingScan.barcode}
+          foods={foods}
+          onClose={() => setPendingScan(null)}
+          onConfirm={({ draft, qty, existingId }) => {
+            // existingId reuses a food already scanned before; otherwise this
+            // is the first time this barcode's been seen, so add it to the library.
+            const foodId = existingId || uid();
+            setFoods((prev) =>
+              existingId
+                ? prev.map((f) =>
+                    f.id === existingId
+                      ? { ...f, name: draft.name, unit: draft.unit, macros: draft.macros }
+                      : f
+                  )
+                : [
+                    ...prev,
+                    {
+                      id: foodId,
+                      name: draft.name,
+                      unit: draft.unit,
+                      type: "component",
+                      macros: draft.macros,
+                      verify: true, // scanned/best-effort, same as seeded foods — review later
+                      ingredients: [],
+                      servings: 1,
+                      barcode: pendingScan.barcode,
+                    },
+                  ]
+            );
+            update((d) => {
+              const slot = d.slots.find((s) => s.id === pendingScan.slotId);
+              if (slot) slot.entries.push({ foodId, qty });
+            });
+            setPendingScan(null);
           }}
         />
       )}
@@ -854,6 +909,7 @@ function Slot({
   onRename,
   onRemoveSlot,
   onAdd,
+  onScan,
   onQty,
   onRemoveEntry,
 }) {
@@ -928,6 +984,9 @@ function Slot({
       <button style={S.addEntry} onClick={onAdd}>
         + food
       </button>
+      <button style={S.addEntry} onClick={onScan}>
+        + scan barcode
+      </button>
     </div>
   );
 }
@@ -964,6 +1023,229 @@ function FoodPicker({ foods, onPick, onClose }) {
             </button>
           ))}
           {list.length === 0 && <div style={S.empty}>no match</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Open Food Facts barcode lookup (no key, no auth) ---------- */
+async function lookupOpenFoodFacts(barcode) {
+  const res = await fetch(
+    `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`
+  );
+  const data = await res.json();
+  // OFF returns HTTP 200 even for a miss — status must be checked, not the HTTP code.
+  if (data.status !== 1 || !data.product) return null;
+  const p = data.product;
+  const n = p.nutriments || {};
+  const hasServing = n["energy-kcal_serving"] != null;
+  return {
+    name: p.product_name || p.generic_name || `Scanned item (${barcode})`,
+    unit: hasServing ? p.serving_size || "serving" : "100g",
+    macros: hasServing
+      ? {
+          p: n.proteins_serving ?? 0,
+          f: n.fat_serving ?? 0,
+          c: n.carbohydrates_serving ?? 0,
+          cal: n["energy-kcal_serving"] ?? 0,
+        }
+      : {
+          p: n.proteins_100g ?? 0,
+          f: n.fat_100g ?? 0,
+          c: n.carbohydrates_100g ?? 0,
+          cal: n["energy-kcal_100g"] ?? 0,
+        },
+  };
+}
+
+/* camera modal — scans one barcode then hands it off. Loads the decoder
+   from a CDN at scan-time (not a project dependency), since Safari/iOS has
+   no native BarcodeDetector and this needs to work regardless of build setup. */
+function BarcodeScanner({ onDetected, onClose }) {
+  const videoRef = useRef(null);
+  const controlsRef = useRef(null);
+  const [status, setStatus] = useState("loading"); // loading | scanning | error
+  const [errMsg, setErrMsg] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { BrowserMultiFormatReader } = await import(
+          "https://esm.sh/@zxing/browser@0.2.1"
+        );
+        if (cancelled) return;
+        const reader = new BrowserMultiFormatReader();
+        setStatus("scanning");
+        const controls = await reader.decodeFromVideoDevice(
+          undefined, // default camera — prefers rear ("environment") on phones
+          videoRef.current,
+          (result, err, ctrls) => {
+            if (result) {
+              ctrls.stop();
+              onDetected(result.getText());
+            }
+          }
+        );
+        controlsRef.current = controls;
+      } catch (e) {
+        if (!cancelled) {
+          setStatus("error");
+          setErrMsg(e.message || "camera access failed");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controlsRef.current?.stop();
+    };
+  }, []);
+
+  return (
+    <div style={S.modalWrap} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+        <div style={S.modalHead}>
+          <strong style={{ fontSize: 13, letterSpacing: 1 }}>SCAN BARCODE</strong>
+          <button style={S.xBtn} onClick={onClose}>✕</button>
+        </div>
+        <div style={{ padding: 16 }}>
+          {status === "error" ? (
+            <div style={S.verifyBanner}>{errMsg || "Couldn't access the camera."}</div>
+          ) : (
+            <video
+              ref={videoRef}
+              muted
+              playsInline
+              style={{ width: "100%", borderRadius: 10, background: "#000" }}
+            />
+          )}
+          {status === "loading" && (
+            <div style={{ ...S.empty, padding: "10px 0" }}>loading scanner…</div>
+          )}
+          {status === "scanning" && (
+            <div style={{ ...S.empty, padding: "10px 0" }}>point the camera at a barcode</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* lookup + confirm — shown once a barcode is decoded. Reuses an existing
+   food by barcode if this item's been scanned before; otherwise looks it
+   up and lets you review/correct the macros before it's logged. */
+function ScanConfirm({ barcode, foods, onClose, onConfirm }) {
+  const existing = foods.find((x) => x.barcode === barcode);
+  const [status, setStatus] = useState(existing ? "ready" : "looking"); // looking | ready | notfound | error
+  const [errMsg, setErrMsg] = useState("");
+  const [draft, setDraft] = useState(
+    existing
+      ? { name: existing.name, unit: existing.unit, macros: existing.macros }
+      : null
+  );
+  const [qty, setQty] = useState(1);
+
+  useEffect(() => {
+    if (existing) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const found = await lookupOpenFoodFacts(barcode);
+        if (cancelled) return;
+        if (!found) {
+          setStatus("notfound");
+          return;
+        }
+        setDraft(found);
+        setStatus("ready");
+      } catch (e) {
+        if (!cancelled) {
+          setStatus("error");
+          setErrMsg(e.message || "lookup failed");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [barcode]);
+
+  const setMacro = (k, v) =>
+    setDraft((d) => ({ ...d, macros: { ...d.macros, [k]: parseFloat(v) || 0 } }));
+
+  return (
+    <div style={S.modalWrap} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+        <div style={S.modalHead}>
+          <strong style={{ fontSize: 13, letterSpacing: 1 }}>
+            {existing ? "LOG SCANNED ITEM" : "NEW SCANNED ITEM"}
+          </strong>
+          <button style={S.xBtn} onClick={onClose}>✕</button>
+        </div>
+
+        <div style={S.editorBody}>
+          {status === "looking" && <div style={S.empty}>looking up {barcode}…</div>}
+          {status === "notfound" && (
+            <div style={S.verifyBanner}>
+              No match for {barcode} in Open Food Facts. Add it manually via + food instead.
+            </div>
+          )}
+          {status === "error" && <div style={S.verifyBanner}>{errMsg}</div>}
+
+          {draft && (
+            <>
+              <label style={S.fLabel}>Name</label>
+              <input
+                value={draft.name}
+                onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                style={S.fInput}
+              />
+              <label style={S.fLabel}>Macros (per {draft.unit})</label>
+              <div style={S.macroGrid}>
+                {[
+                  ["Protein", "p"],
+                  ["Fat", "f"],
+                  ["Carbs", "c"],
+                  ["Calories", "cal"],
+                ].map(([lab, k]) => (
+                  <div key={k}>
+                    <span style={S.macroMini}>{lab}</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={draft.macros[k]}
+                      onChange={(e) => setMacro(k, e.target.value)}
+                      style={S.fInput}
+                    />
+                  </div>
+                ))}
+              </div>
+              <label style={S.fLabel}>Qty ({draft.unit})</label>
+              <input
+                type="number"
+                step="0.25"
+                value={qty}
+                onChange={(e) => setQty(parseFloat(e.target.value) || 1)}
+                style={S.fInput}
+              />
+            </>
+          )}
+        </div>
+
+        <div style={S.editorFoot}>
+          <div style={{ flex: 1 }} />
+          <button style={S.ghostBtn} onClick={onClose}>
+            cancel
+          </button>
+          {draft && (
+            <button
+              style={S.primaryBtn}
+              onClick={() => onConfirm({ draft, qty, existingId: existing?.id })}
+            >
+              log it
+            </button>
+          )}
         </div>
       </div>
     </div>
