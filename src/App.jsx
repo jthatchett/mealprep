@@ -1088,6 +1088,13 @@ function BarcodeScanner({ onDetected, onClose }) {
             }
           }
         );
+        if (cancelled) {
+          // modal was closed while the camera was still being allocated —
+          // release it immediately instead of leaving an orphaned stream
+          // holding the hardware (that's what breaks the *next* scan attempt).
+          controls.stop();
+          return;
+        }
         controlsRef.current = controls;
       } catch (e) {
         if (!cancelled) {
