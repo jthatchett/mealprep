@@ -1,1137 +1,1040 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import React, { useState, useEffect, useRef } from 'react';
+import { Dumbbell, Plus, Minus, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, Check, X, BarChart3, Calendar, Info, Flame, TrendingUp, Repeat, Home, Trash2, Edit3, Play, Menu, Settings, Archive, StickyNote, MoreVertical, Star } from 'lucide-react';
+import AuthGate from './AuthGate';
 
-/* ============================================================
-   MEAL PREP — SPINE (Foods + Plan)
-   Data model:
-     FOOD (atom): component OR recipe
-       - component: macros stored directly (per unit)
-       - recipe: holds ingredients[] (each = {foodId, qty}),
-                 yields N servings, macros = sum(ingredients)/servings
-     PHASE: macro-target profile (P/F/C/cal)
-     DAY: assigned phase + custom meal slots, each slot holds entries {foodId, qty}
-   Persistence: Supabase (app_data table) + localStorage session cache
-                + JSON export/import fallback
-   ============================================================ */
+// ============================================================================
+// EXERCISE LIBRARY
+// ============================================================================
+const EXERCISES = {
+  chest: [
+    { id: 'bench-bb', name: 'Barbell Bench Press', equipment: 'barbell' },
+    { id: 'bench-db-incline', name: 'Incline DB Press', equipment: 'dumbbell' },
+    { id: 'machine-chest', name: 'Machine Chest Press', equipment: 'machine' },
+    { id: 'cable-fly', name: 'Cable Fly', equipment: 'cable' },
+    { id: 'pushup', name: 'Push-Up', equipment: 'bodyweight' },
+    { id: 'dips-chest', name: 'Chest Dips', equipment: 'bodyweight' },
+  ],
+  horizontalBack: [
+    { id: 'row-bb', name: 'Barbell Row', equipment: 'barbell' },
+    { id: 'row-cable', name: 'Seated Cable Row', equipment: 'cable' },
+    { id: 'row-db', name: 'DB Row', equipment: 'dumbbell' },
+    { id: 'row-chest-db', name: 'Chest-Supported DB Row', equipment: 'dumbbell' },
+    { id: 'row-tbar-cs', name: 'T-Bar Row (chest-supported)', equipment: 'machine' },
+    { id: 'row-seal', name: 'Seal Row', equipment: 'barbell' },
+    { id: 'face-pull', name: 'Face Pull', equipment: 'cable' },
+  ],
+  verticalBack: [
+    { id: 'lat-pulldown', name: 'Lat Pulldown', equipment: 'cable' },
+    { id: 'pullup', name: 'Pull-Up', equipment: 'bodyweight' },
+    { id: 'chinup', name: 'Chin-Up', equipment: 'bodyweight' },
+    { id: 'pulldown-neutral', name: 'Neutral-Grip Pulldown', equipment: 'cable' },
+  ],
+  lowerBack: [
+    { id: 'rack-pull', name: 'Rack Pull', equipment: 'barbell' },
+    { id: 'good-morning', name: 'Good Morning', equipment: 'barbell' },
+    { id: 'heavy-sldl', name: 'Heavy SLDL (strength)', equipment: 'barbell' },
+    { id: 'back-extension-45', name: '45° Back Extension', equipment: 'machine' },
+    { id: 'reverse-hyper', name: 'Reverse Hyperextension', equipment: 'machine' },
+  ],
+  frontDelts: [
+    { id: 'ohp', name: 'Overhead Press', equipment: 'barbell' },
+    { id: 'db-press', name: 'DB Shoulder Press', equipment: 'dumbbell' },
+    { id: 'front-raise-db', name: 'DB Front Raise', equipment: 'dumbbell' },
+    { id: 'front-raise-cable', name: 'Cable Front Raise', equipment: 'cable' },
+    { id: 'front-raise-plate', name: 'Plate Front Raise', equipment: 'barbell' },
+  ],
+  sideDelts: [
+    { id: 'lateral-db', name: 'DB Lateral Raise', equipment: 'dumbbell' },
+    { id: 'lateral-cable', name: 'Cable Lateral Raise', equipment: 'cable' },
+    { id: 'lateral-machine', name: 'Machine Lateral Raise', equipment: 'machine' },
+    { id: 'lateral-leanaway', name: 'Lean-Away Cable Lateral', equipment: 'cable' },
+  ],
+  rearDelts: [
+    { id: 'rear-delt-fly', name: 'DB Rear Delt Fly', equipment: 'dumbbell' },
+    { id: 'reverse-pec-deck', name: 'Reverse Pec Deck', equipment: 'machine' },
+    { id: 'cable-reverse-fly', name: 'Cable Reverse Fly', equipment: 'cable' },
+    { id: 'rope-face-pull', name: 'Rope Face Pull', equipment: 'cable' },
+  ],
+  traps: [
+    { id: 'shrug-bb', name: 'Barbell Shrug', equipment: 'barbell' },
+    { id: 'shrug-db', name: 'DB Shrug', equipment: 'dumbbell' },
+    { id: 'shrug-cable', name: 'Cable Shrug', equipment: 'cable' },
+    { id: 'shrug-smith', name: 'Smith Shrug', equipment: 'smith' },
+  ],
+  biceps: [
+    { id: 'curl-bb', name: 'Barbell Curl', equipment: 'barbell' },
+    { id: 'curl-db', name: 'DB Curl', equipment: 'dumbbell' },
+    { id: 'curl-hammer', name: 'Hammer Curl', equipment: 'dumbbell' },
+    { id: 'curl-preacher', name: 'Preacher Curl', equipment: 'machine' },
+    { id: 'curl-cable', name: 'Cable Curl', equipment: 'cable' },
+  ],
+  triceps: [
+    { id: 'pushdown', name: 'Tricep Pushdown', equipment: 'cable' },
+    { id: 'overhead-tri', name: 'Overhead Tricep Ext.', equipment: 'cable' },
+    { id: 'cgbp', name: 'Close-Grip Bench', equipment: 'barbell' },
+    { id: 'skullcrusher', name: 'Skullcrusher', equipment: 'barbell' },
+    { id: 'dips-tri', name: 'Tricep Dips', equipment: 'bodyweight' },
+  ],
+  quads: [
+    { id: 'squat-bb', name: 'Back Squat', equipment: 'barbell' },
+    { id: 'squat-front', name: 'Front Squat', equipment: 'barbell' },
+    { id: 'leg-press', name: 'Leg Press', equipment: 'machine' },
+    { id: 'hack-squat', name: 'Hack Squat', equipment: 'machine' },
+    { id: 'leg-ext', name: 'Leg Extension', equipment: 'machine' },
+    { id: 'lunge', name: 'Walking Lunge', equipment: 'dumbbell' },
+  ],
+  hamstrings: [
+    { id: 'rdl', name: 'Romanian Deadlift', equipment: 'barbell' },
+    { id: 'leg-curl-seated', name: 'Seated Leg Curl', equipment: 'machine' },
+    { id: 'leg-curl-lying', name: 'Lying Leg Curl', equipment: 'machine' },
+    { id: 'stiff-leg-dl', name: 'Stiff Leg Deadlift', equipment: 'dumbbell' },
+  ],
+  glutes: [
+    { id: 'hip-thrust', name: 'Hip Thrust', equipment: 'barbell' },
+    { id: 'glute-bridge', name: 'Glute Bridge', equipment: 'barbell' },
+    { id: 'bss', name: 'Bulgarian Split Squat', equipment: 'dumbbell' },
+  ],
+  adductors: [
+    { id: 'adduction-cable', name: 'Cable Hip Adduction', equipment: 'cable' },
+    { id: 'adduction-machine', name: 'Machine Hip Adduction', equipment: 'machine' },
+    { id: 'copenhagen-plank', name: 'Copenhagen Side Plank', equipment: 'bodyweight' },
+  ],
+  abductors: [
+    { id: 'abduction-cable', name: 'Cable Hip Abduction', equipment: 'cable' },
+    { id: 'abduction-machine', name: 'Machine Hip Abduction', equipment: 'machine' },
+    { id: 'abduction-banded', name: 'Standing Banded Abduction', equipment: 'bodyweight' },
+  ],
+  calves: [
+    { id: 'calf-standing', name: 'Standing Calf Raise', equipment: 'machine' },
+    { id: 'calf-seated', name: 'Seated Calf Raise', equipment: 'machine' },
+  ],
+  abs: [
+    { id: 'hanging-leg-raise', name: 'Hanging Leg Raise', equipment: 'bodyweight' },
+    { id: 'cable-crunch', name: 'Cable Crunch', equipment: 'cable' },
+    { id: 'ab-wheel', name: 'Ab Wheel Rollout', equipment: 'bodyweight' },
+    { id: 'decline-situp', name: 'Decline Sit-Up', equipment: 'bodyweight' },
+    { id: 'plank', name: 'Plank', equipment: 'bodyweight' },
+    { id: 'russian-twist', name: 'Russian Twist', equipment: 'dumbbell' },
+    { id: 'pallof-press', name: 'Pallof Press', equipment: 'cable' },
+  ],
+};
 
-const STORE_KEY = "mealprep:v1";
-const SESSION_KEY = "mealprep:session";
-const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const MUSCLE_GROUPS = Object.keys(EXERCISES);
 
-/* ---------- Supabase config ---------- */
-const SUPABASE_URL = "https://wydrhwlmsbcwkhcmgiss.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_Ee-3RJPSBthf76B2x74aYA_SxL8S7BJ";
-
-/* ---------- Supabase REST helpers (no SDK — plain fetch) ---------- */
-async function sbAuthFetch(path, body) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: SUPABASE_ANON_KEY,
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.msg || data.error || "Auth error");
-  return data;
-}
-
-// request a 6-digit email OTP (creates user if doesn't exist)
-function sbRequestOtp(email) {
-  return sbAuthFetch("otp", { email, create_user: true });
-}
-
-// verify the 6-digit code, returns { access_token, refresh_token, user }
-function sbVerifyOtp(email, token) {
-  return sbAuthFetch("verify", { email, token, type: "email" });
-}
-
-// refresh an expired session
-function sbRefreshToken(refresh_token) {
-  return sbAuthFetch("token?grant_type=refresh_token", { refresh_token });
-}
-
-// fetch the user's app_data row
-async function sbLoadAppData(session) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/app_data?select=foods,phases,week&user_id=eq.${session.user.id}`,
-    {
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${session.access_token}`,
-      },
-    }
-  );
-  if (!res.ok) throw new Error("Failed to load data: " + res.status);
-  const rows = await res.json();
-  return rows[0] || null;
-}
-
-// upsert the user's app_data row
-async function sbSaveAppData(session, data) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates",
-    },
-    body: JSON.stringify({
-      user_id: session.user.id,
-      foods: data.foods,
-      phases: data.phases,
-      week: data.week,
-      updated_at: new Date().toISOString(),
-    }),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error("Failed to save data: " + res.status + " " + err);
-  }
-}
-
-/* ---------- seeded data (VERIFY = best-effort macros to correct) ---------- */
-// macros are PER the stated unit. verify:true means "Hayden: check this number".
-const SEED_FOODS = [
-  // proteins
-  f("chicken breast", "oz", 7.7, 0.6, 0, 36, true),
-  f("99/1 ground turkey", "oz", 6.5, 0.25, 0, 30, true),
-  f("96/4 ground beef", "oz", 6.4, 0.5, 0, 34, true),
-  f("93/7 ground beef", "oz", 6.0, 0.9, 0, 40, true),
-  f("egg whites", "tbsp", 1.7, 0, 0.05, 8.3, true),
-  f("nonfat Greek yogurt", "cup", 23, 0, 9, 130, true),
-  f("low-fat cottage cheese", "cup", 28, 2.5, 8, 163, true),
-  f("tuna packet", "packet", 17, 0.5, 2, 80, true),
-  f("OWYN protein powder", "scoop", 20, 1, 7, 140, true),
-  f("imitation crab", "oz", 2.5, 0.2, 3, 25, true),
-  f("salmon fillet", "fillet", 23, 13, 0, 210, true),
-  f("deli turkey", "oz", 5, 0.5, 1, 30, true),
-  // carbs
-  f("jasmine rice (cooked)", "cup", 4, 0.4, 45, 205, true),
-  f("white rice (cooked)", "cup", 4, 0.4, 45, 205, true),
-  f("brown rice (cooked)", "cup", 5, 2, 45, 215, true),
-  f("quinoa (cooked)", "cup", 8, 4, 39, 222, true),
-  f("rolled oats (dry)", "cup", 13, 5, 54, 307, true),
-  f("rice cake", "cake", 0.5, 0, 11, 50, true),
-  f("black beans", "cup", 15, 0.9, 40, 218, true),
-  f("banana", "medium", 1.3, 0.4, 27, 105, false),
-  f("whole wheat bread", "slice", 4, 1, 12, 80, true),
-  f("keto bread", "slice", 5.5, 1.75, 9.75, 67.5, true),
-  // veg
-  f("broccoli", "cup", 2.6, 0.3, 6, 31, false),
-  f("Brussels sprouts", "cup", 3, 0.3, 8, 38, false),
-  f("Normandy blend veg", "cup", 2, 0.5, 7, 40, true),
-  f("mushrooms", "oz", 0.9, 0.1, 0.9, 6, true),
-  f("red onion", "oz", 0.3, 0, 2.4, 11, true),
-  // fruit
-  f("mixed berries", "cup", 1, 0.5, 17, 70, true),
-  f("strawberries", "cup", 1, 0, 8, 45, false),
-  f("apple", "medium", 0.5, 0.3, 25, 95, false),
-  // fats / extras
-  f("avocado", "half", 2, 15, 9, 160, false),
-  f("PB2 / PB powder", "tbsp", 3, 1, 2, 30, true),
-  f("olive oil", "tbsp", 0, 14, 0, 120, false),
-  f("mixed nuts", "oz", 5, 14, 6, 170, true),
-  // --- added for seeded recipes (all VERIFY) ---
-  f("celery stalk", "stalk", 0.3, 0.1, 1.2, 6, true),
-  f("honey roasted almonds", "oz", 6, 15, 6, 170, true),
-  f("lite miracle whip", "tbsp", 0, 3, 2, 35, true),
-  f("dijon mustard", "tbsp", 0.3, 0.2, 1, 10, true),
-  f("white vinegar", "tbsp", 0, 0, 0, 3, true),
-  f("garbanzo beans", "cup", 15, 4, 45, 269, true),
-  f("great northern beans", "can", 21, 1, 54, 300, true),
-  f("salami slice", "slice", 2, 3, 0.3, 35, true),
-  f("iceberg lettuce", "head", 5, 1, 11, 50, true),
-  f("cucumber", "medium", 2, 0.3, 11, 45, true),
-  f("fat free mozzarella", "cup", 36, 0, 8, 160, true),
-  f("parmesan cheese", "cup", 38, 28, 4, 420, true),
-  f("deli turkey slice", "slice", 5, 0.5, 1, 30, true),
-  f("soy sauce", "tbsp", 1, 0, 1, 10, true),
-  f("cornstarch", "tbsp", 0, 0, 7, 30, true),
-  f("brown sugar substitute", "tbsp", 0, 0, 0, 0, true),
-  f("yellow onion", "medium", 1, 0, 11, 44, true),
-  f("minced garlic", "tbsp", 0.5, 0, 3, 15, true),
-  f("diced tomatoes", "can", 4, 0, 18, 80, true),
-  f("fat free half and half", "cup", 8, 0, 28, 160, true),
-  f("Pace salsa", "cup", 2, 0, 12, 50, true),
-  f("guacamole", "oz", 0.5, 4, 2, 45, true),
+// ============================================================================
+// EQUIPMENT CATEGORIES (for Home Gym Mode filtering)
+// ============================================================================
+// Each category maps a UI label to an internal equipment value used by the
+// exercise library. CALISTHENICS is the user-facing rename of 'bodyweight'.
+// SMITH has no library exercises yet — users can add customs tagged with this
+// equipment value (future work: seed library entries).
+const EQUIPMENT_CATEGORIES = [
+  { value: 'barbell',     label: 'BARBELL' },
+  { value: 'dumbbell',    label: 'DUMBBELL' },
+  { value: 'cable',       label: 'CABLE' },
+  { value: 'machine',     label: 'MACHINE' },
+  { value: 'smith',       label: 'SMITH' },
+  { value: 'bodyweight',  label: 'CALISTHENICS' },
 ];
+const ALL_EQUIPMENT_VALUES = EQUIPMENT_CATEGORIES.map(c => c.value);
 
-function f(name, unit, p, fat, c, cal, verify) {
-  return {
-    id: uid(),
-    name,
-    unit,
-    type: "component",
-    macros: { p, f: fat, c, cal },
-    verify: !!verify,
-    ingredients: [],
-    servings: 1,
-  };
-}
+// ============================================================================
+// SET TECHNIQUES — intensity techniques taggable per set in the workout logger.
+// Purely metadata (doesn't feed autoregulation math); `abbr` renders as a
+// compact badge in SetRow / WorkoutViewer, `label` renders in the picker modal.
+// ============================================================================
+const TECHNIQUES = {
+  dropset:   { label: 'Drop Set',        abbr: 'DS', color: 'text-orange-400 bg-orange-400/10 border-orange-400/40' },
+  myorep:    { label: 'Myo-Rep',         abbr: 'MR', color: 'text-fuchsia-400 bg-fuchsia-400/10 border-fuchsia-400/40' },
+  restpause: { label: 'Rest-Pause',      abbr: 'RP', color: 'text-indigo-400 bg-indigo-400/10 border-indigo-400/40' },
+  cluster:   { label: 'Cluster Set',     abbr: 'CL', color: 'text-teal-400 bg-teal-400/10 border-teal-400/40' },
+  partials:  { label: 'Partial Reps',    abbr: 'PR', color: 'text-yellow-400 bg-yellow-400/10 border-yellow-400/40' },
+  forced:    { label: 'Forced Reps',     abbr: 'FR', color: 'text-rose-400 bg-rose-400/10 border-rose-400/40' },
+  eccentric: { label: 'Slow Eccentric',  abbr: 'EC', color: 'text-lime-400 bg-lime-400/10 border-lime-400/40' },
+  occlusion: { label: 'Occlusion (BFR)', abbr: 'OC', color: 'text-purple-400 bg-purple-400/10 border-purple-400/40' },
+};
 
-/* build a recipe by resolving ingredient names against SEED_FOODS.
-   ings = [[name, qty], ...]. Unmatched names are skipped (logged). */
-function recipe(name, servings, ings) {
-  const ingredients = [];
-  for (const [iname, qty] of ings) {
-    const base = SEED_FOODS.find((x) => x.name === iname);
-    if (base) ingredients.push({ foodId: base.id, qty });
-  }
-  return {
-    id: uid(),
-    name,
-    unit: "serving",
-    type: "recipe",
-    macros: { p: 0, f: 0, c: 0, cal: 0 },
-    verify: true,
-    ingredients,
-    servings,
-  };
-}
-
-const SEED_RECIPES = [
-  recipe("Chicken Salad", 6, [
-    ["chicken breast", 36],
-    ["celery stalk", 6],
-    ["red onion", 8],
-    ["honey roasted almonds", 7],
-    ["nonfat Greek yogurt", 3],
-    ["lite miracle whip", 24],
-    ["dijon mustard", 4],
-    ["white vinegar", 2],
-  ]),
-  recipe("Broccoli Beef & Mushroom", 6, [
-    ["96/4 ground beef", 32],
-    ["broccoli", 6],
-    ["mushrooms", 32],
-    ["quinoa (cooked)", 2],
-    ["soy sauce", 16],
-    ["cornstarch", 3],
-    ["brown sugar substitute", 6],
-  ]),
-  recipe("Salsa Chicken", 6, [
-    ["chicken breast", 48],
-    ["minced garlic", 1],
-    ["Pace salsa", 4],
-    ["guacamole", 16],
-  ]),
-  recipe("White Chili", 6, [
-    ["99/1 ground turkey", 32],
-    ["yellow onion", 1],
-    ["minced garlic", 3],
-    ["great northern beans", 4],
-    ["diced tomatoes", 2],
-    ["fat free half and half", 1],
-    ["nonfat Greek yogurt", 1],
-    ["cornstarch", 4],
-  ]),
-];
-
-const SEED_ALL = [...SEED_FOODS, ...SEED_RECIPES];
-
-const SEED_PHASES = [
-  ph("Mini-cut",       155, 42, 226, 1902, "phase-minicut"),
-  ph("Cut",            155, 52, 316, 2352, "phase-cut"),
-  ph("Maintenance",    133, 71, 345, 2551, "phase-maintenance"),
-  ph("Bulk",           133, 78, 392, 2802, "phase-bulk"),
-  ph("Weekend/Refeed", 126, 90, 422, 3002, "phase-weekend"),
-];
-function ph(name, p, f, c, cal, stableId) {
-  return { id: stableId || uid(), name, target: { p, f, c, cal } };
-}
-
-function uid() {
-  return Math.random().toString(36).slice(2, 10);
-}
-
-/* ---------- macro math ---------- */
-// resolve a food's macros PER UNIT (recipes resolve to per-serving)
-function foodMacros(food, foods) {
-  if (food.type === "component") return food.macros;
-  // recipe: sum ingredients, divide by servings
-  const sum = { p: 0, f: 0, c: 0, cal: 0 };
-  for (const ing of food.ingredients) {
-    const base = foods.find((x) => x.id === ing.foodId);
-    if (!base) continue;
-    const m = foodMacros(base, foods);
-    sum.p += m.p * ing.qty;
-    sum.f += m.f * ing.qty;
-    sum.c += m.c * ing.qty;
-    sum.cal += m.cal * ing.qty;
-  }
-  const s = food.servings || 1;
-  return { p: sum.p / s, f: sum.f / s, c: sum.c / s, cal: sum.cal / s };
-}
-function scale(m, qty) {
-  return { p: m.p * qty, f: m.f * qty, c: m.c * qty, cal: m.cal * qty };
-}
-function addM(a, b) {
-  return { p: a.p + b.p, f: a.f + b.f, c: a.c + b.c, cal: a.cal + b.cal };
-}
-const ZERO = { p: 0, f: 0, c: 0, cal: 0 };
-const r1 = (n) => Math.round(n * 10) / 10;
-const r0 = (n) => Math.round(n);
-
-/* ---------- default day ---------- */
-function newDay(phaseId) {
-  return {
-    phaseId: phaseId || "phase-maintenance",
-    slots: [
-      { id: uid(), name: "Meal 1", entries: [] },
-      { id: uid(), name: "Meal 2", entries: [] },
-      { id: uid(), name: "Meal 3", entries: [] },
-      { id: uid(), name: "Meal 4", entries: [] },
+// ============================================================================
+// TEMPLATES
+// ============================================================================
+const TEMPLATES = {
+  'upper-lower-4': {
+    name: 'Upper / Lower (4 day)',
+    daysPerWeek: 4,
+    days: [
+      { name: 'Upper A', muscles: ['chest', 'horizontalBack', 'verticalBack', 'sideDelts', 'rearDelts', 'biceps', 'triceps'] },
+      { name: 'Lower A', muscles: ['quads', 'hamstrings', 'glutes', 'calves'] },
+      { name: 'Upper B', muscles: ['horizontalBack', 'verticalBack', 'chest', 'sideDelts', 'rearDelts', 'triceps', 'biceps'] },
+      { name: 'Lower B', muscles: ['hamstrings', 'quads', 'glutes', 'calves'] },
     ],
+  },
+  'ppl-6': {
+    name: 'Push / Pull / Legs (6 day)',
+    daysPerWeek: 6,
+    days: [
+      { name: 'Push A', muscles: ['chest', 'sideDelts', 'triceps'] },
+      { name: 'Pull A', muscles: ['horizontalBack', 'verticalBack', 'rearDelts', 'biceps'] },
+      { name: 'Legs A', muscles: ['quads', 'hamstrings', 'glutes', 'calves'] },
+      { name: 'Push B', muscles: ['chest', 'sideDelts', 'triceps'] },
+      { name: 'Pull B', muscles: ['horizontalBack', 'verticalBack', 'rearDelts', 'biceps'] },
+      { name: 'Legs B', muscles: ['hamstrings', 'quads', 'glutes', 'calves'] },
+    ],
+  },
+  'full-3': {
+    name: 'Full Body (3 day)',
+    daysPerWeek: 3,
+    days: [
+      { name: 'Full A', muscles: ['quads', 'chest', 'horizontalBack', 'sideDelts'] },
+      { name: 'Full B', muscles: ['hamstrings', 'verticalBack', 'chest', 'biceps', 'triceps'] },
+      { name: 'Full C', muscles: ['glutes', 'sideDelts', 'rearDelts', 'horizontalBack', 'calves'] },
+    ],
+  },
+};
+
+// ============================================================================
+// CUSTOM SPLIT STRUCTURES (Path B — priority-based meso builder)
+// ============================================================================
+// Base anatomical structures by days/week. Muscles filtered by user priorities,
+// starting sets adjusted by emphasize/maintain.
+const CUSTOM_SPLITS = {
+  3: [
+    { name: 'Full A', muscles: ['chest', 'horizontalBack', 'quads', 'sideDelts', 'biceps', 'calves'] },
+    { name: 'Full B', muscles: ['verticalBack', 'hamstrings', 'chest', 'rearDelts', 'triceps', 'glutes'] },
+    { name: 'Full C', muscles: ['quads', 'sideDelts', 'horizontalBack', 'biceps', 'triceps', 'calves'] },
+  ],
+  4: [
+    { name: 'Upper A', muscles: ['chest', 'horizontalBack', 'verticalBack', 'sideDelts', 'rearDelts', 'biceps', 'triceps'] },
+    { name: 'Lower A', muscles: ['quads', 'hamstrings', 'glutes', 'calves'] },
+    { name: 'Upper B', muscles: ['horizontalBack', 'verticalBack', 'chest', 'sideDelts', 'rearDelts', 'triceps', 'biceps'] },
+    { name: 'Lower B', muscles: ['hamstrings', 'quads', 'glutes', 'calves'] },
+  ],
+  5: [
+    { name: 'Upper A', muscles: ['chest', 'horizontalBack', 'verticalBack', 'sideDelts', 'rearDelts'] },
+    { name: 'Lower A', muscles: ['quads', 'hamstrings', 'glutes', 'calves'] },
+    { name: 'Arms+Delts', muscles: ['biceps', 'triceps', 'sideDelts', 'rearDelts'] },
+    { name: 'Upper B', muscles: ['horizontalBack', 'verticalBack', 'chest', 'sideDelts', 'rearDelts'] },
+    { name: 'Lower B', muscles: ['hamstrings', 'quads', 'glutes', 'calves'] },
+  ],
+  6: [
+    { name: 'Push A', muscles: ['chest', 'sideDelts', 'triceps'] },
+    { name: 'Pull A', muscles: ['horizontalBack', 'verticalBack', 'rearDelts', 'biceps'] },
+    { name: 'Legs A', muscles: ['quads', 'hamstrings', 'glutes', 'calves'] },
+    { name: 'Push B', muscles: ['chest', 'sideDelts', 'triceps'] },
+    { name: 'Pull B', muscles: ['horizontalBack', 'verticalBack', 'rearDelts', 'biceps'] },
+    { name: 'Legs B', muscles: ['hamstrings', 'quads', 'glutes', 'calves'] },
+  ],
+};
+
+// Starting set count per muscle adjusted by priority
+const getStartingSets = (muscle, priority) => {
+  const base = STARTING_SETS[muscle] || 2;
+  if (priority === 'emphasize') return base + 2; // higher MEV-ish floor for prioritized muscles
+  if (priority === 'maintain') return Math.max(1, base - 1);
+  return base; // template default (priority undefined)
+};
+
+// Filter custom split by priorities — drop ignored muscles, return clean day structure
+const buildCustomDays = (daysPerWeek, priorities) => {
+  const base = CUSTOM_SPLITS[daysPerWeek] || CUSTOM_SPLITS[4];
+  return base.map(day => ({
+    name: day.name,
+    muscles: day.muscles.filter(m => priorities[m] !== 'ignore'),
+  })).filter(day => day.muscles.length > 0); // drop fully-empty days
+};
+
+// ============================================================================
+// AUTOREGULATION LOGIC
+// ============================================================================
+// Target RIR drops 1 per week, deload jumps to 5 (spec says ~8 but that's unrealistically easy)
+const getTargetRIR = (weekNum, totalWeeks) => {
+  if (weekNum === totalWeeks) return 5; // deload
+  const start = 3;
+  return Math.max(0, start - (weekNum - 1));
+};
+
+// Starting sets per muscle group (MEV-ish defaults)
+const STARTING_SETS = {
+  chest: 2, horizontalBack: 2, verticalBack: 2, lowerBack: 2, biceps: 2, triceps: 2,
+  frontDelts: 1, sideDelts: 2, rearDelts: 2, traps: 2,
+  quads: 2, hamstrings: 2, glutes: 2,
+  adductors: 1, abductors: 2,
+  calves: 2, abs: 2,
+};
+
+// Per-session set count from total weekly sets (split across training days for that muscle)
+const splitSetsAcrossDays = (totalSets, dayCount) => {
+  if (dayCount === 0) return 0;
+  return Math.ceil(totalSets / dayCount);
+};
+
+// Progression algorithm: returns next week's set count for a muscle
+const progressSets = (currentSets, feedback) => {
+  if (!feedback) return currentSets + 1; // default add 1 if no feedback
+  const { pump, soreness, workload } = feedback;
+  // High soreness or too-hard workload = hold or reduce
+  if (soreness >= 3 || workload === 'too-hard') return currentSets;
+  if (soreness === 2 && workload === 'manageable') return currentSets + 1;
+  if (pump >= 2 && soreness === 0 && workload === 'too-easy') return currentSets + 2; // clear MEV-undershoot only
+  return currentSets + 1;
+};
+
+// Weight progression suggestion based on RIR delta. `assisted` flips the sign:
+// on an assist machine the number on the stack is counterbalance, not
+// resistance, so "too easy" means LESS assist (weight down), not more.
+const suggestWeightChange = (avgActualRIR, targetRIR, assisted = false) => {
+  const delta = avgActualRIR - targetRIR;
+  const sign = assisted ? -1 : 1;
+  if (delta >= 2) return {
+    direction: sign > 0 ? 'up' : 'down', pct: sign * 0.075,
+    msg: assisted ? 'Too easy — reduce assist ~5-10%' : 'Weight too light — increase ~5-10%'
   };
-}
+  if (delta <= -1.5) return {
+    direction: sign > 0 ? 'down' : 'up', pct: sign * -0.05,
+    msg: assisted ? 'Too hard — add assist ~5%' : 'Weight too heavy — decrease ~5%'
+  };
+  if (delta >= 1) return {
+    direction: sign > 0 ? 'up' : 'down', pct: sign * 0.025,
+    msg: assisted ? 'Slightly easy — small assist reduction' : 'Slightly light — small bump'
+  };
+  return { direction: 'hold', pct: 0, msg: 'On target — hold weight, add reps' };
+};
 
-/* ============================================================
-   AUTH SCREEN — email OTP (no redirect needed, iframe-safe)
-   ============================================================ */
-function AuthScreen({ onAuthed }) {
-  const [stage, setStage] = useState("email"); // "email" | "code"
-  const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
+// ============================================================================
+// TECHNIQUE VOLUME CREDITING
+// ============================================================================
+// Which bucket each tagged technique falls into. Untagged rows, and any
+// technique not listed here (cluster/partials/forced/eccentric/occlusion),
+// are pure modifiers on an otherwise-normal set — full 1.0 credit, and a
+// valid read on that week's calibration. Only techniques that spawn genuine
+// extra/bonus rows at abbreviated rest get bucketed as continuations:
+//   'continuation-flat'  → flat 0.5 credit per row, no decay (myo-rep mini-sets,
+//                          rest-pause continuations — same weight as the set
+//                          before them, so nothing to taper)
+//   'continuation-decay' → 2/3-retention decay per row (drop sets — weight
+//                          actually changes, and physically tends to be a
+//                          single drop rather than a long chain)
+// Continuation rows are excluded from RIR-averaging and from anchoring next
+// week's weight: they're reached via abbreviated rest, not full recovery, so
+// their RIR doesn't answer "was the working weight calibrated correctly."
+const TECHNIQUE_CLASS = {
+  myorep: 'continuation-flat',
+  restpause: 'continuation-flat',
+  dropset: 'continuation-decay',
+};
+const DECAY_RETENTION = 2 / 3; // dropset: 0.5, 0.333, 0.222… → asymptotes at +1.5 total, same ceiling as the flat rule's typical 3-mini-set case
 
-  const sendCode = async () => {
-    if (!email.trim()) return;
-    setBusy(true);
-    setErr("");
-    try {
-      await sbRequestOtp(email.trim());
-      setStage("code");
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
+// Walks one exercise's logged sets in order and annotates each row with:
+//  - creditedValue: what it's worth toward next week's set count (1.0 for a
+//    calibration set, 0.5 or decaying-0.5 for a continuation row)
+//  - isCalibration: whether its RIR/weight is a valid calibration read
+// A continuation streak (consecutive rows tagged with the SAME technique)
+// decays or stays flat together; it resets the moment an untagged row or a
+// different technique appears — so two unrelated drop sets on the same
+// exercise each get their own fresh ramp, not a discounted continuation of
+// each other's.
+const analyzeSets = (sets) => {
+  let streakTechnique = null;
+  let streakPosition = 0;
+  return sets.map(set => {
+    const cls = set.technique ? TECHNIQUE_CLASS[set.technique] : undefined;
+    if (!cls) {
+      streakTechnique = null;
+      streakPosition = 0;
+      return { set, creditedValue: 1.0, isCalibration: true };
     }
-  };
+    streakPosition = (set.technique === streakTechnique) ? streakPosition + 1 : 1;
+    streakTechnique = set.technique;
+    const creditedValue = cls === 'continuation-flat'
+      ? 0.5
+      : 0.5 * Math.pow(DECAY_RETENTION, streakPosition - 1);
+    return { set, creditedValue, isCalibration: false };
+  });
+};
 
-  const verify = async () => {
-    if (!code.trim()) return;
-    setBusy(true);
-    setErr("");
-    try {
-      const session = await sbVerifyOtp(email.trim(), code.trim());
-      onAuthed(session);
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
+// ============================================================================
+// STORAGE HELPERS
+// ============================================================================
+const STORAGE_KEY = 'meso:active';
+const ARCHIVE_KEY = 'meso:archive';
+const PREFS_KEY = 'app:prefs';
+const CUSTOM_EX_KEY = 'customExercises';
+const VIDEOS_KEY = 'exerciseVideos'; // user-configured video URLs by exercise id (library or custom)
+const NOTES_KEY = 'exerciseNotes'; // user-configured notes by exercise id (equipment settings, technique cues)
 
-  return (
-    <div style={{...S.app, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
-      <Style />
-      <div style={{...S.modal, maxWidth: 360, position:"static", margin:"0 16px"}}>
-        <div style={{padding: 24}}>
-          <div style={S.brand}>
-            <span style={S.brandMark}>◢</span>
-            <div>
-              <div style={S.brandName}>MEAL&nbsp;PREP</div>
-              <div style={S.brandSub}>sign in to sync your data</div>
-            </div>
-          </div>
+// ============================================================================
+// SCHEMA VERSIONING & MIGRATIONS
+// ============================================================================
+// Persisted data is stored as { _version, data }. When a stored shape changes,
+// bump SCHEMA_VERSIONS[kind] AND add a migration function in MIGRATIONS[kind].
+// Example: MIGRATIONS.meso[2] = (data) => ({ ...data, restDays: [] });
+// Legacy unwrapped data is auto-treated as v1 on first load.
+const SCHEMA_VERSIONS = {
+  meso: 1,
+  prefs: 1,
+  customExercises: 1,
+  exerciseVideos: 1,
+  exerciseNotes: 1,
+  archive: 1,
+};
 
-          {stage === "email" ? (
-            <>
-              <label style={S.fLabel}>Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                style={{...S.fInput, marginBottom: 12}}
-                onKeyDown={(e) => e.key === "Enter" && sendCode()}
-                autoFocus
-              />
-              <button style={{...S.primaryBtn, width:"100%"}} onClick={sendCode} disabled={busy}>
-                {busy ? "sending…" : "send login code"}
-              </button>
-            </>
-          ) : (
-            <>
-              <p style={{...S.note, marginBottom: 12}}>
-                Check <strong style={{color:"#e8efe9"}}>{email}</strong> for a 6-digit code.
-              </p>
-              <label style={S.fLabel}>Code</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="123456"
-                style={{...S.fInput, marginBottom: 12, letterSpacing: 4, fontSize: 18, textAlign:"center"}}
-                onKeyDown={(e) => e.key === "Enter" && verify()}
-                autoFocus
-              />
-              <button style={{...S.primaryBtn, width:"100%", marginBottom: 8}} onClick={verify} disabled={busy}>
-                {busy ? "verifying…" : "verify & sign in"}
-              </button>
-              <button style={{...S.ghostBtn, width:"100%"}} onClick={() => setStage("email")}>
-                use a different email
-              </button>
-            </>
-          )}
+const MIGRATIONS = {
+  meso: {},
+  prefs: {},
+  customExercises: {},
+  exerciseVideos: {},
+  exerciseNotes: {},
+  archive: {},
+};
 
-          {err && <div style={{...S.verifyBanner, marginTop: 12}}>{err}</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
+const KIND_BY_KEY = {
+  [STORAGE_KEY]: 'meso',
+  [PREFS_KEY]: 'prefs',
+  [CUSTOM_EX_KEY]: 'customExercises',
+  [VIDEOS_KEY]: 'exerciseVideos',
+  [NOTES_KEY]: 'exerciseNotes',
+};
 
-/* ============================================================
-   APP
-   ============================================================ */
-export default function App() {
-  const [tab, setTab] = useState("plan");
-  const [store, setStore] = useState(null); // { foods, phases, week } — atomic
+const isWrapped = (obj) =>
+  obj && typeof obj === 'object' && '_version' in obj && 'data' in obj;
+
+const runMigrations = (kind, wrapped) => {
+  let version = wrapped._version || 1;
+  let data = wrapped.data;
+  const target = SCHEMA_VERSIONS[kind] || 1;
+  while (version < target) {
+    const fn = MIGRATIONS[kind]?.[version + 1];
+    if (!fn) break;
+    data = fn(data);
+    version++;
+  }
+  return data;
+};
+
+// ============================================================================
+// COMPONENTS
+// ============================================================================
+
+const FONT_STYLE = `
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Archivo:wght@400;500;600;800;900&display=swap');
+  body, html, #root { font-family: 'Archivo', sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+`;
+
+function AppInner({ trainingData, saveTrainingData, signOut }) {
+  const [view, setView] = useState('home');
+  const [meso, setMeso] = useState(null);
+  const [prefs, setPrefs] = useState({ units: 'lbs', homeGym: false, equipment: [] });
+  const [activeWorkout, setActiveWorkout] = useState(null);
+  const [customExercises, setCustomExercises] = useState({});
+  const [exerciseVideos, setExerciseVideos] = useState({});
+  const [exerciseNotes, setExerciseNotes] = useState({});
+  const [archive, setArchive] = useState([]); // completed/replaced mesocycles, newest first
   const [loaded, setLoaded] = useState(false);
-  const [activeDay, setActiveDay] = useState("Mon");
-  const [debugLog, setDebugLog] = useState([]);
-  const [session, setSession] = useState(null);     // null = not yet checked
-  const [sessionChecked, setSessionChecked] = useState(false);
-  const [loadError, setLoadError] = useState(false); // true = load threw; block saving so we can't overwrite good data
-  const [reloadNonce, setReloadNonce] = useState(0); // bump to retry a failed load
-  const [saveError, setSaveError] = useState(null);  // last save error message, shown as a banner
-  const dbg = (msg) => setDebugLog((prev) => [`${new Date().toLocaleTimeString()}: ${msg}`, ...prev.slice(0, 19)]);
 
-  // restore session from local storage on mount (per-device, just holds the token)
+  // trainingData is the full blob: { meso, prefs, customExercises, exerciseVideos, archive }
+  // each in { _version, data } shape, already fetched by AuthGate.
   useEffect(() => {
-    (async () => {
-      try {
-        const raw = localStorage.getItem(SESSION_KEY);
-        if (raw) {
-          const sess = JSON.parse(raw);
-          // try refresh — tokens expire after ~1hr
-          try {
-            const refreshed = await sbRefreshToken(sess.refresh_token);
-            const newSession = { access_token: refreshed.access_token, refresh_token: refreshed.refresh_token, user: refreshed.user || sess.user };
-            localStorage.setItem(SESSION_KEY, JSON.stringify(newSession));
-            setSession(newSession);
-          } catch {
-            setSession(sess); // use as-is, may still be valid
-          }
-        }
-      } catch (e) {
-        /* no session yet */
-      } finally {
-        setSessionChecked(true);
-      }
-    })();
-  }, []);
+    const unwrap = (kind, wrapped) => {
+      if (!wrapped) return null;
+      const w = isWrapped(wrapped) ? wrapped : { _version: 1, data: wrapped };
+      return runMigrations(kind, w);
+    };
 
-  const handleAuthed = async (rawSession) => {
-    const sess = { access_token: rawSession.access_token, refresh_token: rawSession.refresh_token, user: rawSession.user };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
-    setSession(sess);
-  };
+    const m = unwrap('meso', trainingData?.meso);
+    const p = unwrap('prefs', trainingData?.prefs);
+    const ce = unwrap('customExercises', trainingData?.customExercises);
+    const ev = unwrap('exerciseVideos', trainingData?.exerciseVideos);
+    const en = unwrap('exerciseNotes', trainingData?.exerciseNotes);
+    const ar = unwrap('archive', trainingData?.archive);
 
-  const signOut = async () => {
-    // Flush any pending (debounced) edit before tearing down. Without this, the 400ms save
-    // timer is cancelled by the teardown below, silently dropping the user's last edit.
-    try {
-      if (loaded && store && session && !loadError) {
-        await sbSaveAppData(session, store);
-      }
-    } catch (e) {
-      dbg("final save on signOut FAILED: " + e.message);
-      const proceed = window.confirm(
-        "Your most recent changes could not be saved. Sign out anyway and lose them?"
-      );
-      if (!proceed) return; // abort sign-out so the user can stay and retry
-    }
-    localStorage.removeItem(SESSION_KEY);
-    setSession(null);
-    setStore(null);
-    setLoaded(false);
-    setLoadError(false);
-    setSaveError(null);
-  };
+    if (m) setMeso(m);
+    if (p) setPrefs(p);
+    if (ce) setCustomExercises(ce);
+    if (ev) setExerciseVideos(ev);
+    if (en) setExerciseNotes(en);
+    if (ar) setArchive(ar);
+    setLoaded(true);
+  }, [trainingData]);
 
-  // retry a failed load without a full page reload
-  const retryLoad = () => { setLoadError(false); setReloadNonce((n) => n + 1); };
+  // Single source of truth for the saveTrainingData blob shape — used by both
+  // the debounced routine-edit save below and completeWorkout's immediate
+  // save further down, so the two paths can't drift out of sync as fields
+  // get added later. Accepts overrides since a caller with a value that
+  // hasn't finished propagating into state yet (e.g. completeWorkout's
+  // `updated` meso, right after calling setMeso but before the re-render)
+  // needs to save that value directly rather than the stale closure read.
+  const buildSaveBlob = (overrides = {}) => ({
+    meso: { _version: SCHEMA_VERSIONS.meso, data: overrides.meso ?? meso },
+    prefs: { _version: SCHEMA_VERSIONS.prefs, data: overrides.prefs ?? prefs },
+    customExercises: { _version: SCHEMA_VERSIONS.customExercises, data: overrides.customExercises ?? customExercises },
+    exerciseVideos: { _version: SCHEMA_VERSIONS.exerciseVideos, data: overrides.exerciseVideos ?? exerciseVideos },
+    exerciseNotes: { _version: SCHEMA_VERSIONS.exerciseNotes, data: overrides.exerciseNotes ?? exerciseNotes },
+    archive: { _version: SCHEMA_VERSIONS.archive, data: overrides.archive ?? archive },
+  });
 
-  // convenience destructure — safe because render is gated on loaded+store
-  const foods  = store ? store.foods  : SEED_ALL;
-  const phases = store ? store.phases : SEED_PHASES;
-  const week   = store ? store.week   : null;
-
-  const setFoods  = (val) => setStore((s) => ({ ...s, foods:  typeof val === "function" ? val(s.foods)  : val }));
-  const setPhases = (val) => setStore((s) => ({ ...s, phases: typeof val === "function" ? val(s.phases) : val }));
-  const setWeek   = (val) => setStore((s) => ({ ...s, week:   typeof val === "function" ? val(s.week)   : val }));
-
-  // load — from Supabase, once session is available
+  // Single atomic save: combine all sub-states into one jsonb blob
+  // and upsert to training_data. Debounced so rapid set-by-set logging
+  // doesn't fire a network request on every keystroke.
   useEffect(() => {
-    if (!session) return;
-    let cancelled = false;
-    (async () => {
-      setLoadError(false);
-      const seedWeek = () => {
-        const w = {};
-        DAYS.forEach((d) => (w[d] = newDay("phase-maintenance")));
-        return w;
-      };
-      const nameToStableId = {
-        "Mini-cut": "phase-minicut",
-        "Cut": "phase-cut",
-        "Maintenance": "phase-maintenance",
-        "Bulk": "phase-bulk",
-        "Weekend/Refeed": "phase-weekend",
-      };
-      try {
-        const row = await sbLoadAppData(session);
-        if (cancelled) return;
-        dbg("supabase load: " + (row ? "found row" : "no row yet — new user"));
-        if (row && row.foods) {
-          const loadedFoods = (row.foods && row.foods.length) ? row.foods : SEED_ALL;
+    if (!loaded) return;
+    const handle = setTimeout(() => {
+      saveTrainingData(buildSaveBlob());
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [meso, prefs, customExercises, exerciseVideos, exerciseNotes, archive, loaded]);
 
-          // migrate phase ids to stable
-          let loadedPhases = (row.phases && row.phases.length) ? row.phases : SEED_PHASES;
-          const idRemap = {};
-          loadedPhases = loadedPhases.map((p) => {
-            const stableId = nameToStableId[p.name];
-            if (stableId && p.id !== stableId) { idRemap[p.id] = stableId; return { ...p, id: stableId }; }
-            return p;
-          });
 
-          let loadedWeek = row.week && Object.keys(row.week).length ? row.week : seedWeek();
-          if (Object.keys(idRemap).length > 0) {
-            const patched = {};
-            for (const [day, val] of Object.entries(loadedWeek)) {
-              patched[day] = { ...val, phaseId: idRemap[val.phaseId] || val.phaseId };
-            }
-            loadedWeek = patched;
-          }
-
-          setStore({ foods: loadedFoods, phases: loadedPhases, week: loadedWeek });
-        } else {
-          // new user (query SUCCEEDED, returned no row) — seed defaults, saved on first change
-          setStore({ foods: SEED_ALL, phases: SEED_PHASES, week: seedWeek() });
-        }
-        setLoaded(true); // only mark loaded on a SUCCESSFUL read — this is what enables saving
-      } catch (e) {
-        if (cancelled) return;
-        // Load FAILED (network / permission / transient). Deliberately do NOT seed defaults
-        // and do NOT setLoaded(true): doing so would let the save effect fire and overwrite
-        // the real DB row with seed data. Surface a recoverable error instead.
-        dbg("LOAD FAILED: " + e.message);
-        setLoadError(true);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [session, reloadNonce]);
-
-  // save — to Supabase, triggered by store changes (debounced)
-  useEffect(() => {
-    if (!loaded || !store || !session || loadError) return;
-    const t = setTimeout(() => {
-      sbSaveAppData(session, store)
-        .then(() => { dbg("saved to supabase — foods:" + store.foods?.length + " phases:" + store.phases?.length); setSaveError(null); })
-        .catch((e) => { dbg("SAVE FAILED: " + e.message); setSaveError(e.message || "save failed"); });
-    }, 400);
-    return () => clearTimeout(t);
-  }, [store, loaded, session, loadError]);
-
-  // not checked session yet — brief splash
-  if (!sessionChecked) {
-    return (
-      <div style={{...S.app, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
-        <Style />
-        <div style={{color:"#46e6a0", fontFamily:"'Archivo',sans-serif", letterSpacing:2, fontSize:13}}>LOADING...</div>
-      </div>
-    );
-  }
-
-  // not signed in — show auth screen
-  if (!session) {
-    return <AuthScreen onAuthed={handleAuthed} />;
-  }
-
-  // load failed — recoverable error screen. Critical: this must come BEFORE the SYNCING
-  // gate, because on load failure `loaded` stays false and we'd otherwise hang on SYNCING.
-  if (loadError) {
-    return (
-      <div style={{...S.app, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh", padding:16}}>
-        <Style />
-        <div style={{...S.modal, maxWidth: 380, position:"static"}}>
-          <div style={{padding: 24, textAlign:"center"}}>
-            <div style={{fontSize: 28, marginBottom: 8}}>⚠</div>
-            <div style={{fontFamily:"'Archivo',sans-serif", fontWeight:800, letterSpacing:1, fontSize:15, marginBottom:8}}>
-              COULDN'T LOAD YOUR DATA
-            </div>
-            <p style={{...S.note, marginBottom: 16}}>
-              Your saved data was <strong style={{color:"#e8efe9"}}>not touched</strong> — the app just
-              couldn't reach it. Usually a network blip or an expired session.
-            </p>
-            <button style={{...S.primaryBtn, width:"100%", marginBottom: 8}} onClick={retryLoad}>
-              retry
-            </button>
-            <button style={{...S.ghostBtn, width:"100%"}} onClick={signOut}>
-              sign out
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // signed in but data not yet loaded from Supabase
-  if (!loaded || !store) {
-    return (
-      <div style={{...S.app, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
-        <Style />
-        <div style={{color:"#46e6a0", fontFamily:"'Archivo',sans-serif", letterSpacing:2, fontSize:13}}>SYNCING...</div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={S.app}>
-      <Style />
-      {saveError && (
-        <div style={S.saveBanner}>
-          <span>⚠ last change didn't save — {saveError}</span>
-          <button style={S.saveBannerBtn} onClick={() => setSaveError(null)}>dismiss</button>
-        </div>
-      )}
-      <header style={S.header}>
-        <div style={S.brand}>
-          <span style={S.brandMark}>◢</span>
-          <div>
-            <div style={S.brandName}>MEAL&nbsp;PREP</div>
-            <div style={S.brandSub}>{session.user?.email || "synced"}</div>
-          </div>
-          <div style={{flex:1}} />
-          <button style={{...S.ghostBtn, padding:"6px 10px", fontSize:11}} onClick={signOut}>
-            sign out
-          </button>
-        </div>
-        <nav style={S.nav}>
-          {[
-            ["plan", "Plan"],
-            ["foods", "Foods"],
-            ["phases", "Phases"],
-            ["data", "Data"],
-          ].map(([k, label]) => (
-            <button
-              key={k}
-              onClick={() => setTab(k)}
-              style={{ ...S.navBtn, ...(tab === k ? S.navBtnOn : {}) }}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-      </header>
-
-      <main style={S.main}>
-        {tab === "plan" && (
-          <Plan
-            week={week}
-            setWeek={setWeek}
-            foods={foods}
-            setFoods={setFoods}
-            phases={phases}
-            activeDay={activeDay}
-            setActiveDay={setActiveDay}
-          />
-        )}
-        {tab === "foods" && (
-          <Foods foods={foods} setFoods={setFoods} />
-        )}
-        {tab === "phases" && (
-          <Phases phases={phases} setPhases={setPhases} />
-        )}
-        {tab === "data" && (
-          <Data
-            foods={foods}
-            phases={phases}
-            week={week}
-            setFoods={setFoods}
-            setPhases={setPhases}
-            setWeek={setWeek}
-            debugLog={debugLog}
-          />
-        )}
-      </main>
-    </div>
-  );
-}
-
-/* ============================================================
-   PLAN
-   ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay }) {
-  const day = week[activeDay];
-  const phase = phases.find((p) => p.id === day.phaseId) || null;
-  const [picker, setPicker] = useState(null); // slotId being edited
-  const [scanningSlot, setScanningSlot] = useState(null); // slotId being scanned
-  const [pendingScan, setPendingScan] = useState(null); // { slotId, barcode }
-
-  const dayTotal = useMemo(() => {
-    let t = ZERO;
-    for (const slot of day.slots) {
-      for (const e of slot.entries) {
-        const food = foods.find((x) => x.id === e.foodId);
-        if (!food) continue;
-        t = addM(t, scale(foodMacros(food, foods), e.qty));
-      }
-    }
-    return t;
-  }, [day, foods]);
-
-  const update = (fn) => {
-    const copy = JSON.parse(JSON.stringify(week));
-    fn(copy[activeDay]);
-    setWeek(copy);
-  };
-
-  const moveSlot = (si, dir) => {
-    const target = si + dir;
-    if (target < 0 || target >= day.slots.length) return;
-    update((d) => {
-      const slots = [...d.slots];
-      const [moved] = slots.splice(si, 1);
-      slots.splice(target, 0, moved);
-      d.slots = slots;
+  // Delete a custom exercise globally: clean up customExercises + exerciseVideos
+  // (callers may also need to clean local refs — MesoSetup does selectedExercises cleanup)
+  const deleteCustomExercise = (exerciseId, muscle) => {
+    setCustomExercises({
+      ...customExercises,
+      [muscle]: (customExercises[muscle] || []).filter(e => e.id !== exerciseId),
     });
+    const nextVideos = { ...exerciseVideos };
+    delete nextVideos[exerciseId];
+    setExerciseVideos(nextVideos);
   };
 
-  return (
-    <div>
-      {/* day tabs */}
-      <div style={S.dayRow}>
-        {DAYS.map((d) => (
-          <button
-            key={d}
-            onClick={() => setActiveDay(d)}
-            style={{
-              ...S.dayTab,
-              ...(d === activeDay ? S.dayTabOn : {}),
-            }}
-          >
-            {d}
-          </button>
-        ))}
-      </div>
-
-      {/* phase + target dashboard */}
-      <div style={S.dash}>
-        <div style={S.dashHead}>
-          <label style={S.dashLabel}>PHASE</label>
-          <select
-            key={day.phaseId || "none"}
-            value={day.phaseId || ""}
-            onChange={(e) => update((d) => (d.phaseId = e.target.value || null))}
-            style={S.select}
-          >
-            <option value="">— none —</option>
-            {phases.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <MacroBars total={dayTotal} target={phase ? phase.target : null} />
-      </div>
-
-      {/* meal slots — reorderable via up/down */}
-      {day.slots.map((slot, si) => (
-        <Slot
-          key={slot.id}
-          slot={slot}
-          foods={foods}
-          isFirst={si === 0}
-          isLast={si === day.slots.length - 1}
-          onMoveUp={() => moveSlot(si, -1)}
-          onMoveDown={() => moveSlot(si, 1)}
-          onRename={(name) =>
-            update((d) => (d.slots[si].name = name))
-          }
-          onRemoveSlot={() =>
-            update((d) => d.slots.splice(si, 1))
-          }
-          onAdd={() => setPicker(slot.id)}
-          onScan={() => setScanningSlot(slot.id)}
-          onQty={(ei, qty) =>
-            update((d) => (d.slots[si].entries[ei].qty = qty))
-          }
-          onRemoveEntry={(ei) =>
-            update((d) => d.slots[si].entries.splice(ei, 1))
-          }
-        />
-      ))}
-
-      <button
-        style={S.addSlot}
-        onClick={() =>
-          update((d) =>
-            d.slots.push({
-              id: uid(),
-              name: "Meal " + (d.slots.length + 1),
-              entries: [],
-            })
-          )
-        }
-      >
-        + add meal slot
-      </button>
-
-      {picker && (
-        <FoodPicker
-          foods={foods}
-          onClose={() => setPicker(null)}
-          onPick={(foodId) => {
-            update((d) => {
-              const slot = d.slots.find((s) => s.id === picker);
-              slot.entries.push({ foodId, qty: 1 });
-            });
-            setPicker(null);
-          }}
-        />
-      )}
-
-      {scanningSlot && (
-        <BarcodeScanner
-          onDetected={(barcode) => {
-            const slotId = scanningSlot;
-            setScanningSlot(null);
-            setPendingScan({ slotId, barcode });
-          }}
-          onClose={() => setScanningSlot(null)}
-        />
-      )}
-
-      {pendingScan && (
-        <ScanConfirm
-          barcode={pendingScan.barcode}
-          foods={foods}
-          onClose={() => setPendingScan(null)}
-          onConfirm={({ draft, qty, existingId }) => {
-            // existingId reuses a food already scanned before; otherwise this
-            // is the first time this barcode's been seen, so add it to the library.
-            const foodId = existingId || uid();
-            setFoods((prev) =>
-              existingId
-                ? prev.map((f) =>
-                    f.id === existingId
-                      ? { ...f, name: draft.name, unit: draft.unit, macros: draft.macros }
-                      : f
-                  )
-                : [
-                    ...prev,
-                    {
-                      id: foodId,
-                      name: draft.name,
-                      unit: draft.unit,
-                      type: "component",
-                      macros: draft.macros,
-                      verify: true, // scanned/best-effort, same as seeded foods — review later
-                      ingredients: [],
-                      servings: 1,
-                      barcode: pendingScan.barcode,
-                    },
-                  ]
-            );
-            update((d) => {
-              const slot = d.slots.find((s) => s.id === pendingScan.slotId);
-              if (slot) slot.entries.push({ foodId, qty });
-            });
-            setPendingScan(null);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-function MacroBars({ total, target }) {
-  const rows = [
-    ["Protein", "p", "#46e6a0"],
-    ["Fat", "f", "#ffb454"],
-    ["Carbs", "c", "#5db4ff"],
-    ["Calories", "cal", "#ff5d7a"],
-  ];
-  return (
-    <div style={S.bars}>
-      {rows.map(([label, key, color]) => {
-        const have = total[key];
-        const goal = target ? target[key] : 0;
-        const pct = goal ? Math.min(100, (have / goal) * 100) : 0;
-        const over = goal && have > goal;
-        return (
-          <div key={key} style={S.barRow}>
-            <div style={S.barTop}>
-              <span style={S.barLabel}>{label}</span>
-              <span style={S.barNums}>
-                <b style={{ color }}>{key === "cal" ? r0(have) : r1(have)}</b>
-                {target && (
-                  <span style={S.barGoal}>
-                    {" "}
-                    / {key === "cal" ? r0(goal) : r1(goal)}
-                  </span>
-                )}
-              </span>
-            </div>
-            {target && (
-              <div style={S.barTrack}>
-                <div
-                  style={{
-                    ...S.barFill,
-                    width: pct + "%",
-                    background: over ? "#ff5d7a" : color,
-                  }}
-                />
-              </div>
-            )}
-          </div>
+  // Permanently swap an exercise across all future uncompleted days in the active meso.
+  // Called from WorkoutLogger when user chooses "rest of meso" swap.
+  const handleSwapPermanent = (oldExId, newEx) => {
+    if (!meso || !activeWorkout) return;
+    const updated = JSON.parse(JSON.stringify(meso));
+    const { weekIdx: curWeek, dayIdx: curDay } = activeWorkout;
+    updated.weeks.forEach((week, wIdx) => {
+      week.days.forEach((day, dIdx) => {
+        // Skip past weeks/days and already-completed days
+        if (wIdx < curWeek) return;
+        if (wIdx === curWeek && dIdx < curDay) return;
+        if (day.completed) return;
+        if (!day.exercises) return;
+        day.exercises = day.exercises.map(ex =>
+          ex.id === oldExId
+            ? { ...ex, id: newEx.id, name: newEx.name, equipment: newEx.equipment,
+                isCustom: newEx.isCustom || false, assisted: newEx.assisted || false,
+                videoUrl: newEx.videoUrl || null, weightNote: null }
+            : ex
         );
-      })}
-    </div>
-  );
-}
+      });
+    });
+    setMeso(updated);
+  };
 
-function Slot({
-  slot,
-  foods,
-  isFirst,
-  isLast,
-  onMoveUp,
-  onMoveDown,
-  onRename,
-  onRemoveSlot,
-  onAdd,
-  onScan,
-  onQty,
-  onRemoveEntry,
-}) {
-  const total = useMemo(() => {
-    let t = ZERO;
-    for (const e of slot.entries) {
-      const food = foods.find((x) => x.id === e.foodId);
-      if (food) t = addM(t, scale(foodMacros(food, foods), e.qty));
+  // Permanently delete an exercise from the current workout and every remaining
+  // instance of it in the active meso (REST OF MESO only — mirrors
+  // handleSwapPermanent's traversal exactly, removing instead of replacing).
+  const handleDeletePermanent = (exId) => {
+    if (!meso || !activeWorkout) return;
+    const updated = JSON.parse(JSON.stringify(meso));
+    const { weekIdx: curWeek, dayIdx: curDay } = activeWorkout;
+    updated.weeks.forEach((week, wIdx) => {
+      week.days.forEach((day, dIdx) => {
+        // Skip past weeks/days and already-completed days
+        if (wIdx < curWeek) return;
+        if (wIdx === curWeek && dIdx < curDay) return;
+        if (day.completed) return;
+        if (!day.exercises) return;
+        day.exercises = day.exercises.filter(ex => ex.id !== exId);
+        // Keep the muscle-summary label (WeekCard) in sync — drop any muscle
+        // that no longer has an exercise on this day. Gated to generated
+        // weeks: an ungenerated week's exercises array is empty because it
+        // hasn't been built yet, not because anything was removed, so
+        // deriving "remaining" muscles from it would wrongly zero the label.
+        // Ungenerated weeks get the same correction later, in generateNextWeek,
+        // once real exercises exist to derive from.
+        if (week.generated && day.muscles) {
+          const remainingMuscles = new Set(day.exercises.map(ex => ex.muscle));
+          day.muscles = day.muscles.filter(m => remainingMuscles.has(m));
+        }
+      });
+    });
+    setMeso(updated);
+  };
+
+  // Permanently add a brand-new exercise to this SAME day-slot going forward
+  // (REST OF MESO scope for the add panel's "meso" choice). Unlike swap/delete,
+  // there's no existing instance to search for across every day — a day-slot
+  // index (curDay) means the same day-type in every week (Push A is always
+  // days[0], etc, fixed at meso creation), so this indexes that slot directly
+  // instead of scanning every day. Includes curWeek's own curDay so a
+  // REST-OF-MESO add survives an early exit, same as swap/delete; that copy
+  // is superseded by WorkoutLogger's local state once the session completes.
+  const handleAddPermanent = (muscle, newEx) => {
+    if (!meso || !activeWorkout) return;
+    const updated = JSON.parse(JSON.stringify(meso));
+    const { weekIdx: curWeek, dayIdx: curDay } = activeWorkout;
+    updated.weeks.forEach((week, wIdx) => {
+      if (wIdx < curWeek) return;
+      const day = week.days[curDay];
+      if (!day) return;
+      if (day.completed) return;
+      if (!day.exercises) return; // ungenerated future week — nothing to append to yet
+      const startSets = getStartingSets(muscle, undefined);
+      const targetRIR = week.targetRIR ?? 2;
+      day.exercises.push({
+        id: newEx.id,
+        name: newEx.name,
+        muscle,
+        assisted: newEx.assisted || false,
+        videoUrl: newEx.videoUrl || null,
+        sets: Array(startSets).fill(null).map(() => ({
+          weight: 0, reps: null, rirTarget: targetRIR, rirActual: null, technique: null,
+        })),
+      });
+      if (day.muscles && !day.muscles.includes(muscle)) {
+        day.muscles = [...day.muscles, muscle];
+      }
+    });
+    setMeso(updated);
+  };
+
+  // Permanently apply a mid-session reorder to this SAME day-slot going forward.
+  // permutation[newPos] = originalPos, describing how today's exercises array was
+  // shuffled. Applied structurally by position (like handleAddPermanent, this
+  // indexes week.days[curDay] directly rather than searching every day) — a
+  // future day keeps whatever exercises it actually has, just resequenced the
+  // same way today's were. Skips any day whose exercise count has drifted from
+  // today's, since position-based correspondence isn't well-defined there.
+  const handleReorderPermanent = (permutation) => {
+    if (!meso || !activeWorkout || !permutation) return;
+    const updated = JSON.parse(JSON.stringify(meso));
+    const { weekIdx: curWeek, dayIdx: curDay } = activeWorkout;
+    updated.weeks.forEach((week, wIdx) => {
+      if (wIdx < curWeek) return;
+      const day = week.days[curDay];
+      if (!day) return;
+      if (day.completed) return;
+      if (!day.exercises || day.exercises.length !== permutation.length) return;
+      day.exercises = permutation.map(origIdx => day.exercises[origIdx]);
+    });
+    setMeso(updated);
+  };
+
+  // Star a muscle's growth-target exercise (meso-wide — one starred exercise
+  // per muscle, replacing any prior one). generateNextWeek reads this to
+  // decide which exercise absorbs that muscle's earned sets each session.
+  const handleSetGrowthTarget = (muscle, exerciseId) => {
+    if (!meso) return;
+    setMeso({ ...meso, growthTargets: { ...(meso.growthTargets || {}), [muscle]: exerciseId } });
+  };
+
+  // Clear a muscle's star entirely — future growth for that muscle falls
+  // back to RIR-headroom selection with no confirmation needed, since this
+  // is the more conservative direction (no emphasis being overwritten).
+  const handleClearGrowthTarget = (muscle) => {
+    if (!meso) return;
+    const next = { ...(meso.growthTargets || {}) };
+    delete next[muscle];
+    setMeso({ ...meso, growthTargets: next });
+  };
+
+  // Nuclear: wipe stored training data and reset in-memory state to defaults.
+  // Archive is intentionally preserved — this resets your ACTIVE setup, not
+  // your training history. (Existing Settings copy already promises this scope.)
+  const handleResetAllData = async () => {
+    const emptyPrefs = { units: 'lbs', homeGym: false, equipment: [] };
+    try {
+      await saveTrainingData({
+        meso: { _version: SCHEMA_VERSIONS.meso, data: null },
+        prefs: { _version: SCHEMA_VERSIONS.prefs, data: emptyPrefs },
+        customExercises: { _version: SCHEMA_VERSIONS.customExercises, data: {} },
+        exerciseVideos: { _version: SCHEMA_VERSIONS.exerciseVideos, data: {} },
+        exerciseNotes: { _version: SCHEMA_VERSIONS.exerciseNotes, data: {} },
+        archive: { _version: SCHEMA_VERSIONS.archive, data: archive },
+      });
+    } catch (e) { console.error('Reset failed:', e); }
+    setMeso(null);
+    setPrefs(emptyPrefs);
+    setCustomExercises({});
+    setExerciseVideos({});
+    setExerciseNotes({});
+    setView('home');
+  };
+
+  if (!loaded) {
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center">
+        <style>{FONT_STYLE}</style>
+        <div className="text-zinc-500 mono text-sm tracking-widest">LOADING…</div>
+      </div>
+    );
+  }
+
+  const startWorkout = (dayIdx, weekIdx) => {
+    setActiveWorkout({ dayIdx, weekIdx });
+    setView('workout');
+  };
+
+  const viewWorkout = (dayIdx, weekIdx) => {
+    setActiveWorkout({ dayIdx, weekIdx });
+    setView('workoutView');
+  };
+
+  // Folds this completed day's technique tags into meso.stickyTechniques so
+  // next week's prescription can carry them forward. Two different sticky
+  // rules, because "which technique" and "which literal set index" mean
+  // different things depending on the tag:
+  //  - Calibration-classified tags (untagged sets, and load-preserving tags
+  //    like cluster/partials/forced/eccentric/occlusion) get exactly 1.0
+  //    credit each, so this week's raw set index IS next week's credited
+  //    index — literal (day-slot, exercise, set-index) stickiness is correct.
+  //  - Continuation tags (myo-rep, rest-pause, drop-set) get <1.0 credit per
+  //    row, so next week's CREDITED set count is smaller than this week's
+  //    RAW set count. Sticking those by literal index silently drops tags
+  //    off the end the moment the prescribed row count shrinks relative to
+  //    the raw log — which is exactly what happens once a myo-rep block runs
+  //    more than ~2 mini-sets. Instead, continuation tags are sticky per
+  //    (day-slot, exercise) as a single ":continuation" entry — "this
+  //    exercise's non-calibration rows are myo-rep" — and get reapplied to
+  //    however many continuation-slot rows next week actually generates.
+  const reconcileStickyTechniques = (mesoData, dayIdx, exercises) => {
+    const sticky = { ...(mesoData.stickyTechniques || {}) };
+    exercises.forEach(ex => {
+      const contKey = `${dayIdx}:${ex.id}:continuation`;
+      let continuationTechnique = null;
+      ex.sets.forEach((set, setIdx) => {
+        const key = `${dayIdx}:${ex.id}:${setIdx}`;
+        if (set.technique && TECHNIQUE_CLASS[set.technique]) {
+          continuationTechnique = set.technique; // last-tagged wins if mixed
+        } else if (set.technique) {
+          sticky[key] = set.technique;
+        } else if (key in sticky) {
+          delete sticky[key];
+        }
+      });
+      if (continuationTechnique) sticky[contKey] = continuationTechnique;
+      else delete sticky[contKey];
+    });
+    return sticky;
+  };
+
+  const completeWorkout = (workoutLog) => {
+    const updated = { ...meso };
+    const wk = updated.weeks[activeWorkout.weekIdx];
+    wk.days[activeWorkout.dayIdx] = { ...wk.days[activeWorkout.dayIdx], ...workoutLog, completed: true };
+    updated.stickyTechniques = reconcileStickyTechniques(updated, activeWorkout.dayIdx, workoutLog.exercises);
+    // Check if week complete → generate next week prescription
+    const allDone = wk.days.every(d => d.completed);
+    if (allDone && activeWorkout.weekIdx < updated.weeks.length - 1) {
+      generateNextWeek(updated, activeWorkout.weekIdx);
     }
-    return t;
-  }, [slot, foods]);
-
-  return (
-    <div style={S.slot}>
-      <div style={S.slotHead}>
-        <div style={S.moveButtons}>
-          <button
-            style={{...S.moveBtn, opacity: isFirst ? 0.2 : 1}}
-            onClick={onMoveUp}
-            disabled={isFirst}
-            title="move up"
-          >▲</button>
-          <button
-            style={{...S.moveBtn, opacity: isLast ? 0.2 : 1}}
-            onClick={onMoveDown}
-            disabled={isLast}
-            title="move down"
-          >▼</button>
-        </div>
-        <input
-          value={slot.name}
-          onChange={(e) => onRename(e.target.value)}
-          style={S.slotName}
-        />
-        <span style={S.slotMacros}>
-          {r0(total.cal)} kcal · {r1(total.p)}P · {r1(total.f)}F · {r1(total.c)}C
-        </span>
-        <button style={S.xBtn} onClick={onRemoveSlot} title="remove slot">
-          ✕
-        </button>
-      </div>
-
-      {slot.entries.map((e, ei) => {
-        const food = foods.find((x) => x.id === e.foodId);
-        if (!food) return null;
-        const m = scale(foodMacros(food, foods), e.qty);
-        return (
-          <div key={ei} style={S.entry}>
-            <input
-              type="number"
-              step="0.25"
-              value={e.qty}
-              onChange={(ev) => onQty(ei, parseFloat(ev.target.value) || 0)}
-              style={S.qty}
-            />
-            <span style={S.entryUnit}>{food.unit}</span>
-            <span style={S.entryName}>
-              {food.name}
-              {food.verify && <span style={S.verifyDot} title="verify macros">●</span>}
-              {food.type === "recipe" && <span style={S.recipeTag}>recipe</span>}
-            </span>
-            <span style={S.entryMacros}>
-              {r0(m.cal)} · {r1(m.p)}P
-            </span>
-            <button style={S.xBtnSm} onClick={() => onRemoveEntry(ei)}>
-              ✕
-            </button>
-          </div>
-        );
-      })}
-
-      <button style={S.addEntry} onClick={onAdd}>
-        + food
-      </button>
-      <button style={S.addEntry} onClick={onScan}>
-        + scan barcode
-      </button>
-    </div>
-  );
-}
-
-function FoodPicker({ foods, onPick, onClose }) {
-  const [q, setQ] = useState("");
-  const list = foods
-    .filter((f) => f.name.toLowerCase().includes(q.toLowerCase()))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  return (
-    <div style={S.modalWrap} onClick={onClose}>
-      <div style={S.modal} onClick={(e) => e.stopPropagation()}>
-        <div style={S.modalHead}>
-          <input
-            autoFocus
-            placeholder="search foods…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            style={S.search}
-          />
-          <button style={S.xBtn} onClick={onClose}>
-            ✕
-          </button>
-        </div>
-        <div style={S.modalList}>
-          {list.map((f) => (
-            <button key={f.id} style={S.pickItem} onClick={() => onPick(f.id)}>
-              <span>
-                {f.name}
-                {f.verify && <span style={S.verifyDot}>●</span>}
-                {f.type === "recipe" && <span style={S.recipeTag}>recipe</span>}
-              </span>
-              <span style={S.pickUnit}>per {f.unit}</span>
-            </button>
-          ))}
-          {list.length === 0 && <div style={S.empty}>no match</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------- Open Food Facts barcode lookup (no key, no auth) ---------- */
-async function lookupOpenFoodFacts(barcode) {
-  const res = await fetch(
-    `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`
-  );
-  const data = await res.json();
-  // OFF returns HTTP 200 even for a miss — status must be checked, not the HTTP code.
-  if (data.status !== 1 || !data.product) return null;
-  const p = data.product;
-  const n = p.nutriments || {};
-  const hasServing = n["energy-kcal_serving"] != null;
-  return {
-    name: p.product_name || p.generic_name || `Scanned item (${barcode})`,
-    unit: hasServing ? p.serving_size || "serving" : "100g",
-    macros: hasServing
-      ? {
-          p: n.proteins_serving ?? 0,
-          f: n.fat_serving ?? 0,
-          c: n.carbohydrates_serving ?? 0,
-          cal: n["energy-kcal_serving"] ?? 0,
-        }
-      : {
-          p: n.proteins_100g ?? 0,
-          f: n.fat_100g ?? 0,
-          c: n.carbohydrates_100g ?? 0,
-          cal: n["energy-kcal_100g"] ?? 0,
-        },
+    // Completion is rare, discrete, and high-stakes — unlike routine edits
+    // (typing a note, adjusting a setting), it doesn't need the shared
+    // debounce. Save it right now rather than waiting for that timer, to
+    // close the window where a tab reload before the debounce fires could
+    // revert "done" back to "not done" — the logged numbers stay safe either
+    // way via the localStorage draft, but this protects the completion +
+    // feedback data itself. The debounced effect will also fire shortly
+    // after from the same setMeso call; the resulting duplicate save is
+    // harmless, just a bit redundant.
+    setMeso(updated);
+    saveTrainingData(buildSaveBlob({ meso: updated }));
+    setActiveWorkout(null);
+    setView('home');
   };
+
+  const generateNextWeek = (mesoData, completedWeekIdx) => {
+    const nextIdx = completedWeekIdx + 1;
+    const isDeload = nextIdx === mesoData.weeks.length - 1;
+    const completedWeek = mesoData.weeks[completedWeekIdx];
+    const nextWeek = mesoData.weeks[nextIdx];
+    const growthTargets = mesoData.growthTargets || {};
+
+    // Growth is decided per SESSION, per MUSCLE — not aggregated across the
+    // week — using that day's own feedback and that day's own credited sets
+    // only. A muscle trained twice a week (e.g. triceps on Push A and Push B)
+    // gets two fully independent decisions, each worth at most the normal
+    // +1/+2 progressSets range, rather than one blended decision applied to
+    // every exercise under that muscle regardless of which day it's on.
+    //
+    // Each earned delta lands on exactly ONE exercise in that session's
+    // roster for that muscle: the meso-wide starred exercise (growthTargets),
+    // if it's actually present that day; otherwise whichever exercise had the
+    // most RIR headroom (actual RIR furthest above its target — the most room
+    // to add more) among exercises with valid logged RIR. If nothing in the
+    // session has positive headroom, the least-negative one still gets it —
+    // growth doesn't silently vanish just because everyone was pushed hard.
+    const growthByDayMuscle = completedWeek.days.map(day => {
+      const dayExercises = day.exercises || [];
+      const musclesToday = [...new Set(dayExercises.map(ex => ex.muscle))];
+      const result = {};
+      musclesToday.forEach(muscle => {
+        const exercisesForMuscle = dayExercises.filter(ex => ex.muscle === muscle);
+        const sessionTotal = exercisesForMuscle.reduce((sum, ex) => {
+          const analyzed = analyzeSets(ex.sets);
+          return sum + analyzed.reduce((s, a) => s + a.creditedValue, 0);
+        }, 0);
+        const feedback = day.feedback?.[muscle];
+        const next = feedback ? progressSets(sessionTotal, feedback) : sessionTotal + 1;
+        const delta = next - sessionTotal; // always a clean 0, 1, or 2
+        if (delta <= 0) return;
+
+        const starredId = growthTargets[muscle];
+        let targetEx = starredId ? exercisesForMuscle.find(ex => ex.id === starredId) : null;
+        if (!targetEx) {
+          let bestHeadroom = -Infinity;
+          exercisesForMuscle.forEach(ex => {
+            const analyzed = analyzeSets(ex.sets);
+            const calibrationSets = analyzed.filter(a => a.isCalibration).map(a => a.set);
+            const actualRIRs = calibrationSets
+              .filter(s => s.rirActual !== null && s.rirActual !== undefined)
+              .map(s => s.rirActual);
+            if (actualRIRs.length === 0) return; // no valid RIR logged — not eligible
+            const avgActual = actualRIRs.reduce((a, b) => a + b, 0) / actualRIRs.length;
+            const target = calibrationSets[0]?.rirTarget ?? ex.sets[0]?.rirTarget ?? 3;
+            const headroom = avgActual - target;
+            if (headroom > bestHeadroom) { bestHeadroom = headroom; targetEx = ex; }
+          });
+          if (!targetEx) targetEx = exercisesForMuscle[0]; // last resort: nobody had RIR logged
+        }
+        result[muscle] = { exerciseId: targetEx.id, delta };
+      });
+      return result;
+    });
+
+    // Build next week
+    nextWeek.days.forEach((day, dIdx) => {
+      const prevDay = completedWeek.days[dIdx];
+      const dayGrowth = growthByDayMuscle[dIdx] || {};
+      day.exercises = prevDay.exercises?.map(prevEx => {
+        const muscle = prevEx.muscle;
+
+        // Split this exercise's logged sets into calibration rows (straight
+        // sets, and technique tags that don't change rest/load — cluster,
+        // partials, forced, eccentric, occlusion) vs continuation rows
+        // (myo-rep mini-sets, rest-pause, drop-set drops) that were reached
+        // via abbreviated rest and so don't get a vote on weight calibration.
+        const analyzed = analyzeSets(prevEx.sets);
+        const creditedSetTotal = analyzed.reduce((sum, a) => sum + a.creditedValue, 0);
+        const calibrationSets = analyzed.filter(a => a.isCalibration).map(a => a.set);
+
+        // Compute this exercise's RIR data from calibration sets only
+        const actualRIRs = calibrationSets
+          .filter(s => s.rirActual !== null && s.rirActual !== undefined)
+          .map(s => s.rirActual);
+        const lastCalibrationSet = calibrationSets[calibrationSets.length - 1];
+        const rirData = actualRIRs.length > 0 ? {
+          avgActual: actualRIRs.reduce((a, b) => a + b, 0) / actualRIRs.length,
+          target: calibrationSets[0]?.rirTarget ?? prevEx.sets[0]?.rirTarget ?? 3,
+          lastWeight: lastCalibrationSet?.weight ?? null,
+          lastReps: lastCalibrationSet?.reps ?? null,
+        } : null;
+
+        const targetRIR = getTargetRIR(nextIdx + 1, mesoData.weeks.length);
+
+        // nextSetCount carries this exercise's own credited total forward
+        // unchanged, plus whatever this session's (muscle, day) growth
+        // decision above assigned specifically to THIS exercise — every
+        // other exercise sharing the muscle that day gets +0 automatically.
+        let nextSetCount;
+        if (isDeload) {
+          nextSetCount = Math.max(1, Math.floor(creditedSetTotal / 2));
+        } else {
+          const earned = dayGrowth[muscle]?.exerciseId === prevEx.id ? dayGrowth[muscle].delta : 0;
+          nextSetCount = Math.max(1, Math.round(creditedSetTotal + earned));
+        }
+
+        // Weight suggestion
+        let suggestedWeight = rirData?.lastWeight ?? 0;
+        let weightNote = '';
+        if (isDeload) {
+          suggestedWeight = Math.round((rirData?.lastWeight ?? 0) * 0.6);
+          weightNote = 'Deload — 60% of last';
+        } else if (rirData) {
+          const sugg = suggestWeightChange(rirData.avgActual, rirData.target, prevEx.assisted);
+          if (sugg.direction !== 'hold') {
+            suggestedWeight = Math.round(rirData.lastWeight * (1 + sugg.pct));
+          }
+          weightNote = sugg.msg;
+        }
+
+        // Calibration-count leading rows keep literal per-index stickiness
+        // (occlusion/cluster/etc. tagged on a specific calibration set); any
+        // row past that is a continuation slot and inherits this exercise's
+        // sticky continuation technique (myo-rep/rest-pause/drop-set),
+        // however many such slots this week's credited count actually
+        // produces — see reconcileStickyTechniques above.
+        const calibrationCount = calibrationSets.length;
+        const continuationTechnique = mesoData.stickyTechniques?.[`${dIdx}:${prevEx.id}:continuation`] || null;
+
+        return {
+          ...prevEx,
+          sets: Array(nextSetCount).fill(null).map((_, setIdx) => ({
+            weight: suggestedWeight, reps: null, rirTarget: targetRIR, rirActual: null,
+            technique: isDeload ? null : (
+              setIdx < calibrationCount
+                ? (mesoData.stickyTechniques?.[`${dIdx}:${prevEx.id}:${setIdx}`] || null)
+                : continuationTechnique
+            ),
+          })),
+          weightNote,
+        };
+      }) || [];
+      // Same sync as handleDeletePermanent, now that this day has real
+      // exercises: drop any muscle no longer represented (e.g. a REST OF
+      // MESO delete that hit this day back when it was still ungenerated).
+      if (day.muscles) {
+        const remainingMuscles = new Set(day.exercises.map(e => e.muscle));
+        day.muscles = day.muscles.filter(m => remainingMuscles.has(m));
+      }
+    });
+
+    nextWeek.generated = true;
+  };
+
+  // ----- VIEW: SETUP -----
+  if (view === 'setup') {
+    return <MesoSetup prefs={prefs} setPrefs={setPrefs}
+      customExercises={customExercises} setCustomExercises={setCustomExercises}
+      exerciseVideos={exerciseVideos} setExerciseVideos={setExerciseVideos}
+      onDeleteCustomExercise={deleteCustomExercise}
+      onCancel={() => setView('home')}
+      onCreate={(newMeso) => {
+        // Archive whatever meso was active before this one — captures both
+        // completed AND abandoned-partway mesos, since this fires on any
+        // "start a new one" action regardless of prior completion state.
+        if (meso) {
+          setArchive(prev => [{ ...meso, archivedAt: new Date().toISOString() }, ...prev]);
+        }
+        setMeso(newMeso);
+        setView('home');
+      }} />;
+  }
+
+  // ----- VIEW: WORKOUT -----
+  if (view === 'workout' && activeWorkout && meso) {
+    const wk = meso.weeks[activeWorkout.weekIdx];
+    const day = wk.days[activeWorkout.dayIdx];
+    // Same day-slot, one week back — day-slot index is stable across weeks
+    // (Push A is always days[0] in every week), so this is a valid "what did
+    // I do last time" lookup. null in week 1 — nothing to compare against.
+    const previousWeekDay = activeWorkout.weekIdx > 0
+      ? meso.weeks[activeWorkout.weekIdx - 1]?.days?.[activeWorkout.dayIdx] || null
+      : null;
+    return <WorkoutLogger
+      day={day} previousWeekDay={previousWeekDay}
+      sessionKey={`${meso.id}:${activeWorkout.weekIdx}:${activeWorkout.dayIdx}`}
+      weekNum={activeWorkout.weekIdx + 1} totalWeeks={meso.weeks.length}
+      isDeload={activeWorkout.weekIdx === meso.weeks.length - 1}
+      units={prefs.units}
+      customExercises={customExercises} setCustomExercises={setCustomExercises}
+      exerciseVideos={exerciseVideos} setExerciseVideos={setExerciseVideos}
+      exerciseNotes={exerciseNotes} setExerciseNotes={setExerciseNotes}
+      onDeleteCustomExercise={deleteCustomExercise}
+      onSwapPermanent={handleSwapPermanent}
+      onDeletePermanent={handleDeletePermanent}
+      onAddPermanent={handleAddPermanent}
+      onReorderPermanent={handleReorderPermanent}
+      growthTargets={meso.growthTargets || {}}
+      onSetGrowthTarget={handleSetGrowthTarget}
+      onClearGrowthTarget={handleClearGrowthTarget}
+      onComplete={completeWorkout} onCancel={() => { setActiveWorkout(null); setView('home'); }}
+    />;
+  }
+
+  // ----- VIEW: WORKOUT VIEWER (read-only — logged sets/reps for a completed day) -----
+  if (view === 'workoutView' && activeWorkout && meso) {
+    const wk = meso.weeks[activeWorkout.weekIdx];
+    const day = wk.days[activeWorkout.dayIdx];
+    return <WorkoutViewer
+      day={day} weekNum={activeWorkout.weekIdx + 1}
+      onBack={() => { setActiveWorkout(null); setView('home'); }}
+    />;
+  }
+
+  // ----- VIEW: SETTINGS -----
+  if (view === 'settings') {
+    return <SettingsView prefs={prefs} setPrefs={setPrefs}
+      customExercises={customExercises}
+      onManageCustom={() => setView('customExercises')}
+      onResetAll={handleResetAllData}
+      onSignOut={signOut}
+      exportData={{
+        meso: { _version: SCHEMA_VERSIONS.meso, data: meso },
+        prefs: { _version: SCHEMA_VERSIONS.prefs, data: prefs },
+        customExercises: { _version: SCHEMA_VERSIONS.customExercises, data: customExercises },
+        exerciseVideos: { _version: SCHEMA_VERSIONS.exerciseVideos, data: exerciseVideos },
+        exerciseNotes: { _version: SCHEMA_VERSIONS.exerciseNotes, data: exerciseNotes },
+        archive: { _version: SCHEMA_VERSIONS.archive, data: archive },
+      }}
+      onBack={() => setView('home')} />;
+  }
+
+  // ----- VIEW: CUSTOM EXERCISES MANAGEMENT -----
+  if (view === 'customExercises') {
+    return <CustomExercisesView
+      customExercises={customExercises} exerciseVideos={exerciseVideos}
+      onDelete={deleteCustomExercise}
+      onBack={() => setView('settings')} />;
+  }
+
+  // ----- VIEW: ARCHIVE -----
+  if (view === 'archive') {
+    return <ArchiveView archive={archive}
+      units={prefs.units}
+      onDeleteEntry={(archivedAt) => setArchive(prev => prev.filter(m => m.archivedAt !== archivedAt))}
+      onBack={() => setView('home')} />;
+  }
+
+  // ----- VIEW: HOME / DASHBOARD -----
+  return (
+    <div className="min-h-screen bg-black text-zinc-100 pb-20">
+      <style>{FONT_STYLE}</style>
+      <Header
+        view={view}
+        onNavHome={() => setView('home')}
+        onNavArchive={() => setView('archive')}
+        onNavSettings={() => setView('settings')}
+      />
+      {!meso ? (
+        <EmptyState onStart={() => setView('setup')} />
+      ) : (
+        <Dashboard meso={meso} prefs={prefs} onStartWorkout={startWorkout} onViewWorkout={viewWorkout}
+          onNewMeso={() => setView('setup')}
+          onDeleteMeso={() => { setMeso(null); }} />
+      )}
+    </div>
+  );
 }
 
-/* camera modal — scans one barcode then hands it off. Loads the decoder
-   from a CDN at scan-time (not a project dependency), since Safari/iOS has
-   no native BarcodeDetector and this needs to work regardless of build setup. */
-function BarcodeScanner({ onDetected, onClose }) {
-  const videoRef = useRef(null);
-  const controlsRef = useRef(null);
-  const [status, setStatus] = useState("loading"); // loading | scanning | error
-  const [errMsg, setErrMsg] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { BrowserMultiFormatReader } = await import(
-          "https://esm.sh/@zxing/browser@0.2.1"
-        );
-        if (cancelled) return;
-        const reader = new BrowserMultiFormatReader();
-        setStatus("scanning");
-        const controls = await reader.decodeFromVideoDevice(
-          undefined, // default camera — prefers rear ("environment") on phones
-          videoRef.current,
-          (result, err, ctrls) => {
-            if (result) {
-              ctrls.stop();
-              onDetected(result.getText());
-            }
-          }
-        );
-        if (cancelled) {
-          // modal was closed while the camera was still being allocated —
-          // release it immediately instead of leaving an orphaned stream
-          // holding the hardware (that's what breaks the *next* scan attempt).
-          controls.stop();
-          return;
-        }
-        controlsRef.current = controls;
-      } catch (e) {
-        if (!cancelled) {
-          setStatus("error");
-          setErrMsg(e.message || "camera access failed");
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-      controlsRef.current?.stop();
-    };
-  }, []);
-
+// ============================================================================
+// HEADER
+// ============================================================================
+function Header({ centerText, view, onNavHome, onNavArchive, onNavSettings }) {
   return (
-    <div style={S.modalWrap} onClick={onClose}>
-      <div style={{ ...S.modal, maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
-        <div style={S.modalHead}>
-          <strong style={{ fontSize: 13, letterSpacing: 1 }}>SCAN BARCODE</strong>
-          <button style={S.xBtn} onClick={onClose}>✕</button>
+    <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="w-2 h-2 bg-amber-400 mono"></div>
+          <span className="mono text-xs tracking-[0.2em] text-zinc-400">HYPER · LOG</span>
         </div>
-        <div style={{ padding: 16 }}>
-          {status === "error" ? (
-            <div style={S.verifyBanner}>{errMsg || "Couldn't access the camera."}</div>
-          ) : (
-            <video
-              ref={videoRef}
-              muted
-              playsInline
-              style={{ width: "100%", borderRadius: 10, background: "#000" }}
-            />
+        {centerText && (
+          <div className="mono text-xs text-zinc-500 truncate flex-1 text-center">
+            {centerText}
+          </div>
+        )}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {view !== 'home' && onNavHome && (
+            <button onClick={onNavHome}
+              className="text-zinc-400 hover:text-amber-400 w-8 h-8 flex items-center justify-center"
+              title="Home">
+              <Home className="w-4 h-4" />
+            </button>
           )}
-          {status === "loading" && (
-            <div style={{ ...S.empty, padding: "10px 0" }}>loading scanner…</div>
+          {view !== 'archive' && onNavArchive && (
+            <button onClick={onNavArchive}
+              className="text-zinc-400 hover:text-amber-400 w-8 h-8 flex items-center justify-center"
+              title="Archive">
+              <Archive className="w-4 h-4" />
+            </button>
           )}
-          {status === "scanning" && (
-            <div style={{ ...S.empty, padding: "10px 0" }}>point the camera at a barcode</div>
+          {view !== 'settings' && onNavSettings && (
+            <button onClick={onNavSettings}
+              className="text-zinc-400 hover:text-amber-400 w-8 h-8 flex items-center justify-center"
+              title="Settings">
+              <Settings className="w-4 h-4" />
+            </button>
           )}
         </div>
       </div>
@@ -1139,1122 +1042,2573 @@ function BarcodeScanner({ onDetected, onClose }) {
   );
 }
 
-/* lookup + confirm — shown once a barcode is decoded. Reuses an existing
-   food by barcode if this item's been scanned before; otherwise looks it
-   up and lets you review/correct the macros before it's logged. */
-function ScanConfirm({ barcode, foods, onClose, onConfirm }) {
-  const existing = foods.find((x) => x.barcode === barcode);
-  const [status, setStatus] = useState(existing ? "ready" : "looking"); // looking | ready | notfound | error
-  const [errMsg, setErrMsg] = useState("");
-  const [draft, setDraft] = useState(
-    existing
-      ? { name: existing.name, unit: existing.unit, macros: existing.macros }
-      : null
+
+// ============================================================================
+// EMPTY STATE
+// ============================================================================
+function EmptyState({ onStart }) {
+  return (
+    <div className="px-5 py-12 text-center">
+      <Dumbbell className="w-12 h-12 mx-auto text-zinc-700 mb-6" strokeWidth={1.5} />
+      <h1 className="text-3xl font-black tracking-tight mb-3">No active mesocycle</h1>
+      <p className="text-zinc-500 text-sm mb-8 max-w-xs mx-auto leading-relaxed">
+        Start a 4–6 week training block with periodized RIR-based progression.
+      </p>
+      <button onClick={onStart}
+        className="bg-amber-400 text-black px-6 py-3 font-bold tracking-wide hover:bg-amber-300 transition-colors">
+        START MESOCYCLE →
+      </button>
+    </div>
   );
-  const [qty, setQty] = useState(1);
+}
 
+// ============================================================================
+// MESO SETUP
+// ============================================================================
+function MesoSetup({ prefs, setPrefs, customExercises, setCustomExercises, exerciseVideos, setExerciseVideos, onDeleteCustomExercise, onCreate, onCancel }) {
+  const [step, setStep] = useState(1);
+  const [name, setName] = useState('');
+  const [mode, setMode] = useState('template'); // 'template' | 'custom'
+  const [templateKey, setTemplateKey] = useState('upper-lower-4');
+  const [customDaysPerWeek, setCustomDaysPerWeek] = useState(4);
+  const [priorities, setPriorities] = useState(() => {
+    const p = {};
+    MUSCLE_GROUPS.forEach(m => p[m] = 'maintain');
+    return p;
+  });
+  const [weeks, setWeeks] = useState(5);
+  const [units, setUnits] = useState(prefs.units);
+  // Per day: a flat, freely-orderable list of { muscle, exId } — muscle is metadata
+  // on each entry (drives its dropdown options), not a boundary on where it can sit.
+  const [selectedExercises, setSelectedExercises] = useState({});
+  const [dayOrder, setDayOrder] = useState([]); // stable-id ordering for day display
+  const [dayNameOverrides, setDayNameOverrides] = useState({}); // user-renamed day labels
+  // Modal: either { mode: 'add_custom', muscle, dayIdx, exIdx } or { mode: 'edit_video', exerciseId, exerciseName, muscle }
+  const [exerciseModalState, setExerciseModalState] = useState(null);
+
+  // Resolve the effective video URL for any exercise — user override beats baked-in
+  const getEffectiveVideoUrl = (ex) => {
+    if (ex.id in exerciseVideos) return exerciseVideos[ex.id] || null;
+    return ex.videoUrl || null;
+  };
+
+  // Merged exercise library: built-in + user-created custom exercises, both with overridden videoUrls.
+  // When Home Gym Mode is ON with selected equipment, library exercises are filtered to match
+  // available equipment. Custom exercises always shown (user knows they can do their own).
+  const getMuscleExercises = (muscle) => {
+    let library = (EXERCISES[muscle] || []).map(ex => ({ ...ex, videoUrl: getEffectiveVideoUrl(ex) }));
+    if (prefs.homeGym && Array.isArray(prefs.equipment) && prefs.equipment.length > 0) {
+      library = library.filter(ex => prefs.equipment.includes(ex.equipment));
+    }
+    const custom = (customExercises[muscle] || []).map(ex => ({ ...ex, videoUrl: getEffectiveVideoUrl(ex) }));
+    return [...library, ...custom];
+  };
+
+  // Save handler for the "+ ADD CUSTOM EXERCISE" modal flow
+  const handleCustomExerciseSave = (newExercise, videoUrl) => {
+    if (!exerciseModalState || exerciseModalState.mode !== 'add_custom') return;
+    const { muscle, dayIdx, flatIdx } = exerciseModalState;
+    // Add to global custom library (without videoUrl — that lives in exerciseVideos)
+    const customDef = { id: newExercise.id, name: newExercise.name, equipment: 'custom', isCustom: true, assisted: newExercise.assisted || false };
+    setCustomExercises({
+      ...customExercises,
+      [muscle]: [...(customExercises[muscle] || []), customDef],
+    });
+    // Store video URL separately if provided
+    if (videoUrl) {
+      setExerciseVideos({ ...exerciseVideos, [newExercise.id]: videoUrl });
+    }
+    // Apply to the originating row
+    const list = [...(selectedExercises[dayIdx] || [])];
+    list[flatIdx] = { muscle, exId: newExercise.id };
+    setSelectedExercises({ ...selectedExercises, [dayIdx]: list });
+    setExerciseModalState(null);
+  };
+
+  // Save handler for editing the video URL on any existing exercise
+  const handleVideoEditSave = (exerciseId, newUrl) => {
+    const next = { ...exerciseVideos };
+    if (newUrl) {
+      next[exerciseId] = newUrl;
+    } else {
+      next[exerciseId] = null; // explicit removal (still tracked so it overrides any snapshot)
+    }
+    setExerciseVideos(next);
+    setExerciseModalState(null);
+  };
+
+  // Delete a custom exercise from MesoSetup: app-level cleanup + replace local refs
+  const handleDeleteCustomExerciseFromSetup = (exerciseId, muscle) => {
+    onDeleteCustomExercise(exerciseId, muscle);
+    // Replace any references in selectedExercises with the muscle's first library exercise
+    const replacement = EXERCISES[muscle]?.[0]?.id;
+    const nextSelected = { ...selectedExercises };
+    Object.keys(nextSelected).forEach(dayIdx => {
+      nextSelected[dayIdx] = (nextSelected[dayIdx] || []).map(entry =>
+        entry.exId === exerciseId ? { ...entry, exId: replacement || entry.exId } : entry
+      );
+    });
+    setSelectedExercises(nextSelected);
+    setExerciseModalState(null);
+  };
+
+  // Derived: active days + muscles based on mode
+  const activeDays = mode === 'template'
+    ? TEMPLATES[templateKey].days
+    : buildCustomDays(customDaysPerWeek, priorities);
+  const activeMuscles = [...new Set(activeDays.flatMap(d => d.muscles))];
+
+  // Initialize defaults per day — auto-rotate exercises when same muscle appears
+  // on multiple days (e.g. chest on Push A gets bench, chest on Push B gets incline DB)
   useEffect(() => {
-    if (existing) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const found = await lookupOpenFoodFacts(barcode);
-        if (cancelled) return;
-        if (!found) {
-          setStatus("notfound");
-          return;
-        }
-        setDraft(found);
-        setStatus("ready");
-      } catch (e) {
-        if (!cancelled) {
-          setStatus("error");
-          setErrMsg(e.message || "lookup failed");
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [barcode]);
+    const nextExercises = {};
+    const muscleOccurrence = {};
+    activeDays.forEach((day, dayIdx) => {
+      nextExercises[dayIdx] = day.muscles.map(muscle => {
+        const occurrenceIdx = muscleOccurrence[muscle] || 0;
+        const exList = EXERCISES[muscle];
+        muscleOccurrence[muscle] = occurrenceIdx + 1;
+        return { muscle, exId: exList[occurrenceIdx % exList.length].id };
+      });
+    });
+    setSelectedExercises(nextExercises);
+    setDayOrder(activeDays.map((_, i) => i));
+    setDayNameOverrides({});
+    // eslint-disable-next-line
+  }, [mode, templateKey, customDaysPerWeek, JSON.stringify(priorities)]);
 
-  const setMacro = (k, v) =>
-    setDraft((d) => ({ ...d, macros: { ...d.macros, [k]: parseFloat(v) || 0 } }));
+  // Move a day up/down in the display order
+  const moveDay = (fromDisplayIdx, direction) => {
+    const order = dayOrder.length === activeDays.length ? [...dayOrder] : activeDays.map((_, i) => i);
+    const toIdx = fromDisplayIdx + direction;
+    if (toIdx < 0 || toIdx >= order.length) return;
+    [order[fromDisplayIdx], order[toIdx]] = [order[toIdx], order[fromDisplayIdx]];
+    setDayOrder(order);
+  };
+
+  // Compute the days to render in display order, each with its stable id
+  const validOrder = dayOrder.length === activeDays.length && dayOrder.every(i => i >= 0 && i < activeDays.length)
+    ? dayOrder : activeDays.map((_, i) => i);
+  const displayDays = validOrder.map(stableIdx => ({ day: activeDays[stableIdx], stableIdx }));
+
+  // Effective day name (override or default)
+  const getDayName = (stableIdx) => {
+    if (stableIdx in dayNameOverrides) return dayNameOverrides[stableIdx];
+    return activeDays[stableIdx]?.name || '';
+  };
+
+  // Reorder / edit helpers — the day's exercises are one flat, freely-orderable
+  // list; "muscle" on each entry is metadata (drives its dropdown options and
+  // its chip grouping above), not a boundary on where the entry can sit.
+  const moveExercise = (dayIdx, fromIdx, direction) => {
+    const list = [...(selectedExercises[dayIdx] || [])];
+    const toIdx = fromIdx + direction;
+    if (toIdx < 0 || toIdx >= list.length) return;
+    [list[fromIdx], list[toIdx]] = [list[toIdx], list[fromIdx]];
+    setSelectedExercises({ ...selectedExercises, [dayIdx]: list });
+  };
+  const updateExerciseAt = (dayIdx, flatIdx, newId, muscle) => {
+    // Special trigger: open custom-exercise modal for this slot
+    if (newId === '__add_custom__') {
+      setExerciseModalState({ mode: 'add_custom', muscle, dayIdx, flatIdx });
+      return;
+    }
+    const list = [...(selectedExercises[dayIdx] || [])];
+    list[flatIdx] = { ...list[flatIdx], exId: newId };
+    setSelectedExercises({ ...selectedExercises, [dayIdx]: list });
+  };
+  const removeExerciseAt = (dayIdx, flatIdx) => {
+    const list = selectedExercises[dayIdx] || [];
+    const muscle = list[flatIdx]?.muscle;
+    if (list.filter(e => e.muscle === muscle).length <= 1) return; // drop the muscle's chip instead
+    setSelectedExercises({ ...selectedExercises, [dayIdx]: list.filter((_, i) => i !== flatIdx) });
+  };
+  // "+" on a muscle chip: append another exercise for that muscle to the end
+  // of the list — reorder it into place afterward with the row's arrows.
+  const addExerciseForMuscle = (dayIdx, muscle) => {
+    const list = selectedExercises[dayIdx] || [];
+    const usedIds = new Set(list.filter(e => e.muscle === muscle).map(e => e.exId));
+    const unused = getMuscleExercises(muscle).find(e => !usedIds.has(e.id));
+    if (!unused) return;
+    setSelectedExercises({ ...selectedExercises, [dayIdx]: [...list, { muscle, exId: unused.id }] });
+  };
+  const addMuscleToDay = (dayIdx, muscle) => {
+    const list = selectedExercises[dayIdx] || [];
+    if (list.some(e => e.muscle === muscle)) return;
+    setSelectedExercises({ ...selectedExercises, [dayIdx]: [...list, { muscle, exId: EXERCISES[muscle][0].id }] });
+  };
+  const removeMuscleFromDay = (dayIdx, muscle) => {
+    const list = selectedExercises[dayIdx] || [];
+    if (new Set(list.map(e => e.muscle)).size <= 1) return; // keep at least one muscle per day
+    setSelectedExercises({ ...selectedExercises, [dayIdx]: list.filter(e => e.muscle !== muscle) });
+  };
+
+
+  // Priority counts for the summary line in custom mode
+  const priorityCounts = MUSCLE_GROUPS.reduce((acc, m) => {
+    const p = priorities[m];
+    acc[p] = (acc[p] || 0) + 1;
+    return acc;
+  }, {});
+  const customValid = activeMuscles.length > 0 && activeDays.length > 0;
+
+  const createMeso = () => {
+    const generateWeek = (weekIdx) => {
+      const isDeload = weekIdx === weeks - 1;
+      const targetRIR = getTargetRIR(weekIdx + 1, weeks);
+      return {
+        weekNum: weekIdx + 1,
+        isDeload,
+        targetRIR,
+        generated: weekIdx === 0,
+        days: validOrder.map((stableIdx) => {
+          const dayIdx = stableIdx;
+          const d = activeDays[stableIdx];
+          const flatList = selectedExercises[dayIdx]?.length
+            ? selectedExercises[dayIdx]
+            : d.muscles.map(muscle => ({ muscle, exId: EXERCISES[muscle][0].id }));
+          const customName = dayNameOverrides[stableIdx]?.trim();
+          return {
+            name: customName || d.name,
+            muscles: [...new Set(flatList.map(e => e.muscle))], // first-appearance order in the actual list
+            completed: false,
+            exercises: weekIdx === 0 ? flatList.map(({ muscle, exId }) => {
+              const priority = mode === 'custom' ? priorities[muscle] : undefined;
+              const startSets = getStartingSets(muscle, priority);
+              const allEx = getMuscleExercises(muscle);
+              const exMeta = allEx.find(e => e.id === exId) || allEx[0];
+              return {
+                id: exId,
+                name: exMeta.name,
+                muscle,
+                assisted: exMeta.assisted || false,
+                videoUrl: exMeta.videoUrl || null, // merged library populates this
+                sets: Array(startSets).fill(null).map(() => ({
+                  weight: 0, reps: null, rirTarget: targetRIR, rirActual: null, technique: null,
+                })),
+              };
+            }) : [],
+            feedback: null,
+          };
+        }),
+      };
+    };
+
+    const meso = {
+      id: Date.now(),
+      name: name || `Meso ${new Date().toLocaleDateString()}`,
+      mode,
+      templateKey: mode === 'template' ? templateKey : null,
+      customDaysPerWeek: mode === 'custom' ? customDaysPerWeek : null,
+      priorities: mode === 'custom' ? priorities : null,
+      units,
+      startDate: new Date().toISOString(),
+      growthTargets: {}, // meso-wide: { [muscle]: exerciseId } — starred growth exercise per muscle
+      stickyTechniques: {}, // { "dayIdx:exerciseId:setIdx": techniqueKey } — auto-persisted set tags
+      weeks: Array(weeks).fill(null).map((_, i) => generateWeek(i)),
+    };
+
+    setPrefs({ ...prefs, units });
+    onCreate(meso);
+  };
 
   return (
-    <div style={S.modalWrap} onClick={onClose}>
-      <div style={{ ...S.modal, maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
-        <div style={S.modalHead}>
-          <strong style={{ fontSize: 13, letterSpacing: 1 }}>
-            {existing ? "LOG SCANNED ITEM" : "NEW SCANNED ITEM"}
-          </strong>
-          <button style={S.xBtn} onClick={onClose}>✕</button>
+    <div className="min-h-screen bg-black text-zinc-100 pb-24">
+      <style>{FONT_STYLE}</style>
+      <Header />
+      <div className="px-5 py-6">
+        <div className="flex items-center justify-between mb-6">
+          <button onClick={step === 1 ? onCancel : () => setStep(step - 1)}
+            className="text-zinc-400 flex items-center gap-1 text-sm">
+            <ChevronLeft className="w-4 h-4" /> {step === 1 ? 'Cancel' : 'Back'}
+          </button>
+          <span className="mono text-xs text-zinc-500">STEP {step} / 2</span>
         </div>
 
-        <div style={S.editorBody}>
-          {status === "looking" && <div style={S.empty}>looking up {barcode}…</div>}
-          {status === "notfound" && (
-            <div style={S.verifyBanner}>
-              No match for {barcode} in Open Food Facts. Add it manually via + food instead.
-            </div>
-          )}
-          {status === "error" && <div style={S.verifyBanner}>{errMsg}</div>}
+        {step === 1 && (
+          <>
+            <h2 className="text-2xl font-black mb-1">Configure block</h2>
+            <p className="text-zinc-500 text-sm mb-6">Length, units, and how the program's built.</p>
 
-          {draft && (
-            <>
-              <label style={S.fLabel}>Name</label>
-              <input
-                value={draft.name}
-                onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                style={S.fInput}
-              />
-              <label style={S.fLabel}>Macros (per {draft.unit})</label>
-              <div style={S.macroGrid}>
-                {[
-                  ["Protein", "p"],
-                  ["Fat", "f"],
-                  ["Carbs", "c"],
-                  ["Calories", "cal"],
-                ].map(([lab, k]) => (
-                  <div key={k}>
-                    <span style={S.macroMini}>{lab}</span>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={draft.macros[k]}
-                      onChange={(e) => setMacro(k, e.target.value)}
-                      style={S.fInput}
-                    />
-                  </div>
+            <Field label="MESO NAME">
+              <input value={name} onChange={e => setName(e.target.value)}
+                placeholder="Spring Push '26"
+                className="w-full bg-zinc-900 border border-zinc-800 px-3 py-3 text-white focus:border-amber-400 outline-none" />
+            </Field>
+
+            <Field label="LENGTH (WEEKS — LAST IS DELOAD)">
+              <div className="grid grid-cols-3 gap-2">
+                {[4, 5, 6].map(w => (
+                  <button key={w} onClick={() => setWeeks(w)}
+                    className={`py-3 mono font-bold border ${weeks === w ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+                    {w}
+                  </button>
                 ))}
               </div>
-              <label style={S.fLabel}>Qty ({draft.unit})</label>
-              <input
-                type="number"
-                step="0.25"
-                value={qty}
-                onChange={(e) => setQty(parseFloat(e.target.value) || 1)}
-                style={S.fInput}
-              />
-            </>
+              {weeks === 4 && <p className="text-xs text-amber-400/70 mt-2 mono">⚠ 4w may be too short for intermediates</p>}
+            </Field>
+
+            <Field label="UNITS">
+              <div className="grid grid-cols-2 gap-2">
+                {['lbs', 'kg'].map(u => (
+                  <button key={u} onClick={() => setUnits(u)}
+                    className={`py-3 mono font-bold uppercase border ${units === u ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+                    {u}
+                  </button>
+                ))}
+              </div>
+            </Field>
+
+            <Field label="PROGRAM BUILD MODE">
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => setMode('template')}
+                  className={`p-4 border text-left ${mode === 'template' ? 'bg-amber-400/10 border-amber-400' : 'bg-zinc-900 border-zinc-800'}`}>
+                  <div className="font-bold mb-1">Template</div>
+                  <div className="mono text-[10px] text-zinc-500 tracking-wider">PROVEN SPLIT</div>
+                </button>
+                <button onClick={() => setMode('custom')}
+                  className={`p-4 border text-left ${mode === 'custom' ? 'bg-amber-400/10 border-amber-400' : 'bg-zinc-900 border-zinc-800'}`}>
+                  <div className="font-bold mb-1">Custom</div>
+                  <div className="mono text-[10px] text-zinc-500 tracking-wider">BY PRIORITY</div>
+                </button>
+              </div>
+            </Field>
+
+            {mode === 'template' && (
+              <Field label="TEMPLATE">
+                <div className="space-y-2">
+                  {Object.entries(TEMPLATES).map(([key, tpl]) => (
+                    <button key={key} onClick={() => setTemplateKey(key)}
+                      className={`w-full text-left p-4 border ${templateKey === key ? 'bg-zinc-900 border-amber-400' : 'bg-zinc-900 border-zinc-800'}`}>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="font-bold">{tpl.name}</div>
+                          <div className="text-xs text-zinc-500 mono mt-1">{tpl.daysPerWeek} DAYS/WK · {tpl.days.length} ROTATING</div>
+                        </div>
+                        {templateKey === key && <Check className="w-5 h-5 text-amber-400" />}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            )}
+
+            {mode === 'custom' && (
+              <>
+                <Field label="DAYS PER WEEK">
+                  <div className="grid grid-cols-4 gap-2">
+                    {[3, 4, 5, 6].map(d => (
+                      <button key={d} onClick={() => setCustomDaysPerWeek(d)}
+                        className={`py-3 mono font-bold border ${customDaysPerWeek === d ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+                        {d}
+                      </button>
+                    ))}
+                  </div>
+                </Field>
+
+                <Field label="MUSCLE PRIORITIES">
+                  <p className="text-[10px] text-zinc-500 mb-3 mono tracking-wider">
+                    OFF = SKIP ENTIRELY · MAIN = MINIMAL · EMPH = HIGHER VOLUME
+                  </p>
+                  <div className="space-y-1.5">
+                    {MUSCLE_GROUPS.map(muscle => (
+                      <div key={muscle} className="grid grid-cols-5 gap-1 items-center">
+                        <div className="col-span-2 mono text-[11px] tracking-widest text-zinc-300">
+                          {muscle.toUpperCase()}
+                        </div>
+                        <PriorityBtn current={priorities[muscle]} value="ignore"
+                          onClick={() => setPriorities({ ...priorities, [muscle]: 'ignore' })}>
+                          OFF
+                        </PriorityBtn>
+                        <PriorityBtn current={priorities[muscle]} value="maintain"
+                          onClick={() => setPriorities({ ...priorities, [muscle]: 'maintain' })}>
+                          MAIN
+                        </PriorityBtn>
+                        <PriorityBtn current={priorities[muscle]} value="emphasize"
+                          onClick={() => setPriorities({ ...priorities, [muscle]: 'emphasize' })}>
+                          EMPH
+                        </PriorityBtn>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Priority summary */}
+                  <div className="mt-4 px-3 py-2.5 bg-zinc-950 border border-zinc-800 mono text-[10px] tracking-widest text-zinc-500 flex justify-between">
+                    <span>OFF <span className="text-zinc-600">{priorityCounts.ignore || 0}</span></span>
+                    <span>MAIN <span className="text-zinc-100">{priorityCounts.maintain || 0}</span></span>
+                    <span>EMPH <span className="text-amber-400">{priorityCounts.emphasize || 0}</span></span>
+                    <span>ACTIVE DAYS <span className="text-amber-400">{activeDays.length}</span></span>
+                  </div>
+
+                  {!customValid && (
+                    <p className="text-red-400 mono text-[10px] mt-3 tracking-widest">
+                      ⚠ AT LEAST ONE MUSCLE MUST BE EMPH OR MAIN
+                    </p>
+                  )}
+                </Field>
+              </>
+            )}
+
+            <button onClick={() => setStep(2)}
+              disabled={mode === 'custom' && !customValid}
+              className="w-full bg-amber-400 text-black py-4 font-bold tracking-wide mt-6 disabled:opacity-30 disabled:cursor-not-allowed">
+              CHOOSE EXERCISES →
+            </button>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <h2 className="text-2xl font-black mb-1">Pick exercises</h2>
+            <p className="text-zinc-500 text-sm mb-6">
+              One per muscle per day{mode === 'custom' && <span className="text-amber-400"> · ★ = emphasized</span>}
+            </p>
+
+            {displayDays.map(({ day, stableIdx }, displayIdx) => {
+              const dayIdx = stableIdx; // alias: all per-day state is keyed by the stable id
+              const dayExerciseList = selectedExercises[dayIdx] || [];
+              // Muscles present, in first-appearance order — falls back to the split's
+              // default list only in the brief window before the seed effect has run.
+              const activeMusclesForDay = dayExerciseList.length
+                ? [...new Set(dayExerciseList.map(e => e.muscle))]
+                : day.muscles;
+              const availableToAdd = MUSCLE_GROUPS.filter(m => !activeMusclesForDay.includes(m));
+              return (
+              <div key={stableIdx} className="mb-8">
+                <div className="flex items-center justify-between mb-3 pb-2 border-b border-zinc-800 gap-2">
+                  <div className="flex items-baseline gap-2 flex-1 min-w-0">
+                    <span className="mono text-xs tracking-[0.2em] text-amber-400 whitespace-nowrap">DAY {displayIdx + 1} —</span>
+                    <input
+                      type="text"
+                      value={stableIdx in dayNameOverrides ? dayNameOverrides[stableIdx] : day.name}
+                      onChange={e => setDayNameOverrides({ ...dayNameOverrides, [stableIdx]: e.target.value })}
+                      onFocus={e => e.target.select()}
+                      maxLength={24}
+                      placeholder={day.name}
+                      className="flex-1 mono text-xs tracking-[0.15em] text-amber-400 bg-transparent border-b border-dashed border-amber-400/30 focus:border-amber-400 outline-none px-1 uppercase min-w-0"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className="mono text-[10px] tracking-widest text-zinc-500 whitespace-nowrap">
+                      {activeMusclesForDay.length} MUSCLES
+                    </span>
+                    {displayDays.length > 1 && (
+                      <div className="flex">
+                        <button onClick={() => moveDay(displayIdx, -1)} disabled={displayIdx === 0}
+                          className="bg-zinc-900 border border-zinc-800 w-7 h-7 flex items-center justify-center text-zinc-500 disabled:opacity-20"
+                          title="Move day up">
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => moveDay(displayIdx, 1)} disabled={displayIdx === displayDays.length - 1}
+                          className="bg-zinc-900 border border-zinc-800 border-l-0 w-7 h-7 flex items-center justify-center text-zinc-500 disabled:opacity-20"
+                          title="Move day down">
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Muscle chips — which muscles this day trains. Purely a management
+                    control now; position here is cosmetic and doesn't drive the
+                    exercise sequence below (that's what the arrows on each row do). */}
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {activeMusclesForDay.map(muscle => {
+                    const isEmph = mode === 'custom' && priorities[muscle] === 'emphasize';
+                    const usedCount = dayExerciseList.filter(e => e.muscle === muscle).length;
+                    const canAddMore = usedCount < getMuscleExercises(muscle).length;
+                    return (
+                      <div key={muscle} className="flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 pl-2.5 pr-1.5 py-1.5">
+                        <span className="mono text-[10px] tracking-widest text-zinc-300">
+                          {muscle.toUpperCase()}{isEmph && ' ★'}
+                        </span>
+                        <button onClick={() => addExerciseForMuscle(dayIdx, muscle)}
+                          disabled={!canAddMore}
+                          title={canAddMore ? `Add another ${muscle} exercise` : 'Every library exercise for this muscle is already added'}
+                          className="text-zinc-500 hover:text-amber-400 disabled:opacity-20 disabled:cursor-not-allowed w-4 h-4 flex items-center justify-center">
+                          <Plus className="w-3 h-3" />
+                        </button>
+                        <button onClick={() => removeMuscleFromDay(dayIdx, muscle)}
+                          disabled={activeMusclesForDay.length <= 1}
+                          title={activeMusclesForDay.length <= 1 ? 'Add another muscle to this day first' : `Remove ${muscle} from this day`}
+                          className="text-zinc-500 hover:text-red-400 disabled:opacity-20 disabled:cursor-not-allowed w-4 h-4 flex items-center justify-center">
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {availableToAdd.length > 0 && (
+                    <select
+                      value=""
+                      onChange={e => { if (e.target.value) addMuscleToDay(dayIdx, e.target.value); }}
+                      className="bg-zinc-950 border border-dashed border-zinc-700 px-2.5 py-1.5 text-amber-400/80 text-[10px] mono tracking-widest hover:border-amber-400/60 hover:text-amber-400 focus:border-amber-400 outline-none cursor-pointer"
+                    >
+                      <option value="" disabled>+ ADD MUSCLE</option>
+                      {availableToAdd.map(m => (
+                        <option key={m} value={m}>{m.toUpperCase()}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                {/* Flat, freely-orderable exercise list — this order is the actual
+                    day sequence. The tag on each row is metadata, not a section. */}
+                <div className="space-y-2">
+                  {dayExerciseList.map((entry, flatIdx) => {
+                    const { muscle, exId } = entry;
+                    const exLibrary = getMuscleExercises(muscle);
+                    const exMeta = exLibrary.find(e => e.id === exId);
+                    const hasVideo = !!exMeta?.videoUrl;
+                    const exName = exMeta?.name || 'Unknown';
+                    const exIsCustom = !!exMeta?.isCustom;
+                    const muscleCount = dayExerciseList.filter(e => e.muscle === muscle).length;
+                    return (
+                      <div key={flatIdx} className="flex gap-1">
+                        <div className="w-11 flex-shrink-0 flex items-center justify-center bg-zinc-950 border border-zinc-800 mono text-[9px] tracking-wider text-zinc-500"
+                          title={muscle.toUpperCase()}>
+                          {muscle.slice(0, 3).toUpperCase()}
+                        </div>
+                        <select value={exId}
+                          onChange={e => updateExerciseAt(dayIdx, flatIdx, e.target.value, muscle)}
+                          className="flex-1 bg-zinc-900 border border-zinc-800 px-3 py-3 text-white focus:border-amber-400 outline-none min-w-0">
+                          {exLibrary.map(ex => (
+                            <option key={ex.id} value={ex.id}>
+                              {ex.name}{ex.equipment ? ` (${ex.equipment})` : ''}{ex.assisted ? ' · ASSISTED' : ''}{ex.isCustom ? ' ✦' : ''}{ex.videoUrl ? ' ▶' : ''}
+                            </option>
+                          ))}
+                          <option value="__add_custom__">+ ADD CUSTOM EXERCISE…</option>
+                        </select>
+                        <button onClick={() => moveExercise(dayIdx, flatIdx, -1)} disabled={flatIdx === 0}
+                          className="bg-zinc-900 border border-zinc-800 w-9 text-zinc-500 disabled:opacity-20 flex items-center justify-center"
+                          title="Move up">
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => moveExercise(dayIdx, flatIdx, 1)} disabled={flatIdx === dayExerciseList.length - 1}
+                          className="bg-zinc-900 border border-zinc-800 w-9 text-zinc-500 disabled:opacity-20 flex items-center justify-center"
+                          title="Move down">
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => removeExerciseAt(dayIdx, flatIdx)}
+                          disabled={muscleCount <= 1}
+                          title={muscleCount <= 1 ? 'Remove the muscle chip above to drop this entirely' : 'Remove'}
+                          className="bg-zinc-900 border border-zinc-800 w-9 text-zinc-500 hover:text-red-400 disabled:opacity-20 disabled:cursor-not-allowed flex items-center justify-center">
+                          <X className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => setExerciseModalState({
+                            mode: 'edit_video',
+                            exerciseId: exId,
+                            exerciseName: exName,
+                            muscle,
+                            isCustom: exIsCustom,
+                          })}
+                          className="bg-amber-400 border border-amber-400 w-9 flex items-center justify-center hover:bg-amber-300"
+                          title={hasVideo ? 'Edit / remove video link' : 'Add video link'}>
+                          <Play className="w-3.5 h-3.5 text-red-600" fill={hasVideo ? 'none' : 'currentColor'} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              );
+            })}
+
+            <button onClick={createMeso}
+              className="w-full bg-amber-400 text-black py-4 font-bold tracking-wide mt-6">
+              CREATE MESOCYCLE →
+            </button>
+          </>
+        )}
+      </div>
+      {exerciseModalState && (
+        <ExerciseModal
+          state={exerciseModalState}
+          initialVideoUrl={exerciseModalState.mode === 'edit_video' ? (exerciseVideos[exerciseModalState.exerciseId] || '') : ''}
+          onSaveCustom={handleCustomExerciseSave}
+          onSaveVideo={handleVideoEditSave}
+          onDeleteExercise={handleDeleteCustomExerciseFromSetup}
+          onCancel={() => setExerciseModalState(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ExerciseModal({ state, initialVideoUrl, initialNote, onSaveCustom, onSaveVideo, onSaveNote, onDeleteExercise, onCancel }) {
+  const isAddCustom = state.mode === 'add_custom';
+  const isEditNote = state.mode === 'edit_note';
+  const isEditVideo = state.mode === 'edit_video';
+  const canDelete = !isAddCustom && !isEditNote && state.isCustom && !!onDeleteExercise;
+  const [name, setName] = useState('');
+  const [assisted, setAssisted] = useState(false);
+  const [videoUrl, setVideoUrl] = useState(initialVideoUrl || '');
+  const [note, setNote] = useState(initialNote || '');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const trimmedName = name.trim();
+  const trimmedUrl = videoUrl.trim();
+  const trimmedNote = note.trim();
+  const urlValid = !trimmedUrl || /^https?:\/\//i.test(trimmedUrl);
+  const canSave = isAddCustom
+    ? (!!trimmedName && urlValid)
+    : isEditNote
+      ? true  // notes always saveable (empty note = removal)
+      : urlValid;
+
+  // Auto-revert delete confirm after 3s
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    const t = setTimeout(() => setConfirmingDelete(false), 3000);
+    return () => clearTimeout(t);
+  }, [confirmingDelete]);
+
+  const handleSave = () => {
+    if (!canSave) return;
+    if (isAddCustom) {
+      const newExercise = {
+        id: `custom-${Date.now()}`,
+        name: trimmedName,
+        assisted,
+      };
+      onSaveCustom(newExercise, trimmedUrl);
+    } else if (isEditNote) {
+      if (onSaveNote) onSaveNote(state.exerciseId, trimmedNote);
+    } else {
+      onSaveVideo(state.exerciseId, trimmedUrl);
+    }
+  };
+
+  const handleDeleteClick = () => {
+    if (confirmingDelete) {
+      onDeleteExercise(state.exerciseId, state.muscle);
+    } else {
+      setConfirmingDelete(true);
+    }
+  };
+
+  const modalTitle = isAddCustom ? 'Add Custom Exercise'
+    : isEditNote ? 'Edit Notes'
+    : 'Edit Video Link';
+
+  return (
+    <div className="fixed inset-0 bg-black/85 z-50 flex items-end sm:items-center justify-center px-4 py-4"
+      onClick={onCancel}>
+      <style>{FONT_STYLE}</style>
+      <div className="bg-zinc-950 border border-zinc-800 max-w-md w-full"
+        onClick={e => e.stopPropagation()}>
+        <div className="p-5 border-b border-zinc-800 flex items-start justify-between">
+          <div>
+            <h3 className="font-black text-lg tracking-tight">
+              {modalTitle}
+            </h3>
+            <p className="mono text-[10px] text-zinc-500 tracking-widest mt-1">
+              {isAddCustom ? state.muscle.toUpperCase() : `${state.exerciseName.toUpperCase()} · ${state.muscle.toUpperCase()}`}
+            </p>
+          </div>
+          <button onClick={onCancel} className="text-zinc-500 hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-5 space-y-5">
+          {isAddCustom && (
+            <div>
+              <label className="mono text-[10px] tracking-widest text-zinc-500 mb-2 block">EXERCISE TITLE *</label>
+              <input type="text" value={name} onChange={e => setName(e.target.value)}
+                placeholder="e.g., Smith Machine Bench" autoFocus maxLength={60}
+                className="w-full bg-zinc-900 border border-zinc-800 px-3 py-3 text-white focus:border-amber-400 outline-none" />
+              <label className="flex items-start gap-2 mt-3 cursor-pointer">
+                <input type="checkbox" checked={assisted} onChange={e => setAssisted(e.target.checked)}
+                  className="mt-1 w-4 h-4 accent-amber-400" />
+                <span className="mono text-[10px] tracking-wider text-zinc-400 leading-relaxed">
+                  ASSISTED — the number on this machine is counterbalance, not resistance
+                  (assist-machine dip/pull-up). Flips weight-suggestion direction.
+                </span>
+              </label>
+            </div>
+          )}
+          {isEditNote ? (
+            <div>
+              <label className="mono text-[10px] tracking-widest text-zinc-500 mb-2 block">
+                NOTES
+              </label>
+              <textarea value={note} onChange={e => setNote(e.target.value)}
+                placeholder={`e.g.\nSeat: notch 4\nBack rest: notch 2\nFoot platform: middle\nMind cue: drive through heels`}
+                autoFocus rows={8} maxLength={1000}
+                className="w-full bg-zinc-900 border border-zinc-800 px-3 py-3 text-white focus:border-amber-400 outline-none mono text-sm resize-y" />
+              <p className="text-zinc-600 mono text-[10px] tracking-wider mt-2 leading-relaxed">
+                EQUIPMENT SETTINGS · TECHNIQUE CUES · ANYTHING WORTH REMEMBERING NEXT SESSION · LEAVE EMPTY TO REMOVE
+              </p>
+            </div>
+          ) : (
+            <div>
+              <label className="mono text-[10px] tracking-widest text-zinc-500 mb-2 block">
+                VIDEO LINK {isAddCustom && '(OPTIONAL)'}
+              </label>
+              <input type="url" value={videoUrl} onChange={e => setVideoUrl(e.target.value)}
+                placeholder="https://youtube.com/watch?v=…" autoFocus={isEditVideo}
+                className="w-full bg-zinc-900 border border-zinc-800 px-3 py-3 text-white focus:border-amber-400 outline-none" />
+              {!urlValid && (
+                <p className="text-red-400 mono text-[10px] tracking-widest mt-2">⚠ MUST START WITH HTTP:// OR HTTPS://</p>
+              )}
+              <p className="text-zinc-600 mono text-[10px] tracking-wider mt-2">
+                {isAddCustom
+                  ? 'SHOWN AS ▶ VIDEO BUTTON DURING WORKOUT · PASTE ANY VIDEO URL'
+                  : 'LEAVE EMPTY TO REMOVE THE EXISTING LINK'}
+              </p>
+            </div>
+          )}
+          {canDelete && (
+            <div className="pt-3 border-t border-zinc-800">
+              <button onClick={handleDeleteClick}
+                className={`w-full py-3 mono text-xs tracking-widest font-bold border ${confirmingDelete ? 'bg-red-500 border-red-500 text-white' : 'bg-zinc-900 border-red-900 text-red-400 hover:bg-red-950'}`}>
+                {confirmingDelete ? 'TAP AGAIN TO CONFIRM DELETE' : '× DELETE CUSTOM EXERCISE'}
+              </button>
+              <p className="text-zinc-600 mono text-[10px] tracking-wider mt-2 text-center">
+                {confirmingDelete
+                  ? 'CONFIRMS IN 3S · ANY SLOT USING THIS EXERCISE WILL FALL BACK TO LIBRARY DEFAULT'
+                  : 'REMOVES FROM YOUR CUSTOM LIBRARY · EXISTING WORKOUT SNAPSHOTS PRESERVED'}
+              </p>
+            </div>
           )}
         </div>
-
-        <div style={S.editorFoot}>
-          <div style={{ flex: 1 }} />
-          <button style={S.ghostBtn} onClick={onClose}>
-            cancel
+        <div className="grid grid-cols-2 gap-2 p-5 border-t border-zinc-800">
+          <button onClick={onCancel}
+            className="bg-zinc-900 border border-zinc-800 py-3 text-zinc-300 mono text-xs tracking-widest">
+            CANCEL
           </button>
-          {draft && (
-            <button
-              style={S.primaryBtn}
-              onClick={() => onConfirm({ draft, qty, existingId: existing?.id })}
-            >
-              log it
-            </button>
-          )}
+          <button onClick={handleSave} disabled={!canSave}
+            className="bg-amber-400 text-black py-3 font-bold mono text-xs tracking-widest disabled:opacity-30 disabled:cursor-not-allowed">
+            SAVE
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-/* ============================================================
-   FOODS
-   ============================================================ */
-function Foods({ foods, setFoods }) {
-  const [editing, setEditing] = useState(null); // food id or "new-component"/"new-recipe"
-  const [q, setQ] = useState("");
-  const [sortBy, setSortBy] = useState("newest"); // "newest" | "alpha" | "verify"
-
-  const list = foods
-    .filter((f) => f.name.toLowerCase().includes(q.toLowerCase()))
-    .sort((a, b) => {
-      if (sortBy === "newest") {
-        // preserve array order (newest last), then reverse so newest first
-        return foods.indexOf(b) - foods.indexOf(a);
-      }
-      if (sortBy === "verify") {
-        if (a.verify !== b.verify) return a.verify ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      }
-      return a.name.localeCompare(b.name); // alpha
-    });
-
-  const save = (food) => {
-    setFoods((prev) => {
-      const i = prev.findIndex((x) => x.id === food.id);
-      if (i === -1) return [...prev, food];
-      const copy = [...prev];
-      copy[i] = food;
-      return copy;
-    });
-    setEditing(null);
+function PriorityBtn({ current, value, onClick, children }) {
+  const active = current === value;
+  const styles = {
+    emphasize: active ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-500',
+    maintain: active ? 'bg-zinc-100 text-black border-zinc-100' : 'bg-zinc-900 border-zinc-800 text-zinc-500',
+    ignore: active ? 'bg-zinc-700 text-zinc-300 border-zinc-700' : 'bg-zinc-900 border-zinc-800 text-zinc-500',
   };
-  const del = (id) => setFoods((prev) => prev.filter((x) => x.id !== id));
+  return (
+    <button onClick={onClick} className={`py-2 mono text-[10px] tracking-widest border font-bold ${styles[value]}`}>
+      {children}
+    </button>
+  );
+}
 
-  const verifyCount = foods.filter((f) => f.verify).length;
+function Field({ label, children }) {
+  return (
+    <div className="mb-5">
+      <label className="mono text-xs tracking-[0.15em] text-zinc-500 block mb-2">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+function Dashboard({ meso, prefs, onStartWorkout, onViewWorkout, onNewMeso, onDeleteMeso }) {
+  const [expandedWeek, setExpandedWeek] = useState(null);
+  const [showInfo, setShowInfo] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  // Find current week (first week with incomplete day)
+  let currentWeekIdx = meso.weeks.findIndex(w => w.days.some(d => !d.completed));
+  if (currentWeekIdx === -1) currentWeekIdx = meso.weeks.length - 1;
+
+  useEffect(() => { setExpandedWeek(currentWeekIdx); }, [currentWeekIdx]);
+
+  // Stats
+  const totalSetsLogged = meso.weeks.reduce((acc, w) =>
+    acc + w.days.reduce((da, d) => da + (d.exercises?.reduce((ea, e) =>
+      ea + e.sets.filter(s => s.reps !== null).length, 0) || 0), 0), 0);
+  const totalSessions = meso.weeks.reduce((acc, w) => acc + w.days.length, 0);
+  const completedSessions = meso.weeks.reduce((acc, w) => acc + w.days.filter(d => d.completed).length, 0);
+
+  // Greeting + date
+  const now = new Date();
+  const hour = now.getHours();
+  const greeting = hour < 5 ? 'Late night' : hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : hour < 21 ? 'Good evening' : 'Good night';
+  const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+
+  // Find next session — first incomplete day in current week
+  const currentWeek = meso.weeks[currentWeekIdx];
+  const nextDayIdx = currentWeek?.days.findIndex(d => !d.completed) ?? -1;
+  const nextDay = nextDayIdx >= 0 ? currentWeek.days[nextDayIdx] : null;
+  const isDeloadWeek = currentWeek?.isDeload;
 
   return (
     <div>
+      {/* GREETING STRIP */}
+      <div className="px-5 pt-6">
+        <p className="mono text-[10px] tracking-[0.2em] text-zinc-500 mb-1">{dateStr.toUpperCase()}</p>
+        <h1 className="text-2xl font-black tracking-tight text-zinc-100">{greeting}.</h1>
+      </div>
 
-      <div style={S.foodsHead}>
-        <input
-          placeholder="search…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          style={S.search}
+      {/* HERO MESO CARD */}
+      <div className="px-5 mt-6">
+        <div className="border border-zinc-800 bg-zinc-950 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="mono text-[10px] tracking-[0.2em] text-amber-400">ACTIVE MESOCYCLE</div>
+            <button onClick={() => setShowInfo(!showInfo)} className="text-zinc-500 hover:text-zinc-300">
+              <Info className="w-4 h-4" />
+            </button>
+          </div>
+          <h2 className="text-3xl font-black tracking-tight mb-3 leading-tight">{meso.name}</h2>
+
+          <div className="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-zinc-800">
+            <Stat label="WEEK" value={`${currentWeekIdx + 1}/${meso.weeks.length}`} accent={isDeloadWeek ? 'sky' : 'amber'} />
+            <Stat label="SESSIONS" value={`${completedSessions}/${totalSessions}`} />
+            <Stat label="SETS" value={totalSetsLogged} />
+          </div>
+
+          {nextDay && (
+            <button onClick={() => onStartWorkout(nextDayIdx, currentWeekIdx)}
+              className="w-full mt-5 bg-amber-400 text-black py-3 px-4 flex items-center justify-between hover:bg-amber-300 transition-colors">
+              <div className="text-left">
+                <div className="mono text-[10px] tracking-[0.2em] opacity-70">{isDeloadWeek ? 'DELOAD · NEXT SESSION' : 'NEXT SESSION'}</div>
+                <div className="text-base font-bold tracking-tight">{nextDay.name}</div>
+              </div>
+              <ChevronRight className="w-5 h-5" />
+            </button>
+          )}
+          {!nextDay && (
+            <div className="w-full mt-5 border border-emerald-900 bg-emerald-950/30 py-3 px-4 mono text-xs tracking-widest text-emerald-400 text-center">
+              ✓ MESOCYCLE COMPLETE
+            </div>
+          )}
+        </div>
+
+        {showInfo && <div className="mt-3"><RIRInfoBox onClose={() => setShowInfo(false)} /></div>}
+      </div>
+
+      {/* SCHEDULE */}
+      <div className="px-5 mt-8">
+        <h3 className="mono text-xs tracking-[0.2em] text-zinc-400 mb-3">SCHEDULE</h3>
+        <div className="space-y-2">
+          {meso.weeks.map((wk, wIdx) => (
+            <WeekCard key={wIdx} week={wk} weekIdx={wIdx}
+              isCurrent={wIdx === currentWeekIdx}
+              isPast={wIdx < currentWeekIdx}
+              expanded={expandedWeek === wIdx}
+              onToggle={() => setExpandedWeek(expandedWeek === wIdx ? null : wIdx)}
+              onStartWorkout={onStartWorkout}
+              onViewWorkout={onViewWorkout}
+              units={prefs.units}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* FOOTER ACTIONS */}
+      <div className="px-5 mt-8 pt-6 border-t border-zinc-900 flex gap-2">
+        <button onClick={onNewMeso}
+          className="flex-1 bg-zinc-900 border border-zinc-800 py-3 text-zinc-300 mono text-xs tracking-widest hover:border-zinc-600">
+          NEW MESO
+        </button>
+        <button onClick={() => setConfirmingDelete(true)}
+          className="bg-zinc-900 border border-zinc-800 py-3 px-4 text-red-400 hover:bg-red-950">
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </div>
+
+      {confirmingDelete && (
+        <ConfirmModal
+          title="DELETE MESOCYCLE"
+          message={<>This will permanently delete <span className="font-bold text-white">{meso.name}</span> and all logged data. This cannot be undone.</>}
+          confirmLabel="DELETE"
+          danger
+          onConfirm={() => { setConfirmingDelete(false); onDeleteMeso(); }}
+          onCancel={() => setConfirmingDelete(false)}
         />
-        <button
-          style={S.primaryBtn}
-          onClick={() => setEditing({ ...blankFood("component") })}
-        >
-          + component
-        </button>
-        <button
-          style={S.primaryBtn}
-          onClick={() => setEditing({ ...blankFood("recipe") })}
-        >
-          + recipe
-        </button>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, accent = 'zinc' }) {
+  const valueColor = accent === 'sky' ? 'text-sky-400' : accent === 'amber' ? 'text-amber-400' : 'text-zinc-100';
+  return (
+    <div>
+      <div className="mono text-[9px] tracking-[0.2em] text-zinc-500 mb-1">{label}</div>
+      <div className={`mono text-xl font-bold ${valueColor}`}>{value}</div>
+    </div>
+  );
+}
+
+function WeekCard({ week, weekIdx, isCurrent, isPast, expanded, onToggle, onStartWorkout, onViewWorkout, units }) {
+  const completedDays = week.days.filter(d => d.completed).length;
+  const totalDays = week.days.length;
+
+  return (
+    <div className={`border ${isCurrent ? 'border-amber-400/60' : week.isDeload ? 'border-sky-900' : 'border-zinc-800'}`}>
+      <button onClick={onToggle} className="w-full flex items-center justify-between p-4 text-left">
+        <div className="flex items-center gap-3">
+          <div className={`mono text-2xl font-black ${isCurrent ? 'text-amber-400' : week.isDeload ? 'text-sky-400' : 'text-zinc-500'}`}>
+            W{weekIdx + 1}
+          </div>
+          <div>
+            <div className="font-bold text-sm">
+              {week.isDeload ? 'DELOAD' : `Target RIR ${week.targetRIR}`}
+            </div>
+            <div className="mono text-xs text-zinc-500 mt-0.5">
+              {completedDays}/{totalDays} sessions · {week.generated ? 'READY' : 'PENDING'}
+            </div>
+          </div>
+        </div>
+        <ChevronRight className={`w-4 h-4 text-zinc-600 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+      </button>
+
+      {expanded && week.generated && (
+        <div className="border-t border-zinc-900 px-4 py-3 space-y-2">
+          {week.days.map((day, dIdx) => (
+            <div key={dIdx} className="flex items-center justify-between gap-2 py-2">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                {day.completed ? (
+                  <Check className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                ) : (
+                  <div className="w-4 h-4 border border-zinc-700 flex-shrink-0"></div>
+                )}
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">{day.name}</div>
+                  <div className="mono text-[10px] text-zinc-500 tracking-wider">
+                    {day.exercises.map(ex => ex.muscle.slice(0, 3).toUpperCase()).join(' ·\u00A0')}
+                  </div>
+                </div>
+              </div>
+              {!day.completed && isCurrent && (
+                <button onClick={() => onStartWorkout(dIdx, weekIdx)}
+                  className="bg-amber-400 text-black px-3 py-1.5 mono text-xs font-bold tracking-wider flex-shrink-0">
+                  START →
+                </button>
+              )}
+              {day.completed && (
+                onViewWorkout ? (
+                  <button onClick={() => onViewWorkout(dIdx, weekIdx)}
+                    className="bg-zinc-900 border border-zinc-800 text-zinc-400 px-3 py-1.5 mono text-xs font-bold tracking-wider hover:border-emerald-700 hover:text-emerald-400 flex-shrink-0">
+                    LOGGED →
+                  </button>
+                ) : (
+                  <div className="mono text-[10px] text-zinc-600 flex-shrink-0">LOGGED</div>
+                )
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {expanded && !week.generated && (
+        <div className="border-t border-zinc-900 px-4 py-4 text-xs mono text-zinc-500">
+          GENERATED AFTER PRIOR WEEK COMPLETES
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// ARCHIVE — list + detail view of completed/replaced mesocycles.
+// Reuses WeekCard for the detail render (read-only: isCurrent=false on every
+// week suppresses the "START →" buttons since those are gated behind isCurrent).
+// ============================================================================
+function ArchiveView({ archive, units, onDeleteEntry, onBack }) {
+  const [openId, setOpenId] = useState(null); // archivedAt of the expanded entry, or null
+  const [expandedWeek, setExpandedWeek] = useState(null);
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
+
+  const toggleOpen = (archivedAt) => {
+    const opening = openId !== archivedAt;
+    setOpenId(opening ? archivedAt : null);
+    setExpandedWeek(null); // reset week accordion whenever switching mesos
+  };
+
+  if (archive.length === 0) {
+    return (
+      <div className="min-h-screen bg-black text-zinc-100">
+        <style>{FONT_STYLE}</style>
+        <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10 flex items-center gap-3">
+          <button onClick={onBack} className="text-zinc-400 flex items-center gap-1 text-sm">
+            <ChevronLeft className="w-4 h-4" /> Back
+          </button>
+          <span className="mono text-xs tracking-[0.2em] text-zinc-400 ml-2">ARCHIVE</span>
+        </div>
+        <div className="px-5 py-12 text-center">
+          <Archive className="w-12 h-12 mx-auto text-zinc-700 mb-6" strokeWidth={1.5} />
+          <h1 className="text-2xl font-black tracking-tight mb-3">No history yet</h1>
+          <p className="text-zinc-500 text-sm max-w-xs mx-auto leading-relaxed">
+            Completed and replaced mesocycles land here automatically once you start a new one.
+          </p>
+        </div>
       </div>
-      <div style={{display:"flex",gap:4,marginBottom:10}}>
-        {[["newest","Recent"],["alpha","A–Z"],["verify","Verify ●"]].map(([k,label])=>(
-          <button key={k} onClick={()=>setSortBy(k)}
-            style={{...S.navBtn, flex:"0 auto", padding:"6px 12px", fontSize:11,
-              ...(sortBy===k?{background:"#46e6a0",color:"#0c0e0d",borderColor:"#46e6a0"}:{})
-            }}>{label}</button>
-        ))}
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-black text-zinc-100 pb-12">
+      <style>{FONT_STYLE}</style>
+      <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10 flex items-center gap-3">
+        <button onClick={onBack} className="text-zinc-400 flex items-center gap-1 text-sm">
+          <ChevronLeft className="w-4 h-4" /> Back
+        </button>
+        <span className="mono text-xs tracking-[0.2em] text-zinc-400 ml-2">ARCHIVE</span>
+      </div>
+      <div className="px-5 py-6">
+        <h2 className="text-2xl font-black tracking-tight mb-1">Training history</h2>
+        <p className="text-zinc-500 text-sm mb-6">
+          {archive.length} past mesocycle{archive.length === 1 ? '' : 's'}
+        </p>
+
+        <div className="space-y-2">
+          {archive.map((m) => {
+            const isOpen = openId === m.archivedAt;
+            const totalSetsLogged = m.weeks.reduce((acc, w) =>
+              acc + w.days.reduce((da, d) => da + (d.exercises?.reduce((ea, e) =>
+                ea + e.sets.filter(s => s.reps !== null).length, 0) || 0), 0), 0);
+            const totalSessions = m.weeks.reduce((acc, w) => acc + w.days.length, 0);
+            const completedSessions = m.weeks.reduce((acc, w) => acc + w.days.filter(d => d.completed).length, 0);
+            const archivedDateStr = new Date(m.archivedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            const isConfirming = confirmingDeleteId === m.archivedAt;
+
+            return (
+              <div key={m.archivedAt} className="border border-zinc-800">
+                <button onClick={() => toggleOpen(m.archivedAt)}
+                  className="w-full flex items-center justify-between p-4 text-left">
+                  <div className="min-w-0">
+                    <div className="font-bold truncate">{m.name}</div>
+                    <div className="mono text-[10px] tracking-widest text-zinc-500 mt-1">
+                      ARCHIVED {archivedDateStr.toUpperCase()} · {completedSessions}/{totalSessions} SESSIONS · {totalSetsLogged} SETS
+                    </div>
+                  </div>
+                  <ChevronRight className={`w-4 h-4 text-zinc-600 flex-shrink-0 ml-2 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                </button>
+
+                {isOpen && (
+                  <div className="border-t border-zinc-900 px-4 py-4">
+                    <div className="space-y-2 mb-4">
+                      {m.weeks.map((wk, wIdx) => (
+                        <WeekCard key={wIdx} week={wk} weekIdx={wIdx}
+                          isCurrent={false}
+                          isPast={true}
+                          expanded={expandedWeek === wIdx}
+                          onToggle={() => setExpandedWeek(expandedWeek === wIdx ? null : wIdx)}
+                          onStartWorkout={() => {}}
+                          units={units}
+                        />
+                      ))}
+                    </div>
+                    <button onClick={() => setConfirmingDeleteId(m.archivedAt)}
+                      className="w-full bg-zinc-900 border border-zinc-800 py-3 text-red-400 mono text-xs tracking-widest font-bold hover:bg-red-950 flex items-center justify-center gap-2">
+                      <Trash2 className="w-3.5 h-3.5" /> DELETE FROM ARCHIVE
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
-      {verifyCount > 0 && (
-        <div style={S.verifyBanner}>
-          <span style={S.verifyDot}>●</span> {verifyCount} seeded foods have
-          best-effort macros — tap to verify against your brands & numbers.
+      {confirmingDeleteId && (
+        <ConfirmModal
+          title="DELETE ARCHIVED MESO"
+          message="This permanently removes this mesocycle from your history. This cannot be undone."
+          confirmLabel="DELETE"
+          danger
+          onConfirm={() => {
+            onDeleteEntry(confirmingDeleteId);
+            setOpenId(prev => (prev === confirmingDeleteId ? null : prev));
+            setConfirmingDeleteId(null);
+          }}
+          onCancel={() => setConfirmingDeleteId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function RIRInfoBox({ onClose }) {
+  return (
+    <div className="bg-zinc-950 border border-zinc-800 p-4 mb-4 relative">
+      <button onClick={onClose} className="absolute top-3 right-3 text-zinc-500"><X className="w-4 h-4" /></button>
+      <div className="mono text-xs tracking-widest text-amber-400 mb-2">RIR — REPS IN RESERVE</div>
+      <p className="text-sm text-zinc-300 leading-relaxed">
+        How many more reps you could have done before failure.
+        <br /><span className="text-zinc-500">3 RIR = 3 reps left in the tank. 0 RIR = absolute failure.</span>
+      </p>
+      <p className="text-xs text-zinc-500 mt-3 leading-relaxed">
+        Calibration is the #1 failure point. Most lifters underestimate RIR by 1–2.
+        If a set felt smooth at the "0 RIR" mark, you probably had more in you.
+      </p>
+    </div>
+  );
+}
+
+// ============================================================================
+// WORKOUT LOGGER
+// ============================================================================
+function WorkoutLogger({ day, previousWeekDay, sessionKey, weekNum, totalWeeks, isDeload, units, customExercises, setCustomExercises, exerciseVideos, setExerciseVideos, exerciseNotes, setExerciseNotes, onDeleteCustomExercise, onSwapPermanent, onDeletePermanent, onAddPermanent, onReorderPermanent, growthTargets, onSetGrowthTarget, onClearGrowthTarget, onComplete, onCancel }) {
+  const draftKey = `hyperlog:draft:${sessionKey}`;
+
+  // Exercises removed via a TODAY-ONLY delete this session. Held here (sets
+  // zeroed) rather than actually discarded, because next week's generator
+  // derives its roster from THIS week's completed exercise list — if a
+  // today-only delete just vanished the entry, the exercise would silently
+  // disappear from every future week too, which is exactly what TODAY ONLY
+  // is supposed to avoid. Merged back into the array at completion time
+  // (see proceedToFeedback / FeedbackForm onSubmit below) so the program
+  // stays intact while today's tab list and FINISH validation never see it
+  // again this session.
+  const skippedTodayRef = useRef([]);
+
+  // Silent crash/refresh recovery: prefer a saved draft over the fresh
+  // prescription if one exists AND its exercise ids exactly match today's
+  // (order-independent — a REST OF MESO reorder alone shouldn't invalidate an
+  // otherwise-good draft, but a swap/add/delete since the draft was written
+  // WOULD change that set, and a stale draft shouldn't be replayed over a
+  // now-different exercise list).
+  const [exercises, setExercises] = useState(() => {
+    const fresh = JSON.parse(JSON.stringify(day.exercises || []));
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) {
+        const draft = JSON.parse(raw);
+        const draftIds = (draft.exercises || []).map(e => e.id).sort().join('|');
+        const freshIds = fresh.map(e => e.id).sort().join('|');
+        if (draftIds && draftIds === freshIds) {
+          skippedTodayRef.current = draft.skippedToday || [];
+          return draft.exercises;
+        }
+      }
+    } catch (e) { /* corrupted or unavailable — fall back to fresh */ }
+    return fresh;
+  });
+  const [feedback, setFeedback] = useState({});
+  const [activeExIdx, setActiveExIdx] = useState(0);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [exerciseModalState, setExerciseModalState] = useState(null);
+  const [swapping, setSwapping] = useState(false);
+  const [pendingSwapEx, setPendingSwapEx] = useState(null);
+  const [confirmingDeleteExercise, setConfirmingDeleteExercise] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [pendingAddMuscle, setPendingAddMuscle] = useState(null);
+  const [pendingAddEx, setPendingAddEx] = useState(null);
+  const [confirmingMove, setConfirmingMove] = useState(false);
+  // { muscle, newExId, newExName, oldExName } while confirming a star move
+  // from one exercise to another for the same muscle; null otherwise.
+  const [pendingStarReassign, setPendingStarReassign] = useState(null);
+  // Tracks a burst of MOVE taps: null when no reorder is in progress, otherwise
+  // permutation[newPos] = originalPos for everything moved since the exercise
+  // last settled. moveInProgressRef distinguishes an activeExIdx change caused
+  // by moveExerciseTab itself from any other navigation (tab click, prev/next).
+  const movePermutationRef = useRef(null);
+  const moveSettleTimerRef = useRef(null);
+  const moveInProgressRef = useRef(false);
+  const MOVE_SETTLE_MS = 3000;
+
+  // Silent "discreet save" — mirrors in-progress logging to localStorage so a
+  // refresh, tab kill, or an intentional Exit never costs more than a beat of
+  // typing. Debounced after every set/exercise edit (below), and flushed
+  // immediately on exercise-tab navigation (in the effect right after this
+  // one) — that's exactly the moment worth guaranteeing fresh rather than
+  // eventually-consistent. Deliberately NEVER deleted here, including after a
+  // successful FINISH — completion only updates local `meso` state, and the
+  // actual durable write to Supabase happens later, async, on an 800ms
+  // debounce in AppInner. Deleting the draft the instant FINISH is tapped
+  // (as an earlier version of this did) leaves a real gap: if the tab gets
+  // reloaded before that Supabase write lands — e.g. a backgrounded mobile
+  // tab getting silently evicted, worse on bad wifi — the safety net is
+  // already gone AND the sync never happened, losing the whole session with
+  // no recovery path. Leaving the draft in place costs nothing: once a day
+  // is genuinely completed and synced, Dashboard never routes back into
+  // WorkoutLogger for it, so the stale draft is simply never read again.
+  const saveDraft = (exercisesToSave) => {
+    try {
+      localStorage.setItem(draftKey, JSON.stringify({ exercises: exercisesToSave, skippedToday: skippedTodayRef.current, savedAt: Date.now() }));
+    } catch (e) { /* storage full/unavailable — best-effort only */ }
+  };
+
+  useEffect(() => {
+    const handle = setTimeout(() => saveDraft(exercises), 500);
+    return () => clearTimeout(handle);
+  }, [exercises, draftKey]);
+
+  // Reset swap/add state when navigating between exercises (tabs, prev/next).
+  // A move-triggered change is handled separately below — it must NOT clear the
+  // burst it just started, or the settle timer could never fire.
+  useEffect(() => {
+    saveDraft(exercises); // flush immediately on nav, not just on the debounce
+    setSwapping(false);
+    setPendingSwapEx(null);
+    setAdding(false);
+    setPendingAddMuscle(null);
+    setPendingAddEx(null);
+    if (!moveInProgressRef.current) {
+      // Navigated away for some other reason before the exercise sat still for
+      // MOVE_SETTLE_MS — treat the pending reorder as today-only rather than
+      // pop a confirmation about an exercise the user isn't looking at anymore.
+      if (moveSettleTimerRef.current) {
+        clearTimeout(moveSettleTimerRef.current);
+        moveSettleTimerRef.current = null;
+      }
+      movePermutationRef.current = null;
+    }
+    moveInProgressRef.current = false;
+  }, [activeExIdx]);
+
+  // Clear any pending settle timer if the component unmounts mid-countdown
+  // (e.g. Exit tapped right after a move) — avoids a setState-after-unmount.
+  useEffect(() => {
+    return () => {
+      if (moveSettleTimerRef.current) clearTimeout(moveSettleTimerRef.current);
+    };
+  }, []);
+
+  // Resolve current video URL — user-edited override beats snapshot
+  const getEffectiveVideoUrl = (ex) => {
+    if (ex.id in (exerciseVideos || {})) return exerciseVideos[ex.id] || null;
+    return ex.videoUrl || null;
+  };
+
+  // Resolve a display name for an exercise id that may not be in today's
+  // session (the currently-starred exercise for a muscle could live on a
+  // different day) — checks today's own list first, then the library, then
+  // custom exercises for that muscle.
+  const findExerciseName = (muscle, exId) => {
+    const fromToday = exercises.find(e => e.id === exId);
+    if (fromToday) return fromToday.name;
+    const fromLibrary = (EXERCISES[muscle] || []).find(e => e.id === exId);
+    if (fromLibrary) return fromLibrary.name;
+    const fromCustom = (customExercises[muscle] || []).find(e => e.id === exId);
+    if (fromCustom) return fromCustom.name;
+    return 'the current exercise';
+  };
+
+  // Last week's logged numbers for this exact exercise+set slot, for the
+  // faded placeholder hint — id-matched (so a swapped exercise correctly
+  // shows nothing) and position-matched by set index. Returns null for week
+  // 1, a newly-added exercise, or a set index that didn't exist last week
+  // (e.g. this week added a set via progression).
+  const getLastWeekSet = (exerciseId, setIdx) => {
+    if (!previousWeekDay?.exercises) return null;
+    const prevEx = previousWeekDay.exercises.find(e => e.id === exerciseId);
+    return prevEx?.sets?.[setIdx] || null;
+  };
+
+  // Handler for video edit save
+  const handleVideoEditSave = (exerciseId, newUrl) => {
+    const next = { ...(exerciseVideos || {}) };
+    if (newUrl) next[exerciseId] = newUrl;
+    else next[exerciseId] = null;
+    setExerciseVideos(next);
+    setExerciseModalState(null);
+  };
+
+  // Handler for note save — empty string removes the note entirely
+  const handleNoteSave = (exerciseId, newNote) => {
+    const next = { ...(exerciseNotes || {}) };
+    if (newNote) next[exerciseId] = newNote;
+    else delete next[exerciseId];
+    setExerciseNotes(next);
+    setExerciseModalState(null);
+  };
+
+  // Handler for deleting custom exercise during workout (snapshots preserved)
+  const handleDeleteCustomFromWorkout = (exerciseId, muscle) => {
+    onDeleteCustomExercise(exerciseId, muscle);
+    setExerciseModalState(null);
+  };
+  const [confirmingIncomplete, setConfirmingIncomplete] = useState(false);
+
+  const updateSet = (exIdx, setIdx, field, value) => {
+    const next = [...exercises];
+    next[exIdx].sets[setIdx][field] = value;
+    setExercises(next);
+  };
+
+  const addSet = (exIdx) => {
+    const next = [...exercises];
+    const last = next[exIdx].sets[next[exIdx].sets.length - 1];
+    next[exIdx].sets.push({ weight: last?.weight ?? 0, reps: null, rirTarget: last?.rirTarget ?? 2, rirActual: null, technique: null });
+    setExercises(next);
+  };
+
+  const removeSet = (exIdx, setIdx) => {
+    const next = [...exercises];
+    if (next[exIdx].sets.length > 1) {
+      next[exIdx].sets.splice(setIdx, 1);
+      setExercises(next);
+    }
+  };
+
+  // Build available exercises for a given muscle (library + customs, all muscles)
+  const getSwapOptions = (muscle) => {
+    const library = (EXERCISES[muscle] || []).map(ex => ({ ...ex }));
+    const custom = (customExercises[muscle] || []).map(ex => ({ ...ex }));
+    return [...library, ...custom];
+  };
+
+  const applySwap = (exIdx, newEx, scope) => {
+    // Always update the current session
+    const next = [...exercises];
+    next[exIdx] = {
+      ...next[exIdx],
+      id: newEx.id,
+      name: newEx.name,
+      equipment: newEx.equipment,
+      isCustom: newEx.isCustom || false,
+      assisted: newEx.assisted || false,
+      videoUrl: newEx.videoUrl || null,
+      weightNote: null,
+    };
+    setExercises(next);
+    // If permanent, also update future meso days
+    if (scope === 'meso') {
+      onSwapPermanent(exercises[exIdx].id, newEx);
+    }
+    setSwapping(false);
+    setPendingSwapEx(null);
+  };
+
+  // Delete an exercise. REST OF MESO mirrors swap/add's meso scope — removes
+  // it from today and every remaining instance via onDeletePermanent. TODAY
+  // ONLY takes it out of today's tabs and FINISH validation, but stashes it
+  // (sets zeroed) in skippedTodayRef rather than discarding it outright, so
+  // completion still hands next week's generator a roster that includes it —
+  // otherwise the exercise would vanish from the whole rest of the meso, not
+  // just today, since next week is built from this week's completed list.
+  const applyDelete = (exIdx, scope) => {
+    const exToDelete = exercises[exIdx];
+    const next = exercises.filter((_, i) => i !== exIdx);
+    if (scope === 'today') {
+      skippedTodayRef.current = [...skippedTodayRef.current, { ...exToDelete, sets: [] }];
+    } else {
+      onDeletePermanent(exToDelete.id);
+    }
+    if (next.length === 0) {
+      onCancel();
+      return;
+    }
+    setExercises(next);
+    setActiveExIdx(Math.min(exIdx, next.length - 1));
+    setSwapping(false);
+    setPendingSwapEx(null);
+  };
+
+  // Reorder exercises mid-session. Applies immediately (no waiting to see the
+  // move happen), but doesn't ask TODAY ONLY / REST OF MESO right away — that
+  // would mean a prompt after every single tap when moving something several
+  // slots. Instead each tap (re)starts a settle timer; once MOVE_SETTLE_MS
+  // passes with no further taps, the confirmation appears for wherever things
+  // ended up. movePermutationRef tracks the position-swap in parallel with the
+  // actual array so it can be replayed onto other weeks (REST OF MESO) or
+  // undone entirely (CANCEL) regardless of how many taps made up the burst.
+  const moveExerciseTab = (direction) => {
+    const toIdx = activeExIdx + direction;
+    if (toIdx < 0 || toIdx >= exercises.length) return;
+
+    if (!movePermutationRef.current) {
+      movePermutationRef.current = exercises.map((_, i) => i); // start a new burst
+    }
+    const perm = [...movePermutationRef.current];
+    [perm[activeExIdx], perm[toIdx]] = [perm[toIdx], perm[activeExIdx]];
+    movePermutationRef.current = perm;
+
+    const next = [...exercises];
+    [next[activeExIdx], next[toIdx]] = [next[toIdx], next[activeExIdx]];
+    setExercises(next);
+    moveInProgressRef.current = true;
+    setActiveExIdx(toIdx);
+
+    if (moveSettleTimerRef.current) clearTimeout(moveSettleTimerRef.current);
+    moveSettleTimerRef.current = setTimeout(() => {
+      moveSettleTimerRef.current = null;
+      const perm = movePermutationRef.current;
+      const netChanged = perm && perm.some((origIdx, i) => origIdx !== i);
+      if (netChanged) {
+        setConfirmingMove(true);
+      } else {
+        // Back where it started — nothing to confirm, don't interrupt.
+        movePermutationRef.current = null;
+      }
+    }, MOVE_SETTLE_MS);
+  };
+
+  // CANCEL on the settle prompt — undo the whole burst, not just the last tap.
+  // Inverts movePermutationRef against the current array to rebuild the order
+  // as it stood before the first move in this burst, and re-points activeExIdx
+  // at the same exercise it was showing (now back in its original slot).
+  const revertMove = () => {
+    const perm = movePermutationRef.current;
+    if (!perm) return;
+    const original = new Array(exercises.length);
+    perm.forEach((origIdx, curIdx) => { original[origIdx] = exercises[curIdx]; });
+    setExercises(original);
+    setActiveExIdx(perm[activeExIdx]);
+  };
+
+  // Add a brand-new exercise mid-session. Same TODAY ONLY / REST OF MESO fork
+  // as swap: session-only just appends locally; meso scope also appends to this
+  // same day-slot (this weekIdx's day included, plus every future week's same
+  // slot) via onAddPermanent, mirroring handleSwapPermanent/handleDeletePermanent's
+  // traversal — this time pushing a freshly-built exercise instead of altering one.
+  const applyAdd = (newEx, muscle, scope) => {
+    const startSets = getStartingSets(muscle, undefined);
+    const targetRIR = exercises[0]?.sets?.[0]?.rirTarget ?? 2; // match today's RIR target
+    const newEntry = {
+      id: newEx.id,
+      name: newEx.name,
+      muscle,
+      assisted: newEx.assisted || false,
+      videoUrl: newEx.videoUrl || null,
+      sets: Array(startSets).fill(null).map(() => ({
+        weight: 0, reps: null, rirTarget: targetRIR, rirActual: null, technique: null,
+      })),
+    };
+    const next = [...exercises, newEntry];
+    setExercises(next);
+    setActiveExIdx(next.length - 1);
+    if (scope === 'meso') {
+      onAddPermanent(muscle, newEx);
+    }
+    setAdding(false);
+    setPendingAddMuscle(null);
+    setPendingAddEx(null);
+  };
+
+  // Handle custom exercise creation from either the swap picker or the add panel —
+  // exerciseModalState.forAddPanel tells us which pending slot to fill on save.
+  const handleAddCustomExercise = (newExercise, videoUrl) => {
+    if (!exerciseModalState) return;
+    const { muscle, forAddPanel } = exerciseModalState;
+    if (!muscle) return;
+    const customDef = { id: newExercise.id, name: newExercise.name, equipment: 'custom', isCustom: true, assisted: newExercise.assisted || false };
+    setCustomExercises({
+      ...customExercises,
+      [muscle]: [...(customExercises[muscle] || []), customDef],
+    });
+    if (videoUrl) {
+      setExerciseVideos({ ...(exerciseVideos || {}), [newExercise.id]: videoUrl });
+    }
+    if (forAddPanel) {
+      setPendingAddEx({ ...customDef, videoUrl: videoUrl || null });
+    } else {
+      setPendingSwapEx({ ...customDef, videoUrl: videoUrl || null });
+    }
+    setExerciseModalState(null);
+  };
+
+  const allSetsLogged = exercises.every(ex => ex.sets.every(s => s.reps !== null && s.rirActual !== null));
+  // iOS Safari's native <select> can fire its change/blur event after an adjacent
+  // button's click event, so a value picked immediately before tapping FINISH may not
+  // have committed to state yet. This ref lets handleComplete read the freshest value
+  // after forcing that pending commit (see handleComplete below).
+  const allSetsLoggedRef = useRef(allSetsLogged);
+  allSetsLoggedRef.current = allSetsLogged;
+  const uniqueMuscles = [...new Set(exercises.map(e => e.muscle))];
+
+  // Build disambiguated tab labels (CHEST 1, CHEST 2 when same muscle appears twice)
+  const tabLabels = (() => {
+    const totals = {};
+    exercises.forEach(e => { totals[e.muscle] = (totals[e.muscle] || 0) + 1; });
+    const seen = {};
+    return exercises.map(e => {
+      seen[e.muscle] = (seen[e.muscle] || 0) + 1;
+      return totals[e.muscle] > 1
+        ? `${e.muscle.toUpperCase()} ${seen[e.muscle]}`
+        : e.muscle.toUpperCase();
+    });
+  })();
+
+  const proceedToFeedback = () => {
+    if (Object.keys(feedback).length === 0) {
+      setShowFeedback(true);
+      return;
+    }
+    onComplete({ exercises: [...exercises, ...skippedTodayRef.current], feedback });
+  };
+
+  const handleComplete = () => {
+    // If a set's RIR <select> is still focused (native picker just dismissed),
+    // force it to commit before we check. On iOS Safari this blur/change can
+    // otherwise land after this click, making a just-filled field read as unlogged.
+    if (document.activeElement && document.activeElement.blur) {
+      document.activeElement.blur();
+    }
+    requestAnimationFrame(() => {
+      if (!allSetsLoggedRef.current) {
+        setConfirmingIncomplete(true);
+        return;
+      }
+      proceedToFeedback();
+    });
+  };
+
+  if (showFeedback) {
+    return <FeedbackForm muscles={uniqueMuscles} feedback={feedback} setFeedback={setFeedback}
+      onBack={() => setShowFeedback(false)}
+      onSubmit={() => onComplete({ exercises: [...exercises, ...skippedTodayRef.current], feedback })} />;
+  }
+
+  const ex = exercises[activeExIdx];
+  const loggedSetsForActiveEx = ex.sets.filter(s => s.reps !== null).length;
+
+  return (
+    <div className="min-h-screen bg-black text-zinc-100 pb-24">
+      <style>{FONT_STYLE}</style>
+      <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10">
+        <div className="flex items-center justify-between">
+          <button onClick={onCancel} className="text-zinc-400 text-sm flex items-center gap-1">
+            <X className="w-4 h-4" /> Exit
+          </button>
+          <div className="mono text-xs text-zinc-500">
+            W{weekNum} · {day.name} {isDeload && <span className="text-sky-400 ml-1">DELOAD</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Exercise tabs — the active tab grows arrows around its own label for
+          mid-session reorder; inactive tabs stay plain. ADD EXERCISE rides at
+          the end of the same scrollable row. No separate control row at all. */}
+      <div className="border-b border-zinc-900 overflow-x-auto">
+        <div className="flex items-stretch">
+          {exercises.map((e, idx) => {
+            const isActive = activeExIdx === idx;
+            if (!isActive) {
+              return (
+                <button key={idx} onClick={() => setActiveExIdx(idx)}
+                  className="px-4 py-3 mono text-xs whitespace-nowrap border-b-2 border-transparent text-zinc-500 flex-shrink-0">
+                  {tabLabels[idx]}
+                </button>
+              );
+            }
+            return (
+              <div key={idx} className="flex items-center border-b-2 border-amber-400 flex-shrink-0">
+                <button onClick={() => moveExerciseTab(-1)} disabled={idx === 0}
+                  title="Move this exercise earlier"
+                  className="pl-3 pr-1.5 py-3 text-amber-400 disabled:opacity-20 disabled:cursor-not-allowed hover:text-amber-300">
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <span className="mono text-xs whitespace-nowrap text-white font-bold">
+                  {tabLabels[idx]}
+                </span>
+                <button onClick={() => moveExerciseTab(1)} disabled={idx === exercises.length - 1}
+                  title="Move this exercise later"
+                  className="pl-1.5 pr-3 py-3 text-amber-400 disabled:opacity-20 disabled:cursor-not-allowed hover:text-amber-300">
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            );
+          })}
+          <button
+            onClick={() => { setAdding(a => !a); setSwapping(false); setPendingSwapEx(null); }}
+            className={`ml-3 px-4 py-3 mono text-xs font-bold whitespace-nowrap flex items-center gap-1.5 flex-shrink-0 ${adding ? 'bg-amber-300 text-black' : 'bg-amber-400 text-black hover:bg-amber-300'}`}>
+            <Plus className="w-3.5 h-3.5" /> ADD EXERCISE
+          </button>
+        </div>
+      </div>
+
+      {adding && (
+        <div className="px-5 pt-4">
+          <div className="border border-zinc-800 p-3 bg-zinc-950">
+            <label className="mono text-[10px] tracking-widest text-zinc-500 block mb-2">MUSCLE</label>
+            <select
+              value={pendingAddMuscle || ''}
+              onChange={e => { setPendingAddMuscle(e.target.value); setPendingAddEx(null); }}
+              className="w-full bg-zinc-900 border border-zinc-700 px-3 py-2 mono text-sm text-white outline-none focus:border-amber-400 mb-3">
+              <option value="" disabled>SELECT MUSCLE…</option>
+              {MUSCLE_GROUPS.map(m => <option key={m} value={m}>{m.toUpperCase()}</option>)}
+            </select>
+
+            {pendingAddMuscle && (
+              <>
+                <label className="mono text-[10px] tracking-widest text-zinc-500 block mb-2">EXERCISE</label>
+                <select
+                  value={pendingAddEx?.id || ''}
+                  onChange={e => {
+                    const opts = getSwapOptions(pendingAddMuscle);
+                    const found = opts.find(o => o.id === e.target.value);
+                    setPendingAddEx(found || null);
+                  }}
+                  className="w-full bg-zinc-900 border border-zinc-700 px-3 py-2 mono text-sm text-white outline-none focus:border-amber-400 mb-2">
+                  <option value="" disabled>SELECT EXERCISE…</option>
+                  {getSwapOptions(pendingAddMuscle).map(opt => (
+                    <option key={opt.id} value={opt.id}>{opt.name}{opt.assisted ? ' · ASSISTED' : ''}{opt.isCustom ? ' ✦' : ''}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => setExerciseModalState({ mode: 'add_custom', muscle: pendingAddMuscle, forAddPanel: true })}
+                  className="w-full border border-dashed border-zinc-700 py-2 text-zinc-500 mono text-[10px] tracking-widest flex items-center justify-center gap-2 hover:border-amber-400 hover:text-amber-400 mb-3">
+                  <Plus className="w-3 h-3" /> ADD CUSTOM EXERCISE
+                </button>
+              </>
+            )}
+
+            {pendingAddEx ? (
+              <>
+                <div className="mono text-[10px] text-zinc-500 tracking-widest mb-2">APPLY TO:</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <button onClick={() => applyAdd(pendingAddEx, pendingAddMuscle, 'session')}
+                    className="py-2 bg-amber-400 text-black mono text-[10px] font-bold tracking-wider">
+                    TODAY ONLY
+                  </button>
+                  <button onClick={() => applyAdd(pendingAddEx, pendingAddMuscle, 'meso')}
+                    className="py-2 border border-amber-400 text-amber-400 mono text-[10px] font-bold tracking-wider hover:bg-amber-400 hover:text-black">
+                    REST OF MESO
+                  </button>
+                  <button onClick={() => { setAdding(false); setPendingAddMuscle(null); setPendingAddEx(null); }}
+                    className="py-2 border border-zinc-700 text-zinc-400 mono text-[10px] font-bold tracking-wider hover:border-zinc-500">
+                    CANCEL
+                  </button>
+                </div>
+              </>
+            ) : (
+              <button onClick={() => { setAdding(false); setPendingAddMuscle(null); setPendingAddEx(null); }}
+                className="w-full py-2 border border-zinc-800 text-zinc-600 mono text-[10px] tracking-widest hover:border-zinc-600">
+                CANCEL
+              </button>
+            )}
+          </div>
         </div>
       )}
 
-      <div style={S.foodGrid}>
-        {list.map((food) => {
-          const m = foodMacros(food, foods);
+      <div className="px-5 py-5">
+        <div className="flex items-center justify-between mb-1 gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-2xl font-black tracking-tight truncate">{ex.name}</h2>
+            <button
+              onClick={() => { setSwapping(s => !s); setPendingSwapEx(null); setAdding(false); setPendingAddMuscle(null); setPendingAddEx(null); }}
+              title="Swap exercise"
+              className={`w-8 h-8 border flex items-center justify-center flex-shrink-0 ${swapping ? 'bg-amber-400 border-amber-400 text-black' : 'border-zinc-700 text-zinc-400 hover:border-amber-400 hover:text-amber-400'}`}>
+              <Edit3 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                const currentStarredId = growthTargets?.[ex.muscle];
+                if (currentStarredId === ex.id) {
+                  onClearGrowthTarget(ex.muscle);
+                } else if (currentStarredId) {
+                  setPendingStarReassign({
+                    muscle: ex.muscle,
+                    newExId: ex.id,
+                    newExName: ex.name,
+                    oldExName: findExerciseName(ex.muscle, currentStarredId),
+                  });
+                } else {
+                  onSetGrowthTarget(ex.muscle, ex.id);
+                }
+              }}
+              title={growthTargets?.[ex.muscle] === ex.id ? 'Remove growth emphasis' : `Make this ${ex.muscle}'s growth exercise`}
+              className={`w-8 h-8 border flex items-center justify-center flex-shrink-0 ${growthTargets?.[ex.muscle] === ex.id ? 'bg-amber-400 border-amber-400 text-black' : 'border-zinc-700 text-zinc-400 hover:border-amber-400 hover:text-amber-400'}`}>
+              <Star className="w-3.5 h-3.5" fill={growthTargets?.[ex.muscle] === ex.id ? 'currentColor' : 'none'} />
+            </button>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {getEffectiveVideoUrl(ex) && (
+              <a href={getEffectiveVideoUrl(ex)} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1 text-amber-400 mono text-[10px] tracking-widest border border-amber-400/40 px-2 py-1 hover:bg-amber-400 hover:text-black">
+                <Play className="w-3 h-3" fill="currentColor" /> WATCH
+              </a>
+            )}
+            <button
+              onClick={() => setExerciseModalState({
+                mode: 'edit_note',
+                exerciseId: ex.id,
+                exerciseName: ex.name,
+                muscle: ex.muscle,
+              })}
+              title={exerciseNotes?.[ex.id] ? 'Edit notes' : 'Add notes'}
+              className={`w-8 h-8 border flex items-center justify-center ${exerciseNotes?.[ex.id] ? 'bg-zinc-700 border-zinc-600 text-amber-400' : 'border-zinc-700 text-zinc-400 hover:border-amber-400 hover:text-amber-400'}`}>
+              <StickyNote className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setExerciseModalState({
+                mode: 'edit_video',
+                exerciseId: ex.id,
+                exerciseName: ex.name,
+                muscle: ex.muscle,
+                isCustom: ex.id.startsWith('custom-'),
+              })}
+              className="bg-amber-400 border border-amber-400 w-8 h-8 flex items-center justify-center hover:bg-amber-300"
+              title={getEffectiveVideoUrl(ex) ? 'Edit / remove video link' : 'Add video link'}>
+              <Play className="w-3.5 h-3.5 text-red-600" fill={getEffectiveVideoUrl(ex) ? 'none' : 'currentColor'} />
+            </button>
+          </div>
+        </div>
+
+        {/* Swap exercise panel */}
+        {swapping && (
+          <div className="mb-4 border border-zinc-800 p-3 bg-zinc-950">
+            <label className="mono text-[10px] tracking-widest text-zinc-500 block mb-2">SELECT REPLACEMENT</label>
+            <select
+              value={pendingSwapEx?.id || ex.id}
+              onChange={e => {
+                const opts = getSwapOptions(ex.muscle);
+                const found = opts.find(o => o.id === e.target.value);
+                setPendingSwapEx(found || null);
+              }}
+              className="w-full bg-zinc-900 border border-zinc-700 px-3 py-2 mono text-sm text-white outline-none focus:border-amber-400 mb-2">
+              {getSwapOptions(ex.muscle).map(opt => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.name}{opt.assisted ? ' · ASSISTED' : ''}{opt.isCustom ? ' ✦' : ''}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => setExerciseModalState({ mode: 'add_custom', muscle: ex.muscle })}
+              className="w-full border border-dashed border-zinc-700 py-2 text-zinc-500 mono text-[10px] tracking-widest flex items-center justify-center gap-2 hover:border-amber-400 hover:text-amber-400 mb-3">
+              <Plus className="w-3 h-3" /> ADD CUSTOM EXERCISE
+            </button>
+            {pendingSwapEx && pendingSwapEx.id !== ex.id && (
+              <>
+                <div className="mono text-[10px] text-zinc-500 tracking-widest mb-2">APPLY TO:</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <button onClick={() => applySwap(activeExIdx, pendingSwapEx, 'session')}
+                    className="py-2 bg-amber-400 text-black mono text-[10px] font-bold tracking-wider">
+                    TODAY ONLY
+                  </button>
+                  <button onClick={() => applySwap(activeExIdx, pendingSwapEx, 'meso')}
+                    className="py-2 border border-amber-400 text-amber-400 mono text-[10px] font-bold tracking-wider hover:bg-amber-400 hover:text-black">
+                    REST OF MESO
+                  </button>
+                  <button onClick={() => { setSwapping(false); setPendingSwapEx(null); }}
+                    className="py-2 border border-zinc-700 text-zinc-400 mono text-[10px] font-bold tracking-wider hover:border-zinc-500">
+                    CANCEL
+                  </button>
+                </div>
+              </>
+            )}
+            {(!pendingSwapEx || pendingSwapEx.id === ex.id) && (
+              <>
+                <button
+                  onClick={() => setConfirmingDeleteExercise(true)}
+                  className="w-full py-2 border border-red-900 bg-zinc-900 text-red-400 mono text-[10px] tracking-widest font-bold flex items-center justify-center gap-2 hover:bg-red-950 mb-3">
+                  <Trash2 className="w-3 h-3" /> DELETE EXERCISE
+                </button>
+                <button onClick={() => { setSwapping(false); setPendingSwapEx(null); }}
+                  className="w-full py-2 border border-zinc-800 text-zinc-600 mono text-[10px] tracking-widest hover:border-zinc-600">
+                  CANCEL
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {ex.weightNote && (
+          <div className="mono text-[11px] text-amber-400/70 mb-4">→ {ex.weightNote}</div>
+        )}
+        {exerciseNotes?.[ex.id] && (
+          <div className="bg-zinc-950 border-l-2 border-zinc-600 px-3 py-2 mb-4 mono text-[11px] text-zinc-300 whitespace-pre-line">
+            {exerciseNotes[ex.id]}
+          </div>
+        )}
+
+        {/* Sets table header — mt-2 + top border give it a fixed visual start
+            regardless of whether weightNote/notes appear above, so it never
+            reads as a continuation of the title block. */}
+        <div className="grid grid-cols-12 gap-2 mt-2 mb-3 pt-3 border-t border-zinc-900 mono text-[10px] tracking-widest text-zinc-600">
+          <div className="col-span-1">#</div>
+          <div className="col-span-1"></div>
+          <div className="col-span-3">{ex.assisted ? 'ASSISTANCE' : 'WEIGHT'}</div>
+          <div className="col-span-2">REPS</div>
+          <div className="col-span-1 text-center">TGT RIR</div>
+          <div className="col-span-3 text-center pr-6">RIR</div>
+          <div className="col-span-1"></div>
+        </div>
+
+        {ex.sets.map((set, sIdx) => {
+          const lastWeekSet = getLastWeekSet(ex.id, sIdx);
           return (
-            <div key={food.id} style={S.foodCard} onClick={() => setEditing(food)}>
-              <div style={S.foodCardTop}>
-                <span style={S.foodCardName}>
-                  {food.name}
-                  {food.verify && <span style={S.verifyDot}>●</span>}
-                </span>
-                {food.type === "recipe" && (
-                  <span style={S.recipeTag}>recipe ÷{food.servings}</span>
-                )}
-              </div>
-              <div style={S.foodCardMacros}>
-                <span>{r0(m.cal)} kcal</span>
-                <span>{r1(m.p)}P</span>
-                <span>{r1(m.f)}F</span>
-                <span>{r1(m.c)}C</span>
-                <span style={S.foodCardUnit}>/ {food.unit}</span>
-              </div>
+            <SetRow key={sIdx} num={sIdx + 1} set={set} units={units}
+              canRemove={ex.sets.length > 1}
+              lastWeekReps={lastWeekSet?.reps ?? null}
+              lastWeekWeight={set.weight ? null : (lastWeekSet?.weight || null)}
+              onChange={(field, value) => updateSet(activeExIdx, sIdx, field, value)}
+              onRemove={() => removeSet(activeExIdx, sIdx)}
+            />
+          );
+        })}
+
+        <button onClick={() => addSet(activeExIdx)}
+          className="w-full mt-3 border border-dashed border-zinc-800 py-3 text-zinc-500 text-xs mono tracking-widest flex items-center justify-center gap-2">
+          <Plus className="w-3 h-3" /> ADD SET
+        </button>
+
+        {/* Nav between exercises */}
+        <div className="grid grid-cols-2 gap-2 mt-6">
+          <button onClick={() => setActiveExIdx(Math.max(0, activeExIdx - 1))}
+            disabled={activeExIdx === 0}
+            className="bg-zinc-900 border border-zinc-800 py-3 disabled:opacity-30 mono text-xs tracking-widest">
+            ← PREV
+          </button>
+          {activeExIdx < exercises.length - 1 ? (
+            <button onClick={() => setActiveExIdx(activeExIdx + 1)}
+              className="bg-zinc-900 border border-zinc-800 py-3 mono text-xs tracking-widest">
+              NEXT →
+            </button>
+          ) : (
+            <button onClick={handleComplete}
+              className="bg-amber-400 text-black py-3 font-bold mono text-xs tracking-widest">
+              FINISH →
+            </button>
+          )}
+        </div>
+      </div>
+
+      {confirmingIncomplete && (
+        <ConfirmModal
+          title="UNLOGGED SETS"
+          message="Some sets don't have reps or RIR logged. Submit anyway? Unlogged sets will be excluded from the autoregulation calculation for next week."
+          confirmLabel="SUBMIT"
+          onConfirm={() => { setConfirmingIncomplete(false); proceedToFeedback(); }}
+          onCancel={() => setConfirmingIncomplete(false)}
+        />
+      )}
+      {confirmingDeleteExercise && (
+        <ScopeConfirmModal
+          danger
+          title="DELETE EXERCISE"
+          message={`Remove ${ex.name} just for today, or from the rest of this meso too?${loggedSetsForActiveEx > 0 ? ` Discards ${loggedSetsForActiveEx} logged set${loggedSetsForActiveEx === 1 ? '' : 's'} from today either way.` : ''}`}
+          onTodayOnly={() => { setConfirmingDeleteExercise(false); applyDelete(activeExIdx, 'today'); }}
+          onRestOfMeso={() => { setConfirmingDeleteExercise(false); applyDelete(activeExIdx, 'meso'); }}
+          onCancel={() => setConfirmingDeleteExercise(false)}
+        />
+      )}
+      {confirmingMove && (
+        <ScopeConfirmModal
+          title="REORDER EXERCISE"
+          message="Keep this new order for the rest of the meso, or just for today?"
+          onTodayOnly={() => { movePermutationRef.current = null; setConfirmingMove(false); }}
+          onRestOfMeso={() => {
+            onReorderPermanent(movePermutationRef.current);
+            movePermutationRef.current = null;
+            setConfirmingMove(false);
+          }}
+          onCancel={() => { revertMove(); movePermutationRef.current = null; setConfirmingMove(false); }}
+        />
+      )}
+      {pendingStarReassign && (
+        <ConfirmModal
+          title="CHANGE GROWTH EXERCISE"
+          message={`This moves ${pendingStarReassign.muscle.toUpperCase()}'s growth emphasis from ${pendingStarReassign.oldExName} to ${pendingStarReassign.newExName}. Earned sets for this muscle will go to ${pendingStarReassign.newExName} going forward.`}
+          confirmLabel="CONFIRM"
+          onConfirm={() => {
+            onSetGrowthTarget(pendingStarReassign.muscle, pendingStarReassign.newExId);
+            setPendingStarReassign(null);
+          }}
+          onCancel={() => setPendingStarReassign(null)}
+        />
+      )}
+      {exerciseModalState && (
+        <ExerciseModal
+          state={exerciseModalState}
+          initialVideoUrl={
+            exerciseModalState.mode === 'edit_video'
+              ? (exerciseVideos && exerciseModalState.exerciseId in exerciseVideos
+                  ? (exerciseVideos[exerciseModalState.exerciseId] || '')
+                  : (exercises.find(e => e.id === exerciseModalState.exerciseId)?.videoUrl || ''))
+              : ''
+          }
+          initialNote={
+            exerciseModalState.mode === 'edit_note'
+              ? (exerciseNotes?.[exerciseModalState.exerciseId] || '')
+              : ''
+          }
+          onSaveCustom={handleAddCustomExercise}
+          onSaveVideo={handleVideoEditSave}
+          onSaveNote={handleNoteSave}
+          onDeleteExercise={handleDeleteCustomFromWorkout}
+          onCancel={() => setExerciseModalState(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Small icon button that opens TechniqueModal to tag a set with an intensity
+// technique (drop set, myo-rep, etc). Untagged = quiet ⋮ icon; tagged = filled
+// colored badge showing the 2-letter abbreviation, still tappable to change/clear.
+function TechniqueTag({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const active = value ? TECHNIQUES[value] : null;
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}
+        aria-label={active ? `Technique: ${active.label}` : 'Tag set technique'}
+        title={active ? active.label : 'Tag technique (drop set, myo-rep, rest-pause…)'}
+        className={active
+          ? `w-full py-1.5 mono text-[9px] font-bold tracking-wider border ${active.color}`
+          : 'w-full py-1.5 flex items-center justify-center text-zinc-600 hover:text-amber-400'}>
+        {active ? active.abbr : <MoreVertical className="w-4 h-4" />}
+      </button>
+      {open && (
+        <TechniqueModal
+          current={value}
+          onSelect={key => { onChange(key); setOpen(false); }}
+          onClear={() => { onChange(null); setOpen(false); }}
+          onCancel={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+// Picker modal for TechniqueTag — same fixed-overlay convention as ConfirmModal
+// so it behaves consistently with every other in-app modal (full-screen dim,
+// tap outside to cancel, content click doesn't bubble to the overlay).
+function TechniqueModal({ current, onSelect, onClear, onCancel }) {
+  return (
+    <div className="fixed inset-0 bg-black/80 z-50 flex items-end sm:items-center justify-center p-5"
+      onClick={onCancel}>
+      <div className="bg-zinc-950 border border-zinc-800 p-5 max-w-sm w-full"
+        onClick={e => e.stopPropagation()}>
+        <div className="mono text-xs tracking-widest mb-4 text-amber-400">TAG SET TECHNIQUE</div>
+        <div className="space-y-1.5 mb-4">
+          {Object.entries(TECHNIQUES).map(([key, t]) => (
+            <button key={key} onClick={() => onSelect(key)}
+              className={`w-full flex items-center justify-between px-3 py-2.5 border mono text-xs tracking-wider font-bold ${current === key ? t.color : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-600'}`}>
+              <span>{t.label.toUpperCase()}</span>
+              <span className="opacity-70">{t.abbr}</span>
+            </button>
+          ))}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={onClear}
+            className="bg-zinc-900 border border-zinc-800 py-3 text-zinc-400 mono text-xs tracking-widest">
+            CLEAR TAG
+          </button>
+          <button onClick={onCancel}
+            className="bg-zinc-900 border border-zinc-800 py-3 text-zinc-300 mono text-xs tracking-widest">
+            CANCEL
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SetRow({ num, set, units, canRemove, lastWeekReps, lastWeekWeight, onChange, onRemove }) {
+  return (
+    <div className="grid grid-cols-12 gap-2 mb-2 items-center">
+      <div className="col-span-1 mono text-zinc-500">{num}</div>
+      <div className="col-span-1">
+        <TechniqueTag value={set.technique} onChange={v => onChange('technique', v)} />
+      </div>
+      <div className="col-span-3">
+        <input type="number" inputMode="decimal"
+          value={set.weight ? set.weight : ''}
+          onFocus={e => e.target.select()}
+          onChange={e => {
+            const v = e.target.value;
+            onChange('weight', v === '' ? 0 : (parseFloat(v) || 0));
+          }}
+          placeholder={lastWeekWeight != null ? String(lastWeekWeight) : undefined}
+          className="w-full bg-zinc-900 border border-zinc-800 px-2 py-2 mono text-sm focus:border-amber-400 outline-none placeholder:text-zinc-600" />
+      </div>
+      <div className="col-span-2">
+        <input type="number" inputMode="numeric"
+          value={set.reps ?? ''}
+          onFocus={e => e.target.select()}
+          onChange={e => onChange('reps', e.target.value === '' ? null : parseInt(e.target.value))}
+          placeholder={lastWeekReps != null ? String(lastWeekReps) : undefined}
+          className="w-full bg-zinc-900 border border-zinc-800 px-2 py-2 mono text-sm focus:border-amber-400 outline-none text-center placeholder:text-zinc-600" />
+      </div>
+      <div className="col-span-1 text-center mono text-sm text-zinc-500">{set.rirTarget}</div>
+      <div className="col-span-3">
+        <select value={set.rirActual ?? ''}
+          onChange={e => onChange('rirActual', e.target.value === '' ? null : parseInt(e.target.value))}
+          className="w-full bg-zinc-900 border border-zinc-800 px-1 py-2 mono text-sm focus:border-amber-400 outline-none text-center">
+          <option value="">—</option>
+          {[0, 1, 2, 3, 4, 5].map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+      </div>
+      <div className="col-span-1 flex justify-end">
+        <button onClick={onRemove}
+          disabled={!canRemove}
+          aria-label="Remove set"
+          className={`p-1 ${canRemove ? 'text-zinc-400 hover:text-red-400 active:text-red-400' : 'text-zinc-800 cursor-not-allowed'}`}>
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// WORKOUT VIEWER — read-only display of a completed day's logged sets/reps.
+// Reached via the "LOGGED →" button on a completed day in the Dashboard
+// schedule. No mutation of any kind — just tab navigation between exercises.
+// ============================================================================
+function WorkoutViewer({ day, weekNum, onBack }) {
+  const [activeExIdx, setActiveExIdx] = useState(0);
+  const exercises = day.exercises || [];
+  const ex = exercises[activeExIdx];
+
+  // Build disambiguated tab labels (CHEST 1, CHEST 2 when same muscle appears twice)
+  const tabLabels = (() => {
+    const totals = {};
+    exercises.forEach(e => { totals[e.muscle] = (totals[e.muscle] || 0) + 1; });
+    const seen = {};
+    return exercises.map(e => {
+      seen[e.muscle] = (seen[e.muscle] || 0) + 1;
+      return totals[e.muscle] > 1
+        ? `${e.muscle.toUpperCase()} ${seen[e.muscle]}`
+        : e.muscle.toUpperCase();
+    });
+  })();
+
+  return (
+    <div className="min-h-screen bg-black text-zinc-100 pb-24">
+      <style>{FONT_STYLE}</style>
+      <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10">
+        <div className="flex items-center justify-between">
+          <button onClick={onBack} className="text-zinc-400 text-sm flex items-center gap-1">
+            <ChevronLeft className="w-4 h-4" /> Back
+          </button>
+          <div className="mono text-xs text-zinc-500">
+            W{weekNum} · {day.name} <span className="text-emerald-400 ml-1">LOGGED</span>
+          </div>
+        </div>
+      </div>
+
+      {!ex ? (
+        <div className="px-5 py-12 text-center text-zinc-500 text-sm">
+          No exercises logged for this day.
+        </div>
+      ) : (
+        <>
+          {/* Exercise tabs */}
+          <div className="border-b border-zinc-900 overflow-x-auto">
+            <div className="flex">
+              {exercises.map((e, idx) => (
+                <button key={idx} onClick={() => setActiveExIdx(idx)}
+                  className={`px-4 py-3 mono text-xs whitespace-nowrap border-b-2 ${activeExIdx === idx ? 'border-amber-400 text-white' : 'border-transparent text-zinc-500'}`}>
+                  {tabLabels[idx]}
+                </button>
+              ))}
             </div>
+          </div>
+
+          <div className="px-5 py-5">
+            <h2 className="text-2xl font-black tracking-tight mb-4">{ex.name}</h2>
+
+            {/* Sets table header — same columns as the live logger, minus the edit affordances */}
+            <div className="grid grid-cols-12 gap-2 mt-2 mb-3 pt-3 border-t border-zinc-900 mono text-[10px] tracking-widest text-zinc-600">
+              <div className="col-span-1">#</div>
+              <div className="col-span-1"></div>
+              <div className="col-span-3">{ex.assisted ? 'ASSISTANCE' : 'WEIGHT'}</div>
+              <div className="col-span-2">REPS</div>
+              <div className="col-span-1 text-center">TGT RIR</div>
+              <div className="col-span-3 text-center">RIR</div>
+              <div className="col-span-1"></div>
+            </div>
+
+            {ex.sets.map((set, sIdx) => (
+              <div key={sIdx} className="grid grid-cols-12 gap-2 mb-2 items-center">
+                <div className="col-span-1 mono text-zinc-500">{sIdx + 1}</div>
+                <div className="col-span-1 flex justify-center">
+                  {set.technique && TECHNIQUES[set.technique] && (
+                    <span title={TECHNIQUES[set.technique].label}
+                      className={`px-1 py-0.5 mono text-[9px] font-bold border ${TECHNIQUES[set.technique].color}`}>
+                      {TECHNIQUES[set.technique].abbr}
+                    </span>
+                  )}
+                </div>
+                <div className="col-span-3 mono text-sm text-zinc-100">{set.weight || '—'}</div>
+                <div className="col-span-2 mono text-sm text-zinc-100">{set.reps ?? '—'}</div>
+                <div className="col-span-1 text-center mono text-sm text-zinc-500">{set.rirTarget}</div>
+                <div className="col-span-3 text-center mono text-sm text-zinc-100">{set.rirActual ?? '—'}</div>
+                <div className="col-span-1"></div>
+              </div>
+            ))}
+
+            {/* Nav between exercises */}
+            <div className="grid grid-cols-2 gap-2 mt-6">
+              <button onClick={() => setActiveExIdx(Math.max(0, activeExIdx - 1))}
+                disabled={activeExIdx === 0}
+                className="bg-zinc-900 border border-zinc-800 py-3 disabled:opacity-30 mono text-xs tracking-widest">
+                ← PREV
+              </button>
+              <button onClick={() => setActiveExIdx(Math.min(exercises.length - 1, activeExIdx + 1))}
+                disabled={activeExIdx === exercises.length - 1}
+                className="bg-zinc-900 border border-zinc-800 py-3 disabled:opacity-30 mono text-xs tracking-widest">
+                NEXT →
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// FEEDBACK FORM
+// ============================================================================
+function FeedbackForm({ muscles, feedback, setFeedback, onBack, onSubmit }) {
+  const setField = (muscle, field, value) => {
+    setFeedback({ ...feedback, [muscle]: { ...(feedback[muscle] || {}), [field]: value } });
+  };
+
+  const allComplete = muscles.every(m =>
+    feedback[m]?.pump !== undefined && feedback[m]?.soreness !== undefined && feedback[m]?.workload
+  );
+
+  return (
+    <div className="min-h-screen bg-black text-zinc-100 pb-24">
+      <style>{FONT_STYLE}</style>
+      <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10">
+        <button onClick={onBack} className="text-zinc-400 text-sm flex items-center gap-1">
+          <ChevronLeft className="w-4 h-4" /> Back
+        </button>
+      </div>
+      <div className="px-5 py-6">
+        <h2 className="text-2xl font-black tracking-tight mb-1">Recovery feedback</h2>
+        <p className="text-zinc-500 text-sm mb-6">Drives next session's prescription.</p>
+
+        {muscles.map(muscle => (
+          <div key={muscle} className="mb-6 border border-zinc-800 p-4">
+            <div className="mono text-xs tracking-[0.2em] text-amber-400 mb-4">{muscle.toUpperCase()}</div>
+
+            <FieldLabel>PUMP (0 none → 3 huge)</FieldLabel>
+            <ScaleRow value={feedback[muscle]?.pump} onChange={v => setField(muscle, 'pump', v)} max={3} />
+
+            <FieldLabel>SORENESS FROM LAST (0 none → 3 crippling)</FieldLabel>
+            <ScaleRow value={feedback[muscle]?.soreness} onChange={v => setField(muscle, 'soreness', v)} max={3} />
+
+            <FieldLabel>WORKLOAD</FieldLabel>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { v: 'too-easy', l: 'EASY' },
+                { v: 'manageable', l: 'JUST RIGHT' },
+                { v: 'too-hard', l: 'TOO HARD' },
+              ].map(opt => (
+                <button key={opt.v} onClick={() => setField(muscle, 'workload', opt.v)}
+                  className={`py-2 mono text-[10px] tracking-widest border ${feedback[muscle]?.workload === opt.v ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+                  {opt.l}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+
+        <button onClick={onSubmit} disabled={!allComplete}
+          className="w-full bg-amber-400 text-black py-4 font-bold tracking-wide disabled:opacity-30 disabled:cursor-not-allowed">
+          {allComplete ? 'SUBMIT SESSION →' : 'COMPLETE ALL FIELDS'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FieldLabel({ children }) {
+  return <div className="mono text-[10px] tracking-widest text-zinc-500 mb-2 mt-3">{children}</div>;
+}
+
+function ScaleRow({ value, onChange, max }) {
+  return (
+    <div className="grid grid-cols-4 gap-2 mb-3">
+      {Array(max + 1).fill(0).map((_, i) => (
+        <button key={i} onClick={() => onChange(i)}
+          className={`py-3 mono font-bold border ${value === i ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+          {i}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================================
+// CONFIRM MODAL — replaces native confirm() which is blocked in artifact iframes
+// ============================================================================
+function ConfirmModal({ title, message, confirmLabel = 'CONFIRM', cancelLabel = 'CANCEL', onConfirm, onCancel, danger = false }) {
+  return (
+    <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-5"
+      onClick={onCancel}>
+      <div className="bg-zinc-950 border border-zinc-800 p-6 max-w-sm w-full"
+        onClick={e => e.stopPropagation()}>
+        <div className={`mono text-xs tracking-widest mb-2 ${danger ? 'text-red-400' : 'text-amber-400'}`}>
+          {title}
+        </div>
+        <div className="text-zinc-300 text-sm mb-6 leading-relaxed">{message}</div>
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={onCancel}
+            className="bg-zinc-900 border border-zinc-800 py-3 text-zinc-300 mono text-xs tracking-widest">
+            {cancelLabel}
+          </button>
+          <button onClick={onConfirm}
+            className={`py-3 font-bold mono text-xs tracking-widest ${danger ? 'bg-red-500 text-white' : 'bg-amber-400 text-black'}`}>
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Standalone popup version of the TODAY ONLY / REST OF MESO / CANCEL choice
+// swap and add already show inline within their own open panels. Used where
+// that choice needs to interrupt on its own (the reorder settle-prompt, and
+// delete — which has no "configure a replacement" step to be inline within,
+// so it gets the same prominent standalone treatment as reorder instead of
+// swap's inline row). `danger` reddens the title and REST OF MESO only —
+// TODAY ONLY stays amber even under danger, since for delete specifically
+// it isn't actually destructive (the exercise stays in the program; only
+// REST OF MESO removes it), and the color should track severity per-option,
+// not blanket the whole modal because one of its choices is severe.
+function ScopeConfirmModal({ title, message, onTodayOnly, onRestOfMeso, onCancel, danger = false }) {
+  return (
+    <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-5"
+      onClick={onCancel}>
+      <div className="bg-zinc-950 border border-zinc-800 p-6 max-w-sm w-full"
+        onClick={e => e.stopPropagation()}>
+        <div className={`mono text-xs tracking-widest mb-2 ${danger ? 'text-red-400' : 'text-amber-400'}`}>{title}</div>
+        <div className="text-zinc-300 text-sm mb-6 leading-relaxed">{message}</div>
+        <div className="grid grid-cols-3 gap-2">
+          <button onClick={onTodayOnly}
+            className="py-3 bg-amber-400 text-black mono text-[10px] font-bold tracking-wider">
+            TODAY ONLY
+          </button>
+          <button onClick={onRestOfMeso}
+            className={`py-3 border mono text-[10px] font-bold tracking-wider ${danger ? 'border-red-500 text-red-400 hover:bg-red-500 hover:text-white' : 'border-amber-400 text-amber-400 hover:bg-amber-400 hover:text-black'}`}>
+            REST OF MESO
+          </button>
+          <button onClick={onCancel}
+            className="py-3 border border-zinc-700 text-zinc-400 mono text-[10px] font-bold tracking-wider hover:border-zinc-500">
+            CANCEL
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// NAV MENU — full-screen overlay accessed via header menu icon
+// ============================================================================
+function NavMenu({ currentView, onNav, onClose }) {
+  const items = [
+    { label: 'HOME', view: 'home', icon: Home },
+    { label: 'SETTINGS', view: 'settings', icon: Settings },
+    { label: 'CUSTOM EXERCISES', view: 'customExercises', icon: Edit3 },
+  ];
+
+  return (
+    <div className="fixed inset-0 bg-black z-50 flex flex-col">
+      <style>{FONT_STYLE}</style>
+      <div className="border-b border-zinc-800 px-5 py-4 flex items-center justify-between">
+        <span className="mono text-xs tracking-[0.2em] text-zinc-400">MENU</span>
+        <button onClick={onClose} className="text-zinc-400 hover:text-white">
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+      <div className="flex-1 px-5 py-6 space-y-2">
+        {items.map(item => {
+          const Icon = item.icon;
+          const active = currentView === item.view;
+          return (
+            <button key={item.view} onClick={() => onNav(item.view)}
+              className={`w-full flex items-center gap-4 p-4 border ${active ? 'border-amber-400 bg-amber-400/5 text-amber-400' : 'border-zinc-800 text-zinc-300 hover:border-zinc-600'}`}>
+              <Icon className="w-5 h-5" />
+              <span className="mono text-sm tracking-widest font-bold">{item.label}</span>
+              {active && <span className="ml-auto mono text-[10px] text-amber-400/70">CURRENT</span>}
+            </button>
           );
         })}
       </div>
+      <div className="px-5 py-4 border-t border-zinc-800 mono text-[10px] tracking-widest text-zinc-600 text-center">
+        HYPER · LOG · MESO ENGINE
+      </div>
+    </div>
+  );
+}
 
-      {editing && (
-        <FoodEditor
-          food={editing}
-          foods={foods}
-          onSave={save}
-          onDelete={del}
-          onClose={() => setEditing(null)}
+// ============================================================================
+// SETTINGS VIEW
+// ============================================================================
+function SettingsView({ prefs, setPrefs, customExercises, onManageCustom, onResetAll, onSignOut, exportData, onBack }) {
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const [exportStatus, setExportStatus] = useState(null);
+  const totalCustom = Object.values(customExercises || {}).reduce((acc, arr) => acc + (arr?.length || 0), 0);
+
+  const handleExport = async () => {
+    try {
+      setExportStatus('Preparing export…');
+      const payload = {
+        appName: 'HYPER · LOG',
+        appVersion: 'v0.1',
+        exportedAt: new Date().toISOString(),
+        storage: exportData,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      a.download = `hyperlog-backup-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setExportStatus('Download triggered · check your Files / Downloads');
+      setTimeout(() => setExportStatus(null), 6000);
+    } catch (e) {
+      setExportStatus('Error: ' + String(e));
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-black text-zinc-100 pb-12">
+      <style>{FONT_STYLE}</style>
+      <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10 flex items-center gap-3">
+        <button onClick={onBack} className="text-zinc-400 flex items-center gap-1 text-sm">
+          <ChevronLeft className="w-4 h-4" /> Back
+        </button>
+        <span className="mono text-xs tracking-[0.2em] text-zinc-400 ml-2">SETTINGS</span>
+      </div>
+      <div className="px-5 py-6">
+        <h2 className="text-2xl font-black tracking-tight mb-6">Preferences</h2>
+
+        <div className="mb-6">
+          <label className="mono text-xs tracking-[0.15em] text-zinc-500 block mb-2">UNITS</label>
+          <div className="grid grid-cols-2 gap-2">
+            {['lbs', 'kg'].map(u => (
+              <button key={u} onClick={() => setPrefs({ ...prefs, units: u })}
+                className={`py-3 mono font-bold uppercase border ${prefs.units === u ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+                {u}
+              </button>
+            ))}
+          </div>
+          <p className="mono text-[10px] text-zinc-600 tracking-wider mt-2">
+            APPLIES TO NEW MESOS · EXISTING MESOS KEEP THEIR ORIGINAL UNITS
+          </p>
+        </div>
+
+        <div className="mb-6">
+          <label className="mono text-xs tracking-[0.15em] text-zinc-500 block mb-2">HOME GYM MODE</label>
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={() => setPrefs({ ...prefs, homeGym: false })}
+              className={`py-3 mono font-bold uppercase border ${!prefs.homeGym ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+              OFF
+            </button>
+            <button onClick={() => setPrefs({ ...prefs, homeGym: true })}
+              className={`py-3 mono font-bold uppercase border ${prefs.homeGym ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'}`}>
+              ON
+            </button>
+          </div>
+          {!prefs.homeGym ? (
+            <p className="mono text-[10px] text-zinc-600 tracking-wider mt-2 leading-relaxed">
+              PRIORITIZES EXERCISES MATCHING YOUR AVAILABLE EQUIPMENT · BARBELL · DUMBBELL · CABLE · MACHINE · SMITH · CALISTHENICS
+            </p>
+          ) : (
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-2">
+                <label className="mono text-[10px] tracking-[0.15em] text-zinc-500">AVAILABLE EQUIPMENT</label>
+                <span className="mono text-[10px] tracking-wider text-zinc-600">
+                  {(prefs.equipment || []).length} / {ALL_EQUIPMENT_VALUES.length}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {EQUIPMENT_CATEGORIES.map(cat => {
+                  const isOn = (prefs.equipment || []).includes(cat.value);
+                  return (
+                    <button key={cat.value}
+                      onClick={() => {
+                        const cur = prefs.equipment || [];
+                        const next = isOn
+                          ? cur.filter(v => v !== cat.value)
+                          : [...cur, cat.value];
+                        setPrefs({ ...prefs, equipment: next });
+                      }}
+                      className={`py-3 mono text-xs font-bold uppercase tracking-wider border ${isOn ? 'bg-amber-400 text-black border-amber-400' : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:border-zinc-600'}`}>
+                      {cat.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mono text-[10px] text-zinc-600 tracking-wider mt-3 leading-relaxed">
+                TAP TO TOGGLE · UNSELECTED EQUIPMENT IS HIDDEN FROM EXERCISE PICKER · CUSTOM EXERCISES ALWAYS SHOWN
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="mb-8">
+          <label className="mono text-xs tracking-[0.15em] text-zinc-500 block mb-2">CUSTOM EXERCISES</label>
+          <button onClick={onManageCustom}
+            className="w-full text-left p-4 bg-zinc-900 border border-zinc-800 hover:border-amber-400">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-bold mb-1">Manage Library</div>
+                <div className="mono text-[10px] text-zinc-500 tracking-wider">
+                  {totalCustom} CUSTOM EXERCISE{totalCustom === 1 ? '' : 'S'}
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-zinc-600" />
+            </div>
+          </button>
+        </div>
+
+        <div className="mt-10 pt-6 border-t border-zinc-900">
+          <label className="mono text-xs tracking-[0.15em] text-zinc-500 block mb-2">BACKUP</label>
+          <button onClick={handleExport}
+            className="w-full bg-zinc-900 border border-zinc-800 py-3 text-zinc-300 mono text-xs tracking-widest font-bold hover:border-amber-400">
+            EXPORT MY DATA
+          </button>
+          <p className="mono text-[10px] text-zinc-600 tracking-wider mt-2 leading-relaxed">
+            DOWNLOADS A JSON FILE WITH YOUR ACTIVE MESO, CUSTOM EXERCISES, VIDEO LINKS, AND PREFERENCES · SAVE IT SOMEWHERE SAFE
+          </p>
+          {exportStatus && (
+            <p className={`mono text-[10px] tracking-wider mt-2 ${exportStatus.startsWith('Error') ? 'text-red-400' : 'text-amber-400'}`}>
+              {exportStatus}
+            </p>
+          )}
+        </div>
+
+        <div className="mt-10 pt-6 border-t border-zinc-900">
+          <label className="mono text-xs tracking-[0.15em] text-zinc-500 block mb-2">ACCOUNT</label>
+          <button onClick={onSignOut}
+            className="w-full bg-zinc-900 border border-zinc-800 py-3 text-zinc-300 mono text-xs tracking-widest font-bold hover:border-amber-400">
+            SIGN OUT
+          </button>
+        </div>
+
+        <div className="mt-10 pt-6 border-t border-red-900/30">
+          <label className="mono text-xs tracking-[0.15em] text-red-400 block mb-2">DANGER ZONE</label>
+          <button onClick={() => setConfirmingReset(true)}
+            className="w-full bg-zinc-900 border border-red-900 py-3 text-red-400 mono text-xs tracking-widest font-bold hover:bg-red-950">
+            RESET ALL DATA
+          </button>
+          <p className="mono text-[10px] text-zinc-600 tracking-wider mt-2">
+            PERMANENTLY ERASES YOUR ACTIVE MESO, CUSTOM EXERCISES, VIDEO LINKS, AND PREFERENCES
+          </p>
+        </div>
+
+        <div className="mt-12 pt-6 border-t border-zinc-900 text-center">
+          <div className="mono text-xs tracking-[0.2em] text-zinc-500 mb-2">HYPER · LOG</div>
+          <div className="mono text-[10px] tracking-widest text-zinc-600">v0.1 PROTOTYPE</div>
+        </div>
+      </div>
+
+      {confirmingReset && (
+        <ConfirmModal
+          title="RESET ALL DATA"
+          message="This permanently erases your active mesocycle, custom exercises, video links, and preferences. Cannot be undone."
+          confirmLabel="ERASE EVERYTHING"
+          danger={true}
+          onConfirm={() => { setConfirmingReset(false); onResetAll(); }}
+          onCancel={() => setConfirmingReset(false)}
         />
       )}
     </div>
   );
 }
 
-function blankFood(type) {
-  return {
-    id: uid(),
-    name: "",
-    unit: type === "recipe" ? "serving" : "unit",
-    type,
-    macros: { p: 0, f: 0, c: 0, cal: 0 },
-    verify: false,
-    ingredients: [],
-    servings: type === "recipe" ? 6 : 1,
+// ============================================================================
+// CUSTOM EXERCISES VIEW — list, view video, and delete
+// ============================================================================
+function CustomExercisesView({ customExercises, exerciseVideos, onDelete, onBack }) {
+  const [confirmingId, setConfirmingId] = useState(null);
+
+  useEffect(() => {
+    if (!confirmingId) return;
+    const t = setTimeout(() => setConfirmingId(null), 3000);
+    return () => clearTimeout(t);
+  }, [confirmingId]);
+
+  const allCustom = Object.entries(customExercises || {}).flatMap(([muscle, list]) =>
+    (list || []).map(ex => ({ ...ex, muscle }))
+  );
+
+  const handleDeleteClick = (ex) => {
+    if (confirmingId === ex.id) {
+      onDelete(ex.id, ex.muscle);
+      setConfirmingId(null);
+    } else {
+      setConfirmingId(ex.id);
+    }
   };
-}
-
-function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
-  const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(food)));
-  const [picking, setPicking] = useState(false);
-  const isRecipe = draft.type === "recipe";
-  const set = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
-  const setMacro = (k, v) =>
-    setDraft((d) => ({ ...d, macros: { ...d.macros, [k]: parseFloat(v) || 0 } }));
-
-  const computed = isRecipe ? foodMacros(draft, foods) : draft.macros;
-  const exists = foods.some((x) => x.id === food.id);
 
   return (
-    <div style={S.modalWrap} onClick={onClose}>
-      <div style={{ ...S.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
-        <div style={S.modalHead}>
-          <strong style={{ fontSize: 13, letterSpacing: 1 }}>
-            {exists ? "EDIT" : "NEW"} {isRecipe ? "RECIPE" : "COMPONENT"}
-          </strong>
-          <button style={S.xBtn} onClick={onClose}>
-            ✕
-          </button>
-        </div>
+    <div className="min-h-screen bg-black text-zinc-100">
+      <style>{FONT_STYLE}</style>
+      <div className="border-b border-zinc-800 px-5 py-4 sticky top-0 bg-black z-10 flex items-center gap-3">
+        <button onClick={onBack} className="text-zinc-400 flex items-center gap-1 text-sm">
+          <ChevronLeft className="w-4 h-4" /> Back
+        </button>
+        <span className="mono text-xs tracking-[0.2em] text-zinc-400 ml-2">CUSTOM EXERCISES</span>
+      </div>
+      <div className="px-5 py-6">
+        <h2 className="text-2xl font-black tracking-tight mb-1">Your library</h2>
+        <p className="text-zinc-500 text-sm mb-6">
+          {allCustom.length === 0 ? 'No custom exercises yet.' : `${allCustom.length} exercise${allCustom.length === 1 ? '' : 's'} across ${new Set(allCustom.map(e => e.muscle)).size} muscle group${new Set(allCustom.map(e => e.muscle)).size === 1 ? '' : 's'}`}
+        </p>
 
-        <div style={S.editorBody}>
-          <label style={S.fLabel}>Name</label>
-          <input
-            value={draft.name}
-            onChange={(e) => set("name", e.target.value)}
-            style={S.fInput}
-            placeholder="e.g. chicken breast"
-          />
-
-          <div style={S.fRow}>
-            <div style={{ flex: 1 }}>
-              <label style={S.fLabel}>Unit</label>
-              <input
-                value={draft.unit}
-                onChange={(e) => set("unit", e.target.value)}
-                style={S.fInput}
-                placeholder="oz / cup / serving"
-              />
-            </div>
-            {isRecipe && (
-              <div style={{ width: 110 }}>
-                <label style={S.fLabel}>Servings</label>
-                <input
-                  type="number"
-                  value={draft.servings}
-                  onChange={(e) =>
-                    set("servings", parseFloat(e.target.value) || 1)
-                  }
-                  style={S.fInput}
-                />
-              </div>
-            )}
+        {allCustom.length === 0 ? (
+          <div className="text-center py-12 border border-zinc-900">
+            <Dumbbell className="w-12 h-12 mx-auto text-zinc-700 mb-4" strokeWidth={1.5} />
+            <p className="text-zinc-500 mono text-xs tracking-widest mb-2">NO CUSTOM EXERCISES YET</p>
+            <p className="text-zinc-600 text-xs max-w-xs mx-auto leading-relaxed">
+              Create them via the <span className="text-amber-400">+ ADD CUSTOM EXERCISE</span> option in any muscle's exercise dropdown during meso setup.
+            </p>
           </div>
-
-          {!isRecipe ? (
-            <>
-              <label style={S.fLabel}>Macros (per {draft.unit || "unit"})</label>
-              <div style={S.macroGrid}>
-                {[
-                  ["Protein", "p"],
-                  ["Fat", "f"],
-                  ["Carbs", "c"],
-                  ["Calories", "cal"],
-                ].map(([lab, k]) => (
-                  <div key={k}>
-                    <span style={S.macroMini}>{lab}</span>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={draft.macros[k]}
-                      onChange={(e) => setMacro(k, e.target.value)}
-                      style={S.fInput}
-                    />
+        ) : (
+          <div className="space-y-2">
+            {allCustom.map(ex => {
+              const videoUrl = exerciseVideos?.[ex.id];
+              const isConfirming = confirmingId === ex.id;
+              return (
+                <div key={ex.id} className="border border-zinc-800 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold truncate">{ex.name}</div>
+                      <div className="mono text-[10px] tracking-widest text-zinc-500 mt-1">
+                        {ex.muscle.toUpperCase()}{ex.assisted && ' · ASSISTED'}{videoUrl && ' · HAS VIDEO ▶'}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {videoUrl && (
+                        <a href={videoUrl} target="_blank" rel="noopener noreferrer"
+                          className="bg-amber-400 border border-amber-400 w-9 h-9 flex items-center justify-center hover:bg-amber-300"
+                          title="Watch video">
+                          <Play className="w-3.5 h-3.5 text-red-600" fill="currentColor" />
+                        </a>
+                      )}
+                      <button onClick={() => handleDeleteClick(ex)}
+                        className={`border w-9 h-9 flex items-center justify-center ${isConfirming ? 'bg-red-500 border-red-500 text-white' : 'bg-zinc-900 border-zinc-800 text-red-400 hover:bg-red-950'}`}
+                        title={isConfirming ? 'Tap again to confirm' : 'Delete custom exercise'}>
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
-                ))}
-              </div>
-              <label style={S.checkRow}>
-                <input
-                  type="checkbox"
-                  checked={draft.verify}
-                  onChange={(e) => set("verify", e.target.checked)}
-                />
-                <span>flag “needs verification”</span>
-              </label>
-            </>
-          ) : (
-            <>
-              <label style={S.fLabel}>Ingredients</label>
-              {draft.ingredients.map((ing, i) => {
-                const base = foods.find((x) => x.id === ing.foodId);
-                return (
-                  <div key={i} style={S.ingRow}>
-                    <input
-                      type="number"
-                      step="0.25"
-                      value={ing.qty}
-                      onChange={(e) => {
-                        const q = parseFloat(e.target.value) || 0;
-                        setDraft((d) => {
-                          const ings = [...d.ingredients];
-                          ings[i] = { ...ings[i], qty: q };
-                          return { ...d, ingredients: ings };
-                        });
-                      }}
-                      style={S.qty}
-                    />
-                    <span style={S.entryUnit}>{base ? base.unit : "?"}</span>
-                    <span style={S.entryName}>
-                      {base ? base.name : "(deleted food)"}
-                    </span>
-                    <button
-                      style={S.xBtnSm}
-                      onClick={() =>
-                        setDraft((d) => ({
-                          ...d,
-                          ingredients: d.ingredients.filter((_, j) => j !== i),
-                        }))
-                      }
-                    >
-                      ✕
-                    </button>
-                  </div>
-                );
-              })}
-              <button style={S.addEntry} onClick={() => setPicking(true)}>
-                + ingredient
-              </button>
-
-              <div style={S.recipeTotal}>
-                <span style={S.fLabel}>Per serving (auto)</span>
-                <div style={S.foodCardMacros}>
-                  <span>{r0(computed.cal)} kcal</span>
-                  <span>{r1(computed.p)}P</span>
-                  <span>{r1(computed.f)}F</span>
-                  <span>{r1(computed.c)}C</span>
+                  {isConfirming && (
+                    <p className="mono text-[10px] tracking-widest text-red-400 mt-3">
+                      ⚠ TAP TRASH AGAIN TO CONFIRM · EXISTING MESO SNAPSHOTS WILL BE PRESERVED
+                    </p>
+                  )}
                 </div>
-              </div>
-              <label style={S.checkRow}>
-                <input
-                  type="checkbox"
-                  checked={draft.verify}
-                  onChange={(e) => set("verify", e.target.checked)}
-                />
-                <span>flag “needs verification”</span>
-              </label>
-            </>
-          )}
-        </div>
-
-        <div style={S.editorFoot}>
-          {exists && (
-            <button
-              style={S.dangerBtn}
-              onClick={() => {
-                onDelete(draft.id);
-                onClose();
-              }}
-            >
-              delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button style={S.ghostBtn} onClick={onClose}>
-            cancel
-          </button>
-          <button
-            style={S.primaryBtn}
-            onClick={() => draft.name.trim() && onSave(draft)}
-          >
-            save
-          </button>
-        </div>
-
-        {picking && (
-          <FoodPicker
-            foods={foods.filter((x) => x.id !== draft.id)}
-            onClose={() => setPicking(false)}
-            onPick={(foodId) => {
-              setDraft((d) => ({
-                ...d,
-                ingredients: [...d.ingredients, { foodId, qty: 1 }],
-              }));
-              setPicking(false);
-            }}
-          />
+              );
+            })}
+          </div>
         )}
       </div>
     </div>
   );
 }
 
-/* ============================================================
-   PHASES
-   ============================================================ */
-function Phases({ phases, setPhases }) {
-  const set = (id, key, sub, val) =>
-    setPhases((prev) =>
-      prev.map((p) =>
-        p.id === id
-          ? sub
-            ? { ...p, target: { ...p.target, [key]: parseFloat(val) || 0 } }
-            : { ...p, [key]: val }
-          : p
-      )
-    );
+export default function App() {
   return (
-    <div>
-      <p style={S.note}>
-        Phases are macro-target profiles. Assign one to a day in Plan and the
-        bars measure against it. Targets reverse-engineered from your docs —
-        adjust to your current numbers.
-      </p>
-      {phases.map((p) => (
-        <div key={p.id} style={S.phaseCard}>
-          <input
-            value={p.name}
-            onChange={(e) => set(p.id, "name", false, e.target.value)}
-            style={S.phaseName}
-          />
-          <div style={S.macroGrid}>
-            {[
-              ["Protein", "p"],
-              ["Fat", "f"],
-              ["Carbs", "c"],
-              ["Calories", "cal"],
-            ].map(([lab, k]) => (
-              <div key={k}>
-                <span style={S.macroMini}>{lab}</span>
-                <input
-                  type="number"
-                  value={p.target[k]}
-                  onChange={(e) => set(p.id, k, true, e.target.value)}
-                  style={S.fInput}
-                />
-              </div>
-            ))}
-          </div>
-          <button
-            style={S.xBtnSm}
-            onClick={() =>
-              setPhases((prev) => prev.filter((x) => x.id !== p.id))
-            }
-          >
-            ✕ remove
-          </button>
-        </div>
-      ))}
-      <button
-        style={S.addSlot}
-        onClick={() =>
-          setPhases((prev) => [...prev, ph("New phase", 180, 50, 250, 2500)])
-        }
-      >
-        + add phase
-      </button>
-    </div>
-  );
-}
-
-/* ============================================================
-   DATA (export / import / reset)
-   ============================================================ */
-function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog }) {
-  const [msg, setMsg] = useState("");
-  const [showExport, setShowExport] = useState(false);
-  const exportText = JSON.stringify({ foods, phases, week }, null, 2);
-
-  const exportJSON = () => {
-    // try native download first
-    try {
-      const blob = new Blob([exportText], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "mealprep-backup.json";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (e) {
-      // ignore — fallback panel below covers it
-    }
-    // always show fallback panel too, since artifact sandbox often blocks the download silently
-    setShowExport(true);
-  };
-
-  const copyExport = async () => {
-    try {
-      await navigator.clipboard.writeText(exportText);
-      setMsg("Copied to clipboard ✓");
-    } catch {
-      setMsg("Copy failed — select the text manually and copy");
-    }
-  };
-  const importJSON = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const d = JSON.parse(reader.result);
-        if (d.foods) setFoods(d.foods);
-        if (d.phases) setPhases(d.phases);
-        if (d.week) setWeek(d.week);
-        setMsg("Imported ✓");
-      } catch {
-        setMsg("Import failed — invalid file");
-      }
-    };
-    reader.readAsText(file);
-  };
-  return (
-    <div>
-      <p style={S.note}>
-        Your data lives in this artifact’s storage. Export regularly — it’s your
-        insurance against losing the library if the artifact is rebuilt.
-      </p>
-      <div style={S.dataRow}>
-        <button style={S.primaryBtn} onClick={exportJSON}>
-          ⬇ export backup (.json)
-        </button>
-        <label style={S.ghostBtn}>
-          ⬆ import backup
-          <input
-            type="file"
-            accept="application/json"
-            onChange={importJSON}
-            style={{ display: "none" }}
-          />
-        </label>
-      </div>
-      {msg && <div style={S.verifyBanner}>{msg}</div>}
-
-      {showExport && (
-        <div style={{marginTop:12}}>
-          <p style={{...S.note, marginBottom:8}}>
-            If the download didn't trigger (common in this sandboxed view),
-            copy the text below and save it as <code>mealprep-backup.json</code> on your device.
-          </p>
-          <div style={{display:"flex", gap:8, marginBottom:8}}>
-            <button style={S.primaryBtn} onClick={copyExport}>📋 copy to clipboard</button>
-            <button style={S.ghostBtn} onClick={()=>setShowExport(false)}>hide</button>
-          </div>
-          <textarea
-            readOnly
-            value={exportText}
-            onFocus={(e)=>e.target.select()}
-            style={{
-              width:"100%", height:240, background:"#0a0c0b", border:`1px solid #2a3133`,
-              borderRadius:10, color:"#e8efe9", fontFamily:"monospace", fontSize:11,
-              padding:10, boxSizing:"border-box", resize:"vertical"
-            }}
-          />
-        </div>
+    <AuthGate>
+      {({ trainingData, saveTrainingData, signOut }) => (
+        <AppInner
+          trainingData={trainingData}
+          saveTrainingData={saveTrainingData}
+          signOut={signOut}
+        />
       )}
-      <div style={S.statRow}>
-        <Stat n={foods.length} label="foods" />
-        <Stat n={foods.filter((f) => f.type === "recipe").length} label="recipes" />
-        <Stat n={foods.filter((f) => f.verify).length} label="need verify" />
-        <Stat n={phases.length} label="phases" />
-      </div>
-
-      <div style={{marginTop: 20}}>
-        <p style={{...S.note, marginBottom: 8}}>Storage diagnostics — add a food then check here:</p>
-        <div style={{background:"#0a0c0b", border:"1px solid #2a3133", borderRadius:10, padding:12, fontFamily:"monospace", fontSize:11, color:"#46e6a0", maxHeight:200, overflowY:"auto"}}>
-          {debugLog.length === 0
-            ? <span style={{color:"#7d8a85"}}>No events yet — add a food or phase to see log</span>
-            : debugLog.map((line, i) => <div key={i}>{line}</div>)
-          }
-        </div>
-      </div>
-    </div>
-  );
-}
-function Stat({ n, label }) {
-  return (
-    <div style={S.stat}>
-      <div style={S.statN}>{n}</div>
-      <div style={S.statL}>{label}</div>
-    </div>
-  );
-}
-
-/* ============================================================
-   STYLES
-   ============================================================ */
-const ink = "#0c0e0d";
-const panel = "#15191a";
-const panel2 = "#1c2123";
-const line = "#2a3133";
-const text = "#e8efe9";
-const dim = "#7d8a85";
-const accent = "#46e6a0";
-
-const S = {
-  app: {
-    minHeight: "100vh",
-    background: ink,
-    color: text,
-    fontFamily: "'Spline Sans', system-ui, sans-serif",
-    paddingBottom: 60,
-  },
-  header: {
-    position: "sticky",
-    top: 0,
-    zIndex: 10,
-    background: "rgba(12,14,13,0.92)",
-    backdropFilter: "blur(10px)",
-    borderBottom: `1px solid ${line}`,
-    padding: "12px 16px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 12,
-  },
-  brand: { display: "flex", alignItems: "center", gap: 10, width: "100%" },
-  brandMark: { color: accent, fontSize: 20, transform: "rotate(0deg)" },
-  brandName: {
-    fontFamily: "'Archivo', sans-serif",
-    fontWeight: 800,
-    letterSpacing: 3,
-    fontSize: 15,
-  },
-  brandSub: { color: dim, fontSize: 10, letterSpacing: 1, marginTop: 1 },
-  nav: { display: "flex", gap: 6 },
-  navBtn: {
-    flex: 1,
-    padding: "9px 6px",
-    background: "transparent",
-    border: `1px solid ${line}`,
-    color: dim,
-    borderRadius: 9,
-    fontSize: 12,
-    fontWeight: 600,
-    letterSpacing: 0.5,
-    cursor: "pointer",
-  },
-  navBtnOn: { background: accent, color: ink, borderColor: accent },
-  main: { padding: 16, maxWidth: 760, margin: "0 auto" },
-
-  // day tabs
-  dayRow: { display: "flex", gap: 4, marginBottom: 14 },
-  dayTab: {
-    flex: 1,
-    padding: "8px 0",
-    background: panel,
-    border: `1px solid ${line}`,
-    color: dim,
-    borderRadius: 8,
-    fontSize: 12,
-    fontWeight: 700,
-    cursor: "pointer",
-  },
-  dayTabOn: { background: panel2, color: accent, borderColor: accent },
-
-  // dashboard
-  dash: {
-    background: panel,
-    border: `1px solid ${line}`,
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 16,
-  },
-  dashHead: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 14,
-  },
-  dashLabel: { fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700 },
-  select: {
-    background: panel2,
-    color: text,
-    border: `1px solid ${line}`,
-    borderRadius: 8,
-    padding: "7px 10px",
-    fontSize: 13,
-    fontFamily: "inherit",
-  },
-  bars: { display: "flex", flexDirection: "column", gap: 11 },
-  barRow: {},
-  barTop: { display: "flex", justifyContent: "space-between", marginBottom: 5 },
-  barLabel: { fontSize: 11, color: dim, letterSpacing: 1, fontWeight: 600 },
-  barNums: { fontSize: 13, fontFamily: "'Archivo', sans-serif" },
-  barGoal: { color: dim, fontWeight: 400 },
-  barTrack: {
-    height: 6,
-    background: "#0a0c0b",
-    borderRadius: 4,
-    overflow: "hidden",
-  },
-  barFill: { height: "100%", borderRadius: 4, transition: "width .25s ease" },
-
-  // slot
-  slot: {
-    background: panel,
-    border: `1px solid ${line}`,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 10,
-  },
-  slotHead: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 8,
-    flexWrap: "wrap",
-  },
-  slotName: {
-    background: "transparent",
-    border: "none",
-    borderBottom: `1px solid ${line}`,
-    color: text,
-    fontSize: 14,
-    fontWeight: 700,
-    fontFamily: "'Archivo', sans-serif",
-    padding: "2px 0",
-    flex: 1,
-    minWidth: 80,
-  },
-  slotMacros: { fontSize: 11, color: accent, fontFamily: "'Archivo', sans-serif" },
-  entry: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "6px 0",
-    borderTop: `1px solid ${line}`,
-  },
-  qty: {
-    width: 52,
-    background: panel2,
-    border: `1px solid ${line}`,
-    color: text,
-    borderRadius: 6,
-    padding: "5px 6px",
-    fontSize: 13,
-    fontFamily: "inherit",
-  },
-  entryUnit: { fontSize: 11, color: dim, width: 46 },
-  entryName: { fontSize: 13, flex: 1, display: "flex", alignItems: "center", gap: 6 },
-  entryMacros: { fontSize: 11, color: dim, fontFamily: "'Archivo', sans-serif" },
-  verifyDot: { color: "#ffb454", fontSize: 8, marginLeft: 5 },
-  recipeTag: {
-    fontSize: 9,
-    background: "#2a3133",
-    color: "#5db4ff",
-    padding: "2px 6px",
-    borderRadius: 5,
-    marginLeft: 6,
-    letterSpacing: 0.5,
-  },
-  addEntry: {
-    marginTop: 8,
-    background: "transparent",
-    border: `1px dashed ${line}`,
-    color: dim,
-    borderRadius: 8,
-    padding: "7px 0",
-    width: "100%",
-    fontSize: 12,
-    cursor: "pointer",
-    fontFamily: "inherit",
-  },
-  addSlot: {
-    background: "transparent",
-    border: `1px dashed ${line}`,
-    color: accent,
-    borderRadius: 10,
-    padding: "11px 0",
-    width: "100%",
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: "pointer",
-    fontFamily: "inherit",
-    marginTop: 4,
-  },
-  xBtn: {
-    background: "transparent",
-    border: "none",
-    color: dim,
-    fontSize: 14,
-    cursor: "pointer",
-  },
-  xBtnSm: {
-    background: "transparent",
-    border: "none",
-    color: dim,
-    fontSize: 11,
-    cursor: "pointer",
-  },
-  moveButtons: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 1,
-    marginRight: 6,
-    flexShrink: 0,
-  },
-  moveBtn: {
-    background: "transparent",
-    border: "none",
-    color: dim,
-    fontSize: 9,
-    cursor: "pointer",
-    padding: "1px 3px",
-    lineHeight: 1,
-  },
-
-  // foods
-  foodsHead: { display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" },
-  search: {
-    flex: 1,
-    minWidth: 120,
-    background: panel2,
-    border: `1px solid ${line}`,
-    color: text,
-    borderRadius: 8,
-    padding: "9px 12px",
-    fontSize: 14,
-    fontFamily: "inherit",
-  },
-  verifyBanner: {
-    background: "rgba(255,180,84,0.1)",
-    border: "1px solid rgba(255,180,84,0.3)",
-    color: "#ffb454",
-    borderRadius: 10,
-    padding: "10px 12px",
-    fontSize: 12,
-    marginBottom: 14,
-  },
-  saveBanner: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    background: "rgba(255,93,122,0.12)",
-    borderBottom: "1px solid rgba(255,93,122,0.4)",
-    color: "#ff5d7a",
-    padding: "10px 16px",
-    fontSize: 12.5,
-    fontWeight: 600,
-  },
-  saveBannerBtn: {
-    background: "transparent",
-    border: "1px solid rgba(255,93,122,0.5)",
-    color: "#ff5d7a",
-    borderRadius: 7,
-    padding: "4px 10px",
-    fontSize: 11,
-    cursor: "pointer",
-    fontFamily: "inherit",
-    flexShrink: 0,
-  },
-  foodGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-    gap: 10,
-  },
-  foodCard: {
-    background: panel,
-    border: `1px solid ${line}`,
-    borderRadius: 11,
-    padding: 12,
-    cursor: "pointer",
-  },
-  foodCardTop: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-  foodCardName: { fontSize: 13, fontWeight: 600 },
-  foodCardMacros: {
-    display: "flex",
-    gap: 10,
-    fontSize: 11,
-    color: dim,
-    fontFamily: "'Archivo', sans-serif",
-    flexWrap: "wrap",
-  },
-  foodCardUnit: { color: "#4d5854" },
-
-  // modal
-  modalWrap: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(0,0,0,0.6)",
-    display: "flex",
-    alignItems: "flex-start",
-    justifyContent: "center",
-    padding: 16,
-    zIndex: 50,
-    overflowY: "auto",
-  },
-  modal: {
-    background: panel,
-    border: `1px solid ${line}`,
-    borderRadius: 16,
-    width: "100%",
-    maxWidth: 440,
-    marginTop: 40,
-    overflow: "hidden",
-  },
-  modalHead: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: 12,
-    borderBottom: `1px solid ${line}`,
-  },
-  modalList: { maxHeight: "60vh", overflowY: "auto", padding: 8 },
-  pickItem: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    width: "100%",
-    background: "transparent",
-    border: "none",
-    borderRadius: 8,
-    padding: "10px 10px",
-    color: text,
-    fontSize: 13,
-    cursor: "pointer",
-    fontFamily: "inherit",
-    textAlign: "left",
-  },
-  pickUnit: { fontSize: 11, color: dim },
-  empty: { color: dim, textAlign: "center", padding: 20, fontSize: 13 },
-
-  // editor
-  editorBody: { padding: 16, display: "flex", flexDirection: "column", gap: 4 },
-  fLabel: {
-    fontSize: 10,
-    letterSpacing: 1.5,
-    color: dim,
-    fontWeight: 700,
-    marginTop: 8,
-    marginBottom: 4,
-    display: "block",
-  },
-  fInput: {
-    width: "100%",
-    background: panel2,
-    border: `1px solid ${line}`,
-    color: text,
-    borderRadius: 8,
-    padding: "9px 10px",
-    fontSize: 14,
-    fontFamily: "inherit",
-    boxSizing: "border-box",
-  },
-  fRow: { display: "flex", gap: 10 },
-  macroGrid: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 },
-  macroMini: { fontSize: 10, color: dim, display: "block", marginBottom: 3 },
-  checkRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 12,
-    fontSize: 12,
-    color: dim,
-    cursor: "pointer",
-  },
-  ingRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "5px 0",
-  },
-  recipeTotal: {
-    marginTop: 14,
-    padding: 12,
-    background: panel2,
-    borderRadius: 10,
-    border: `1px solid ${line}`,
-  },
-  editorFoot: {
-    display: "flex",
-    gap: 8,
-    alignItems: "center",
-    padding: 12,
-    borderTop: `1px solid ${line}`,
-  },
-  primaryBtn: {
-    background: accent,
-    color: ink,
-    border: "none",
-    borderRadius: 8,
-    padding: "9px 14px",
-    fontSize: 13,
-    fontWeight: 700,
-    cursor: "pointer",
-    fontFamily: "inherit",
-  },
-  ghostBtn: {
-    background: "transparent",
-    border: `1px solid ${line}`,
-    color: text,
-    borderRadius: 8,
-    padding: "9px 14px",
-    fontSize: 13,
-    cursor: "pointer",
-    fontFamily: "inherit",
-  },
-  dangerBtn: {
-    background: "transparent",
-    border: "1px solid #5a2a2a",
-    color: "#ff5d7a",
-    borderRadius: 8,
-    padding: "9px 14px",
-    fontSize: 13,
-    cursor: "pointer",
-    fontFamily: "inherit",
-  },
-
-  // phases
-  note: { color: dim, fontSize: 13, lineHeight: 1.5, marginBottom: 16 },
-  phaseCard: {
-    background: panel,
-    border: `1px solid ${line}`,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 10,
-  },
-  phaseName: {
-    background: "transparent",
-    border: "none",
-    borderBottom: `1px solid ${line}`,
-    color: text,
-    fontSize: 15,
-    fontWeight: 700,
-    fontFamily: "'Archivo', sans-serif",
-    marginBottom: 12,
-    padding: "2px 0",
-    width: "100%",
-  },
-
-  // data
-  dataRow: { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" },
-  statRow: { display: "flex", gap: 8 },
-  stat: {
-    flex: 1,
-    background: panel,
-    border: `1px solid ${line}`,
-    borderRadius: 11,
-    padding: "14px 8px",
-    textAlign: "center",
-  },
-  statN: {
-    fontSize: 22,
-    fontWeight: 800,
-    fontFamily: "'Archivo', sans-serif",
-    color: accent,
-  },
-  statL: { fontSize: 10, color: dim, letterSpacing: 1, marginTop: 2 },
-};
-
-function Style() {
-  return (
-    <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Spline+Sans:wght@400;500;600&display=swap');
-      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-      body { margin: 0; }
-      input, select, button { outline: none; }
-      input:focus, select:focus { border-color: ${accent} !important; }
-      ::-webkit-scrollbar { width: 8px; height: 8px; }
-      ::-webkit-scrollbar-thumb { background: ${line}; border-radius: 4px; }
-      input[type=number]::-webkit-inner-spin-button { opacity: .4; }
-    `}</style>
+    </AuthGate>
   );
 }
