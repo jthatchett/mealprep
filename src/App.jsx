@@ -699,7 +699,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
   const [picker, setPicker] = useState(null); // slotId being edited
   const [scanningSlot, setScanningSlot] = useState(null); // slotId being scanned
   const [pendingScan, setPendingScan] = useState(null); // { slotId, barcode }
-  const [copyOpen, setCopyOpen] = useState(false); // copy-day modal
+  const [copySource, setCopySource] = useState(null); // day key being copied FROM, or null
 
   const dayTotal = useMemo(() => {
     let t = ZERO;
@@ -732,26 +732,29 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
 
   return (
     <div>
-      {/* day tabs */}
+      {/* day tabs — each with its own copy icon underneath, so copying
+          never depends on which day is currently selected for viewing */}
       <div style={S.dayRow}>
         {DAYS.map((d) => (
-          <button
-            key={d}
-            onClick={() => setActiveDay(d)}
-            style={{
-              ...S.dayTab,
-              ...(d === activeDay ? S.dayTabOn : {}),
-            }}
-          >
-            {d}
-          </button>
+          <div key={d} style={S.dayTabWrap}>
+            <button
+              onClick={() => setActiveDay(d)}
+              style={{
+                ...S.dayTab,
+                ...(d === activeDay ? S.dayTabOn : {}),
+              }}
+            >
+              {d}
+            </button>
+            <button
+              style={S.dayCopyBtn}
+              onClick={() => setCopySource(d)}
+              title={`copy ${d}'s meals to…`}
+            >
+              ⧉
+            </button>
+          </div>
         ))}
-      </div>
-
-      <div style={S.copyRow}>
-        <button style={S.copyBtn} onClick={() => setCopyOpen(true)}>
-          ⧉ copy {activeDay}'s meals to…
-        </button>
       </div>
 
       {/* phase + target dashboard */}
@@ -842,14 +845,14 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
         />
       )}
 
-      {copyOpen && (
+      {copySource && (
         <CopyDayModal
-          activeDay={activeDay}
+          sourceDay={copySource}
           days={DAYS}
-          onClose={() => setCopyOpen(false)}
+          onClose={() => setCopySource(null)}
           onApply={(targetKeys, copyPhase) => {
-            setWeek((w) => copyDayTo(w, activeDay, targetKeys, { copyPhase }));
-            setCopyOpen(false);
+            setWeek((w) => copyDayTo(w, copySource, targetKeys, { copyPhase }));
+            setCopySource(null);
           }}
         />
       )}
@@ -1073,11 +1076,11 @@ function FoodPicker({ foods, onPick, onClose }) {
   );
 }
 
-function CopyDayModal({ activeDay, days, onClose, onApply }) {
-  const idx = days.indexOf(activeDay);
+function CopyDayModal({ sourceDay, days, onClose, onApply }) {
+  const idx = days.indexOf(sourceDay);
   const nextDay = idx < days.length - 1 ? days[idx + 1] : null;
   const restOfWeek = days.slice(idx + 1); // empty on Sun — nothing left to fill
-  const otherDays = days.filter((d) => d !== activeDay);
+  const otherDays = days.filter((d) => d !== sourceDay);
   const [picked, setPicked] = useState([]);
   const [copyPhase, setCopyPhase] = useState(false);
 
@@ -1091,7 +1094,7 @@ function CopyDayModal({ activeDay, days, onClose, onApply }) {
       <div style={S.modal} onClick={(e) => e.stopPropagation()}>
         <div style={S.modalHead}>
           <span style={{ fontWeight: 700, fontSize: 13 }}>
-            copy {activeDay}'s meals to…
+            copy {sourceDay}'s meals to…
           </span>
           <button style={S.xBtn} onClick={onClose}>
             ✕
@@ -1948,10 +1951,13 @@ const S = {
   navBtnOn: { background: accent, color: ink, borderColor: accent },
   main: { padding: 16, maxWidth: 760, margin: "0 auto" },
 
-  // day tabs
+  // day tabs — each is a column: the day-select button on top, a small
+  // dashed copy-icon button underneath. Both flex:1 within dayTabWrap
+  // so the 7-day row still divides evenly on a phone screen.
   dayRow: { display: "flex", gap: 4, marginBottom: 14 },
+  dayTabWrap: { flex: 1, display: "flex", flexDirection: "column", gap: 3 },
   dayTab: {
-    flex: 1,
+    width: "100%",
     padding: "8px 0",
     background: panel,
     border: `1px solid ${line}`,
@@ -1962,16 +1968,17 @@ const S = {
     cursor: "pointer",
   },
   dayTabOn: { background: panel2, color: accent, borderColor: accent },
-  copyRow: { display: "flex", justifyContent: "flex-end", marginBottom: 10 },
-  copyBtn: {
+  dayCopyBtn: {
+    width: "100%",
+    padding: "3px 0",
     background: "transparent",
-    border: "none",
+    border: `1px dashed ${line}`,
     color: dim,
-    fontSize: 11.5,
-    fontWeight: 600,
+    borderRadius: 6,
+    fontSize: 10,
+    lineHeight: 1.4,
     cursor: "pointer",
     fontFamily: "inherit",
-    padding: "4px 2px",
   },
 
   // dashboard
