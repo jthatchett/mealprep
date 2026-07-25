@@ -730,6 +730,30 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
     });
   };
 
+  // copy a single meal slot's entries onto the next day. Matches by slot
+  // name first (so "Meal 2" lands in the next day's "Meal 2"); if no slot
+  // with that name exists there, appends a new one with the same name.
+  const dayIdx = DAYS.indexOf(activeDay);
+  const nextDayKey = dayIdx < DAYS.length - 1 ? DAYS[dayIdx + 1] : null;
+  const copySlotToNextDay = (slot) => {
+    if (!nextDayKey) return;
+    setWeek((w) => {
+      const next = { ...w };
+      const targetDay = { ...next[nextDayKey] };
+      const slots = JSON.parse(JSON.stringify(targetDay.slots));
+      const clonedEntries = JSON.parse(JSON.stringify(slot.entries));
+      const ti = slots.findIndex((s) => s.name === slot.name);
+      if (ti !== -1) {
+        slots[ti] = { ...slots[ti], entries: clonedEntries };
+      } else {
+        slots.push({ id: uid(), name: slot.name, entries: clonedEntries });
+      }
+      targetDay.slots = slots;
+      next[nextDayKey] = targetDay;
+      return next;
+    });
+  };
+
   return (
     <div>
       {/* day tabs — each with its own copy icon underneath, so copying
@@ -794,6 +818,8 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
           onRemoveSlot={() =>
             update((d) => d.slots.splice(si, 1))
           }
+          onCopyNext={() => copySlotToNextDay(slot)}
+          canCopyNext={!!nextDayKey}
           onAdd={() => setPicker(slot.id)}
           onScan={() => setScanningSlot(slot.id)}
           onQty={(ei, qty) =>
@@ -955,11 +981,14 @@ function Slot({
   onMoveDown,
   onRename,
   onRemoveSlot,
+  onCopyNext,
+  canCopyNext,
   onAdd,
   onScan,
   onQty,
   onRemoveEntry,
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const total = useMemo(() => {
     let t = ZERO;
     for (const e of slot.entries) {
@@ -994,9 +1023,37 @@ function Slot({
         <span style={S.slotMacros}>
           {r0(total.cal)} kcal · {r1(total.p)}P · {r1(total.f)}F · {r1(total.c)}C
         </span>
-        <button style={S.xBtn} onClick={onRemoveSlot} title="remove slot">
-          ✕
-        </button>
+        <div style={{ position: "relative" }}>
+          <button style={S.xBtn} onClick={() => setMenuOpen((v) => !v)} title="meal options">
+            ⋮
+          </button>
+          {menuOpen && (
+            <>
+              <div style={S.menuBackdrop} onClick={() => setMenuOpen(false)} />
+              <div style={S.slotMenu}>
+                <button
+                  style={{ ...S.slotMenuItem, opacity: canCopyNext ? 1 : 0.4 }}
+                  disabled={!canCopyNext}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onCopyNext();
+                  }}
+                >
+                  ⧉ copy to next day
+                </button>
+                <button
+                  style={{ ...S.slotMenuItem, color: "#ff5d7a" }}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onRemoveSlot();
+                  }}
+                >
+                  ✕ delete meal
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {slot.entries.map((e, ei) => {
@@ -2131,6 +2188,35 @@ const S = {
     cursor: "pointer",
     padding: "1px 3px",
     lineHeight: 1,
+  },
+  menuBackdrop: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 40,
+  },
+  slotMenu: {
+    position: "absolute",
+    top: "calc(100% + 4px)",
+    right: 0,
+    background: panel2,
+    border: `1px solid ${line}`,
+    borderRadius: 10,
+    overflow: "hidden",
+    zIndex: 41,
+    minWidth: 172,
+    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+  },
+  slotMenuItem: {
+    display: "block",
+    width: "100%",
+    textAlign: "left",
+    background: "transparent",
+    border: "none",
+    color: text,
+    fontSize: 12.5,
+    padding: "10px 12px",
+    cursor: "pointer",
+    fontFamily: "inherit",
   },
 
   // foods
