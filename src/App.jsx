@@ -719,6 +719,24 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
     setWeek(copy);
   };
 
+  // create a new component food from the picker's inline "add food" form,
+  // append it to the master library, and hand back the saved record so the
+  // caller can reference its id (e.g. tag it "just added" in the list).
+  const createFood = (draft) => {
+    const newFood = {
+      id: uid(),
+      name: draft.name.trim(),
+      unit: draft.unit.trim() || "unit",
+      type: "component",
+      macros: draft.macros,
+      verify: !!draft.verify,
+      ingredients: [],
+      servings: 1,
+    };
+    setFoods((prev) => [...prev, newFood]);
+    return newFood;
+  };
+
   const moveSlot = (si, dir) => {
     const target = si + dir;
     if (target < 0 || target >= day.slots.length) return;
@@ -850,6 +868,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
         <FoodPicker
           foods={foods}
           onClose={() => setPicker(null)}
+          onCreateFood={createFood}
           onPick={(foodId) => {
             update((d) => {
               const slot = d.slots.find((s) => s.id === picker);
@@ -1095,42 +1114,154 @@ function Slot({
   );
 }
 
-function FoodPicker({ foods, onPick, onClose }) {
+function FoodPicker({ foods, onPick, onClose, onCreateFood }) {
   const [q, setQ] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState(blankQuickFood());
+  const [lastAddedId, setLastAddedId] = useState(null);
+
   const list = foods
     .filter((f) => f.name.toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => a.name.localeCompare(b.name));
+
+  const startAdd = () => {
+    setDraft({ ...blankQuickFood(), name: q.trim() });
+    setAdding(true);
+  };
+
+  const setMacro = (k, v) =>
+    setDraft((d) => ({ ...d, macros: { ...d.macros, [k]: parseFloat(v) || 0 } }));
+
+  const saveNewFood = () => {
+    if (!draft.name.trim() || !onCreateFood) return;
+    const food = onCreateFood(draft);
+    setLastAddedId(food.id);
+    setAdding(false);
+  };
+
   return (
     <div style={S.modalWrap} onClick={onClose}>
       <div style={S.modal} onClick={(e) => e.stopPropagation()}>
         <div style={S.modalHead}>
+          {onCreateFood && !adding && (
+            <button style={S.headerAddBtn} onClick={startAdd} title="add new food">
+              +
+            </button>
+          )}
           <input
             autoFocus
             placeholder="search foods…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             style={S.search}
+            disabled={adding}
           />
           <button style={S.xBtn} onClick={onClose}>
             ✕
           </button>
         </div>
-        <div style={S.modalList}>
-          {list.map((f) => (
-            <button key={f.id} style={S.pickItem} onClick={() => onPick(f.id)}>
-              <span>
-                {f.name}
-                {f.verify && <span style={S.verifyDot}>●</span>}
-                {f.type === "recipe" && <span style={S.recipeTag}>recipe</span>}
-              </span>
-              <span style={S.pickUnit}>per {f.unit}</span>
-            </button>
-          ))}
-          {list.length === 0 && <div style={S.empty}>no match</div>}
-        </div>
+
+        {!adding ? (
+          <div style={S.modalList}>
+            {list.map((f) => (
+              <button key={f.id} style={S.pickItem} onClick={() => onPick(f.id)}>
+                <span>
+                  {f.name}
+                  {f.verify && <span style={S.verifyDot}>●</span>}
+                  {f.type === "recipe" && <span style={S.recipeTag}>recipe</span>}
+                  {f.id === lastAddedId && <span style={S.newTag}>just added</span>}
+                </span>
+                <span style={S.pickUnit}>per {f.unit}</span>
+              </button>
+            ))}
+            {list.length === 0 && (
+              <div style={S.empty}>
+                no match
+                {onCreateFood && (
+                  <div style={{ marginTop: 10 }}>
+                    <button style={S.quickAddRow} onClick={startAdd}>
+                      + add it as a new food
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={S.editorBody}>
+            <strong style={{ fontSize: 12, letterSpacing: 1, color: dim }}>
+              NEW COMPONENT
+            </strong>
+
+            <label style={S.fLabel}>Name</label>
+            <input
+              autoFocus
+              value={draft.name}
+              onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+              style={S.fInput}
+              placeholder="e.g. protein bar"
+            />
+
+            <label style={S.fLabel}>Unit</label>
+            <input
+              value={draft.unit}
+              onChange={(e) => setDraft((d) => ({ ...d, unit: e.target.value }))}
+              style={S.fInput}
+              placeholder="oz / cup / bar"
+            />
+
+            <label style={S.fLabel}>Macros (per {draft.unit || "unit"})</label>
+            <div style={S.macroGrid}>
+              {[
+                ["Protein", "p"],
+                ["Fat", "f"],
+                ["Carbs", "c"],
+                ["Calories", "cal"],
+              ].map(([lab, k]) => (
+                <div key={k}>
+                  <span style={S.macroMini}>{lab}</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={draft.macros[k]}
+                    onChange={(e) => setMacro(k, e.target.value)}
+                    style={S.fInput}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <label style={S.checkRow}>
+              <input
+                type="checkbox"
+                checked={draft.verify}
+                onChange={(e) => setDraft((d) => ({ ...d, verify: e.target.checked }))}
+              />
+              <span>flag "needs verification"</span>
+            </label>
+
+            <div style={S.editorFoot}>
+              <div style={{ flex: 1 }} />
+              <button style={S.ghostBtn} onClick={() => setAdding(false)}>
+                cancel
+              </button>
+              <button
+                style={{ ...S.primaryBtn, opacity: draft.name.trim() ? 1 : 0.5 }}
+                disabled={!draft.name.trim()}
+                onClick={saveNewFood}
+              >
+                save to foods
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function blankQuickFood() {
+  return { name: "", unit: "unit", macros: { p: 0, f: 0, c: 0, cal: 0 }, verify: false };
 }
 
 function CopyDayModal({ sourceDay, days, onClose, onApply }) {
@@ -1651,7 +1782,7 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
                   checked={draft.verify}
                   onChange={(e) => set("verify", e.target.checked)}
                 />
-                <span>flag “needs verification”</span>
+                <span>flag "needs verification"</span>
               </label>
             </>
           ) : (
@@ -1712,7 +1843,7 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
                   checked={draft.verify}
                   onChange={(e) => set("verify", e.target.checked)}
                 />
-                <span>flag “needs verification”</span>
+                <span>flag "needs verification"</span>
               </label>
             </>
           )}
@@ -1883,7 +2014,7 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog }) {
   return (
     <div>
       <p style={S.note}>
-        Your data lives in this artifact’s storage. Export regularly — it’s your
+        Your data lives in this artifact's storage. Export regularly — it's your
         insurance against losing the library if the artifact is rebuilt.
       </p>
       <div style={S.dataRow}>
@@ -2339,6 +2470,44 @@ const S = {
   },
   pickUnit: { fontSize: 11, color: dim },
   empty: { color: dim, textAlign: "center", padding: 20, fontSize: 13 },
+  headerAddBtn: {
+    background: "transparent",
+    border: `1px solid ${accent}`,
+    color: accent,
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: "pointer",
+    flexShrink: 0,
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    lineHeight: 1,
+    fontFamily: "inherit",
+  },
+  quickAddRow: {
+    display: "block",
+    width: "100%",
+    marginTop: 4,
+    background: "rgba(70,230,160,0.06)",
+    border: `1px dashed ${accent}`,
+    color: accent,
+    borderRadius: 8,
+    padding: "10px 10px",
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    textAlign: "left",
+  },
+  newTag: {
+    fontSize: 9,
+    background: "rgba(70,230,160,0.15)",
+    color: accent,
+    padding: "2px 6px",
+    borderRadius: 5,
+    marginLeft: 6,
+    letterSpacing: 0.5,
+  },
 
   // editor
   editorBody: { padding: 16, display: "flex", flexDirection: "column", gap: 4 },
