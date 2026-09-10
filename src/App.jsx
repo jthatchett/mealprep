@@ -91,6 +91,89 @@ async function sbSaveAppData(session, data) {
   }
 }
 
+// local calendar date (not UTC) — matters near midnight
+function todayISO() {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+// fetch the user's currently-open diet phase (end_date is null), or null if none
+async function sbGetOpenDietPhase(session) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/diet_phases?select=id,phase_id,phase_name,phase_type,start_date&user_id=eq.${session.user.id}&end_date=is.null`,
+    { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+  );
+  if (!res.ok) throw new Error("Failed to load diet phase: " + res.status);
+  const rows = await res.json();
+  return rows[0] || null;
+}
+
+// close the current open phase (if any) and open a new one starting today
+async function sbSwitchDietPhase(session, preset) {
+  const today = todayISO();
+  await fetch(
+    `${SUPABASE_URL}/rest/v1/diet_phases?user_id=eq.${session.user.id}&end_date=is.null`,
+    {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({ end_date: today }),
+    }
+  );
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/diet_phases`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${session.access_token}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      user_id: session.user.id,
+      phase_id: preset.id,
+      phase_name: preset.name,
+      phase_type: preset.phase_type,
+      start_date: today,
+      end_date: null,
+    }),
+  });
+  if (!res.ok) throw new Error("Failed to switch phase: " + res.status);
+  const rows = await res.json();
+  return rows[0];
+}
+
+// fetch today's logged bodyweight, or null if not logged yet
+async function sbGetBodyweightToday(session) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/bodyweight_log?select=weight&user_id=eq.${session.user.id}&date=eq.${todayISO()}`,
+    { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+  );
+  if (!res.ok) throw new Error("Failed to load bodyweight: " + res.status);
+  const rows = await res.json();
+  return rows[0] ? rows[0].weight : null;
+}
+
+// log (or overwrite) today's bodyweight
+async function sbLogBodyweight(session, weight) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bodyweight_log`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${session.access_token}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ user_id: session.user.id, date: todayISO(), weight }),
+  });
+  if (!res.ok) throw new Error("Failed to save bodyweight: " + res.status);
+}
+
 /* ---------- seeded data (VERIFY = best-effort macros to correct) ---------- */
 // macros are PER the stated unit. verify:true means "Hayden: check this number".
 const SEED_FOODS = [
@@ -425,6 +508,9 @@ export default function App() {
   const [loadError, setLoadError] = useState(false); // true = load threw; block saving so we can't overwrite good data
   const [reloadNonce, setReloadNonce] = useState(0); // bump to retry a failed load
   const [saveError, setSaveError] = useState(null);  // last save error message, shown as a banner
+  const [dietPhase, setDietPhase] = useState(null);   // currently-open diet_phases row
+  const [bwToday, setBwToday] = useState(undefined);  // undefined = not checked yet, null = not logged
+  const [showBwModal, setShowBwModal] = useState(false);
   const dbg = (msg) => setDebugLog((prev) => [`${new Date().toLocaleTimeString()}: ${msg}`, ...prev.slice(0, 19)]);
 
   // restore session from local storage on mount (per-device, just holds the token)
@@ -564,6 +650,55 @@ export default function App() {
     return () => clearTimeout(t);
   }, [store, loaded, session, loadError]);
 
+  // diet phase + bodyweight — separate tables from app_data, loaded once signed in.
+  // Decides whether to pop the once-daily bodyweight modal.
+  useEffect(() => {
+    if (!loaded || !session) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [phase, weight] = await Promise.all([
+          sbGetOpenDietPhase(session),
+          sbGetBodyweightToday(session),
+        ]);
+        if (cancelled) return;
+        setDietPhase(phase);
+        setBwToday(weight);
+        const dismissedToday = sessionStorage.getItem(`mealprep:bw-skip:${todayISO()}`) === "1";
+        if (weight === null && !dismissedToday) setShowBwModal(true);
+      } catch (e) {
+        dbg("diet phase / bodyweight load FAILED: " + e.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [loaded, session]);
+
+  const switchPhase = async (preset) => {
+    try {
+      const row = await sbSwitchDietPhase(session, preset);
+      setDietPhase(row);
+    } catch (e) {
+      dbg("switch phase FAILED: " + e.message);
+      window.alert("Couldn't switch phase — " + e.message);
+    }
+  };
+
+  const saveBodyweight = async (weight) => {
+    try {
+      await sbLogBodyweight(session, weight);
+      setBwToday(weight);
+      setShowBwModal(false);
+    } catch (e) {
+      dbg("log bodyweight FAILED: " + e.message);
+      window.alert("Couldn't save — " + e.message);
+    }
+  };
+
+  const skipBodyweight = () => {
+    sessionStorage.setItem(`mealprep:bw-skip:${todayISO()}`, "1");
+    setShowBwModal(false);
+  };
+
   // not checked session yet — brief splash
   if (!sessionChecked) {
     return (
@@ -620,6 +755,7 @@ export default function App() {
   return (
     <div style={S.app}>
       <Style />
+      {showBwModal && <BodyweightModal onSave={saveBodyweight} onSkip={skipBodyweight} />}
       {saveError && (
         <div style={S.saveBanner}>
           <span>⚠ last change didn't save — {saveError}</span>
@@ -672,7 +808,12 @@ export default function App() {
           <Foods foods={foods} setFoods={setFoods} />
         )}
         {tab === "phases" && (
-          <Phases phases={phases} setPhases={setPhases} />
+          <Phases
+            phases={phases}
+            setPhases={setPhases}
+            dietPhase={dietPhase}
+            onSwitchPhase={switchPhase}
+          />
         )}
         {tab === "data" && (
           <Data
@@ -1894,7 +2035,60 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
 /* ============================================================
    PHASES
    ============================================================ */
-function Phases({ phases, setPhases }) {
+/* ============================================================
+   BODYWEIGHT MODAL — once-daily prompt (no dismiss-outside; save or skip)
+   ============================================================ */
+function BodyweightModal({ onSave, onSkip }) {
+  const [val, setVal] = useState("");
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    const n = parseFloat(val);
+    if (!val || isNaN(n) || n <= 0) {
+      setErr("enter a weight first");
+      return;
+    }
+    setErr("");
+    setSaving(true);
+    await onSave(n);
+    setSaving(false);
+  };
+
+  return (
+    <div style={S.modalWrap}>
+      <div style={{ ...S.modal, maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: 24, textAlign: "center" }}>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, letterSpacing: 1, fontSize: 14, marginBottom: 4 }}>
+            LOG BODYWEIGHT
+          </div>
+          <p style={{ ...S.note, marginBottom: 16 }}>Once a day, first thing in.</p>
+          <input
+            autoFocus
+            type="number"
+            inputMode="decimal"
+            placeholder="184.0"
+            value={val}
+            onChange={(e) => { setVal(e.target.value); setErr(""); }}
+            style={{ ...S.fInput, width: "100%", textAlign: "center", fontSize: 16, marginBottom: 8 }}
+          />
+          {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+          <button style={{ ...S.primaryBtn, width: "100%", marginBottom: 8 }} onClick={submit} disabled={saving}>
+            {saving ? "saving…" : "save"}
+          </button>
+          <button
+            style={{ ...S.ghostBtn, width: "100%", background: "transparent", border: "none", color: dim }}
+            onClick={onSkip}
+          >
+            skip today
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Phases({ phases, setPhases, dietPhase, onSwitchPhase }) {
   const set = (id, key, sub, val) =>
     setPhases((prev) =>
       prev.map((p) =>
@@ -1907,6 +2101,38 @@ function Phases({ phases, setPhases }) {
     );
   return (
     <div>
+      <div style={{ ...S.phaseCard, marginBottom: 20 }}>
+        <div style={{ fontSize: 11, letterSpacing: 1, color: dim, marginBottom: 6 }}>
+          CURRENT PHASE
+        </div>
+        {dietPhase ? (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>{dietPhase.phase_name}</div>
+              <div style={{ fontSize: 12, color: dim }}>
+                {dietPhase.phase_type} · since {dietPhase.start_date}
+              </div>
+            </div>
+            <select
+              value=""
+              onChange={(e) => {
+                const preset = phases.find((p) => p.id === e.target.value);
+                if (preset) onSwitchPhase(preset);
+              }}
+              style={S.fInput}
+            >
+              <option value="" disabled>switch phase…</option>
+              {phases
+                .filter((p) => p.id !== dietPhase.phase_id)
+                .map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+            </select>
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: dim }}>no phase set yet</div>
+        )}
+      </div>
       <p style={S.note}>
         Phases are macro-target profiles. Assign one to a day in Plan and the
         bars measure against it. Targets reverse-engineered from your docs —
