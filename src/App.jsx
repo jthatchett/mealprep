@@ -99,53 +99,133 @@ function todayISO() {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
-// fetch the user's currently-open diet phase (end_date is null), or null if none
-async function sbGetOpenDietPhase(session) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/diet_phases?select=id,phase_id,phase_name,phase_type,start_date&user_id=eq.${session.user.id}&end_date=is.null`,
-    { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
-  );
-  if (!res.ok) throw new Error("Failed to load diet phase: " + res.status);
-  const rows = await res.json();
-  return rows[0] || null;
+/* ---------- diet phases (shared with RepReport) ----------
+   A diet_phases row is one block of the macro-cycle: cut / maintenance /
+   surplus, with a start_date, an optional planned_end_date (set from the
+   calendar), and an end_date that's only filled when a phase is actually
+   closed early. The phase in effect on a date is the LATEST-starting row on
+   or before it whose end_date (if any) hasn't passed — so a later phase
+   simply takes over from an earlier one, and future phases can be planned
+   without closing anything. RepReport resolves phases with the same rule. */
+const DAY_MS = 86400000;
+function parseISO(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function isoOf(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+function addDaysISO(iso, n) {
+  const d = parseISO(iso);
+  d.setDate(d.getDate() + n);
+  return isoOf(d);
+}
+function daysBetween(fromISO, toISO) {
+  return Math.round((parseISO(toISO) - parseISO(fromISO)) / DAY_MS);
+}
+function mondayOf(iso) {
+  const d = parseISO(iso);
+  return addDaysISO(iso, -((d.getDay() + 6) % 7));
+}
+function weekdayKey(iso) {
+  return DAYS[(parseISO(iso).getDay() + 6) % 7];
 }
 
-// close the current open phase (if any) and open a new one starting today
-async function sbSwitchDietPhase(session, preset) {
-  const today = todayISO();
-  await fetch(
-    `${SUPABASE_URL}/rest/v1/diet_phases?user_id=eq.${session.user.id}&end_date=is.null`,
-    {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${session.access_token}`,
-        "Content-Type": "application/json",
-        Prefer: "return=minimal",
-      },
-      body: JSON.stringify({ end_date: today }),
-    }
+function phaseOnDate(rows, iso) {
+  const sorted = [...(rows || [])].sort((a, b) => (a.start_date < b.start_date ? 1 : -1));
+  return sorted.find((r) => r.start_date <= iso && (!r.end_date || r.end_date >= iso)) || null;
+}
+
+// "week 3 of 12" for a phase on a date (plannedWeeks null = open-ended)
+function phaseProgress(row, iso) {
+  if (!row) return null;
+  const week = Math.floor(daysBetween(row.start_date, iso) / 7) + 1;
+  const plannedWeeks = row.planned_end_date
+    ? Math.max(1, Math.round((daysBetween(row.start_date, row.planned_end_date) + 1) / 7))
+    : null;
+  return { week, plannedWeeks, overrun: !!row.planned_end_date && iso > row.planned_end_date };
+}
+
+// default planned length by phase kind (RP-style norms, editable per phase):
+// mini-cut ~4 wk, cut ~12 wk, bulk ~16 wk, maintenance open-ended
+function defaultPhaseWeeks(preset) {
+  if (!preset) return null;
+  if (preset.phase_type === "deficit") return /mini/i.test(preset.name || "") ? 4 : 12;
+  if (preset.phase_type === "surplus") return 16;
+  return null;
+}
+
+const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46e6a0" };
+
+function sbHeaders(session, extra) {
+  return { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}`, ...extra };
+}
+
+async function sbLoadDietPhases(session) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/diet_phases?select=id,phase_id,phase_name,phase_type,start_date,end_date,planned_end_date&user_id=eq.${session.user.id}&order=start_date.asc`,
+    { headers: sbHeaders(session) }
   );
+  if (!res.ok) throw new Error("Failed to load diet phases: " + res.status);
+  return res.json();
+}
+
+async function sbInsertDietPhase(session, { preset, start_date, planned_end_date }) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/diet_phases`, {
     method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "return=minimal" }),
     body: JSON.stringify({
       user_id: session.user.id,
       phase_id: preset.id,
       phase_name: preset.name,
       phase_type: preset.phase_type,
-      start_date: today,
+      start_date,
+      planned_end_date: planned_end_date || null,
       end_date: null,
     }),
   });
-  if (!res.ok) throw new Error("Failed to switch phase: " + res.status);
-  const rows = await res.json();
-  return rows[0];
+  if (!res.ok) throw new Error("Failed to add phase: " + res.status);
+}
+
+async function sbUpdateDietPhase(session, id, patch) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/diet_phases?id=eq.${id}`, {
+    method: "PATCH",
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error("Failed to update phase: " + res.status);
+}
+
+async function sbDeleteDietPhase(session, id) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/diet_phases?id=eq.${id}`, {
+    method: "DELETE",
+    headers: sbHeaders(session, { Prefer: "return=minimal" }),
+  });
+  if (!res.ok) throw new Error("Failed to delete phase: " + res.status);
+}
+
+// quick switch: the phase covering today ends and `preset` starts today.
+// A phase that itself started today is changed in place instead (closing
+// it "yesterday" would end it before it began). Planned phases later in
+// the calendar are left alone — the new phase's planned end stops the day
+// before the next one starts, else uses the default length.
+async function sbSwitchDietPhase(session, preset, rows) {
+  const today = todayISO();
+  const current = phaseOnDate(rows, today);
+  const next = [...(rows || [])]
+    .filter((r) => r.start_date > today)
+    .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0];
+  const weeks = defaultPhaseWeeks(preset);
+  let planned = weeks ? addDaysISO(today, weeks * 7 - 1) : null;
+  if (next && (!planned || planned >= next.start_date)) planned = addDaysISO(next.start_date, -1);
+  if (current && current.start_date === today) {
+    await sbUpdateDietPhase(session, current.id, {
+      phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type, planned_end_date: planned,
+    });
+    return;
+  }
+  if (current) await sbUpdateDietPhase(session, current.id, { end_date: addDaysISO(today, -1) });
+  await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
 }
 
 // fetch today's logged bodyweight, or null if not logged yet
@@ -161,7 +241,10 @@ async function sbGetBodyweightToday(session) {
 
 // log (or overwrite) today's bodyweight
 async function sbLogBodyweight(session, weight) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/bodyweight_log`, {
+  // on_conflict targets the (user_id, date) unique key — without it PostgREST
+  // merges on the primary key only, so a second save the same day 409s
+  // instead of overwriting.
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bodyweight_log?on_conflict=user_id,date`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -501,14 +584,23 @@ export default function App() {
   const [tab, setTab] = useState("plan");
   const [store, setStore] = useState(null); // { foods, phases, week } — atomic
   const [loaded, setLoaded] = useState(false);
-  const [activeDay, setActiveDay] = useState("Mon");
+  // The date being viewed in Plan. The meal plan itself is still one
+  // repeating Mon–Sun template (dated per-day plans come later), so a date
+  // resolves to its weekday's template day — the date adds the week strip,
+  // the month calendar, and which diet phase that day falls in.
+  const [selectedDate, setSelectedDate] = useState(() => todayISO());
+  const activeDay = weekdayKey(selectedDate);
+  const setActiveDay = (dayKey) =>
+    setSelectedDate(addDaysISO(mondayOf(selectedDate), DAYS.indexOf(dayKey)));
+  const [showMonth, setShowMonth] = useState(false);
   const [debugLog, setDebugLog] = useState([]);
   const [session, setSession] = useState(null);     // null = not yet checked
   const [sessionChecked, setSessionChecked] = useState(false);
   const [loadError, setLoadError] = useState(false); // true = load threw; block saving so we can't overwrite good data
   const [reloadNonce, setReloadNonce] = useState(0); // bump to retry a failed load
   const [saveError, setSaveError] = useState(null);  // last save error message, shown as a banner
-  const [dietPhase, setDietPhase] = useState(null);   // currently-open diet_phases row
+  const [dietPhases, setDietPhases] = useState([]);  // every diet_phases row (history + planned)
+  const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwToday, setBwToday] = useState(undefined);  // undefined = not checked yet, null = not logged
   const [showBwModal, setShowBwModal] = useState(false);
   const dbg = (msg) => setDebugLog((prev) => [`${new Date().toLocaleTimeString()}: ${msg}`, ...prev.slice(0, 19)]);
@@ -657,12 +749,12 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const [phase, weight] = await Promise.all([
-          sbGetOpenDietPhase(session),
+        const [phaseRows, weight] = await Promise.all([
+          sbLoadDietPhases(session),
           sbGetBodyweightToday(session),
         ]);
         if (cancelled) return;
-        setDietPhase(phase);
+        setDietPhases(phaseRows);
         setBwToday(weight);
         const dismissedToday = sessionStorage.getItem(`mealprep:bw-skip:${todayISO()}`) === "1";
         if (weight === null && !dismissedToday) setShowBwModal(true);
@@ -673,13 +765,29 @@ export default function App() {
     return () => { cancelled = true; };
   }, [loaded, session]);
 
+  const reloadDietPhases = async () => setDietPhases(await sbLoadDietPhases(session));
+
   const switchPhase = async (preset) => {
     try {
-      const row = await sbSwitchDietPhase(session, preset);
-      setDietPhase(row);
+      await sbSwitchDietPhase(session, preset, dietPhases);
+      await reloadDietPhases();
     } catch (e) {
       dbg("switch phase FAILED: " + e.message);
       window.alert("Couldn't switch phase — " + e.message);
+    }
+  };
+
+  // calendar edits (MonthSheet): run the write, then re-read every row so
+  // the calendar always shows what's actually stored
+  const editDietPhases = async (write) => {
+    try {
+      await write(session);
+      await reloadDietPhases();
+      return true;
+    } catch (e) {
+      dbg("edit phase FAILED: " + e.message);
+      window.alert("Couldn't save phase — " + e.message);
+      return false;
     }
   };
 
@@ -756,6 +864,16 @@ export default function App() {
     <div style={S.app}>
       <Style />
       {showBwModal && <BodyweightModal onSave={saveBodyweight} onSkip={skipBodyweight} />}
+      {showMonth && (
+        <MonthSheet
+          selectedDate={selectedDate}
+          dietPhases={dietPhases}
+          presets={phases}
+          onSelectDate={(iso) => { setSelectedDate(iso); setShowMonth(false); }}
+          onEdit={editDietPhases}
+          onClose={() => setShowMonth(false)}
+        />
+      )}
       {saveError && (
         <div style={S.saveBanner}>
           <span>⚠ last change didn't save — {saveError}</span>
@@ -802,6 +920,10 @@ export default function App() {
             phases={phases}
             activeDay={activeDay}
             setActiveDay={setActiveDay}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            dietPhases={dietPhases}
+            onOpenMonth={() => setShowMonth(true)}
           />
         )}
         {tab === "foods" && (
@@ -813,6 +935,7 @@ export default function App() {
             setPhases={setPhases}
             dietPhase={dietPhase}
             onSwitchPhase={switchPhase}
+            onOpenCalendar={() => { setTab("plan"); setShowMonth(true); }}
           />
         )}
         {tab === "data" && (
@@ -834,7 +957,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, onOpenMonth }) {
   const day = week[activeDay];
   const phase = phases.find((p) => p.id === day.phaseId) || null;
   const [picker, setPicker] = useState(null); // slotId being edited
@@ -915,35 +1038,20 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
 
   return (
     <div>
-      {/* day tabs — each with its own copy icon underneath, so copying
-          never depends on which day is currently selected for viewing */}
-      <div style={S.dayRow}>
-        {DAYS.map((d) => (
-          <div key={d} style={S.dayTabWrap}>
-            <button
-              onClick={() => setActiveDay(d)}
-              style={{
-                ...S.dayTab,
-                ...(d === activeDay ? S.dayTabOn : {}),
-              }}
-            >
-              {d}
-            </button>
-            <button
-              style={S.dayCopyBtn}
-              onClick={() => setCopySource(d)}
-              title={`copy ${d}'s meals to…`}
-            >
-              ⧉
-            </button>
-          </div>
-        ))}
-      </div>
+      <DateStrip
+        selectedDate={selectedDate}
+        setSelectedDate={setSelectedDate}
+        dietPhases={dietPhases}
+        onOpenMonth={onOpenMonth}
+        onCopyDay={(d) => setCopySource(d)}
+      />
 
       {/* phase + target dashboard */}
       <div style={S.dash}>
         <div style={S.dashHead}>
-          <label style={S.dashLabel}>PHASE</label>
+          {/* the day's macro-target profile (a Phases-tab template) — not the
+              diet phase, which the chip above the week strip shows */}
+          <label style={S.dashLabel}>TARGETS</label>
           <select
             key={day.phaseId || "none"}
             value={day.phaseId || ""}
@@ -1082,6 +1190,293 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay 
           }}
         />
       )}
+    </div>
+  );
+}
+
+/* ============================================================
+   DATE STRIP — "September 16 ›" (opens the month calendar), then the
+   Mon–Sun week holding the selected date, each day tinted by the diet
+   phase it falls in. Swipe or use the arrows to move a week. Each day
+   keeps its copy button underneath, as the old day tabs had.
+   ============================================================ */
+function DateStrip({ selectedDate, setSelectedDate, dietPhases, onOpenMonth, onCopyDay }) {
+  const today = todayISO();
+  const monday = mondayOf(selectedDate);
+  const days = DAYS.map((key, i) => ({ key, iso: addDaysISO(monday, i) }));
+  const current = phaseOnDate(dietPhases, selectedDate);
+  const prog = phaseProgress(current, selectedDate);
+  const touch = useRef(null);
+  const shiftWeek = (n) => setSelectedDate(addDaysISO(selectedDate, 7 * n));
+  const title = parseISO(selectedDate).toLocaleDateString("en-US", { month: "long", day: "numeric" });
+
+  return (
+    <div
+      style={{ marginBottom: 14 }}
+      onTouchStart={(e) => { touch.current = e.touches[0].clientX; }}
+      onTouchEnd={(e) => {
+        if (touch.current == null) return;
+        const dx = e.changedTouches[0].clientX - touch.current;
+        touch.current = null;
+        if (Math.abs(dx) > 50) shiftWeek(dx < 0 ? 1 : -1);
+      }}
+    >
+      <div style={S.dateHead}>
+        <button style={S.dateTitle} onClick={onOpenMonth}>
+          {title} <span style={{ color: dim }}>›</span>
+        </button>
+        <div style={{ flex: 1 }} />
+        {selectedDate !== today && (
+          <button style={S.dateNavBtn} onClick={() => setSelectedDate(today)}>today</button>
+        )}
+        <button style={S.dateNavBtn} onClick={() => shiftWeek(-1)} aria-label="previous week">‹</button>
+        <button style={S.dateNavBtn} onClick={() => shiftWeek(1)} aria-label="next week">›</button>
+      </div>
+      {current && (
+        <div style={{ ...S.phaseChip, borderColor: PHASE_COLORS[current.phase_type], color: PHASE_COLORS[current.phase_type] }}>
+          {current.phase_name} · week {prog.week}
+          {prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : ""}
+          {prog.overrun ? " · past planned end" : ""}
+        </div>
+      )}
+      <div style={S.dayRow}>
+        {days.map(({ key, iso }) => {
+          const ph = phaseOnDate(dietPhases, iso);
+          const on = iso === selectedDate;
+          return (
+            <div key={iso} style={S.dayTabWrap}>
+              <button
+                onClick={() => setSelectedDate(iso)}
+                style={{
+                  ...S.dayTab,
+                  ...(on ? S.dayTabOn : {}),
+                  ...(iso === today && !on ? { color: text } : {}),
+                  borderBottom: ph ? `3px solid ${PHASE_COLORS[ph.phase_type]}` : S.dayTab.border,
+                }}
+              >
+                <div style={{ fontSize: 10, letterSpacing: 0.5 }}>{key.toUpperCase()}</div>
+                <div style={{ fontSize: 15 }}>{parseISO(iso).getDate()}</div>
+              </button>
+              <button style={S.dayCopyBtn} onClick={() => onCopyDay(key)} title={`copy ${key}'s meals to…`}>
+                ⧉
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   MONTH SHEET — month calendar for jumping to any date, and the one
+   place diet phases are planned: every day is tinted by the phase it
+   falls in (lighter = future, dashed = past the phase's planned end).
+   EDIT PHASES mode turns a tap into "what phase is this day in / start a
+   new one here".
+   ============================================================ */
+function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, onClose }) {
+  const today = todayISO();
+  const [cursor, setCursor] = useState(() => selectedDate.slice(0, 8) + "01");
+  const [editMode, setEditMode] = useState(false);
+  const [editDay, setEditDay] = useState(null); // ISO of the day being edited
+
+  const first = parseISO(cursor);
+  const gridStart = mondayOf(cursor);
+  const cells = Array.from({ length: 42 }, (_, i) => addDaysISO(gridStart, i));
+  const shiftMonth = (n) => {
+    const d = new Date(first.getFullYear(), first.getMonth() + n, 1);
+    setCursor(isoOf(d));
+  };
+
+  return (
+    <div style={S.modalWrap} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+        <div style={S.modalHead}>
+          <button style={S.dateNavBtn} onClick={() => shiftMonth(-1)} aria-label="previous month">‹</button>
+          <div style={{ flex: 1, textAlign: "center", fontWeight: 700 }}>
+            {first.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+          </div>
+          <button style={S.dateNavBtn} onClick={() => shiftMonth(1)} aria-label="next month">›</button>
+        </div>
+        <div style={{ padding: 12 }}>
+          <div style={S.monthGrid}>
+            {DAYS.map((d) => (
+              <div key={d} style={{ textAlign: "center", fontSize: 11, color: dim, paddingBottom: 4 }}>{d}</div>
+            ))}
+            {cells.map((iso) => {
+              const inMonth = iso.slice(0, 7) === cursor.slice(0, 7);
+              const ph = phaseOnDate(dietPhases, iso);
+              const color = ph ? PHASE_COLORS[ph.phase_type] : null;
+              const future = iso > today;
+              const overrun = ph && ph.planned_end_date && iso > ph.planned_end_date;
+              const on = iso === (editMode ? editDay : selectedDate);
+              return (
+                <button
+                  key={iso}
+                  onClick={() => (editMode ? setEditDay(iso) : onSelectDate(iso))}
+                  style={{
+                    ...S.monthCell,
+                    opacity: inMonth ? 1 : 0.35,
+                    background: color ? color + (future ? "22" : "44") : panel2,
+                    border: overrun ? `1px dashed ${color}` : on ? `1px solid ${text}` : `1px solid transparent`,
+                    boxShadow: iso === today ? `inset 0 0 0 2px ${accent}` : "none",
+                    color: on ? text : inMonth ? text : dim,
+                    fontWeight: on ? 800 : 500,
+                  }}
+                >
+                  {parseISO(iso).getDate()}
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 10, fontSize: 11, color: dim }}>
+            {[["deficit", "cut"], ["maintenance", "maintenance"], ["surplus", "bulk"]].map(([k, lab]) => (
+              <span key={k}><span style={{ color: PHASE_COLORS[k] }}>■</span> {lab}</span>
+            ))}
+            <span>lighter = planned · dashed = past planned end</span>
+          </div>
+
+          <button
+            style={{ ...S.ghostBtn, width: "100%", marginTop: 12, ...(editMode ? { color: accent, borderColor: accent } : {}) }}
+            onClick={() => { setEditMode(!editMode); setEditDay(null); }}
+          >
+            {editMode ? "done editing phases" : "edit phases"}
+          </button>
+          {editMode && !editDay && (
+            <p style={{ ...S.note, marginTop: 8, marginBottom: 0 }}>Tap a day to see its phase or start a new phase there.</p>
+          )}
+          {editMode && editDay && (
+            <PhaseDayEditor
+              key={editDay}
+              day={editDay}
+              dietPhases={dietPhases}
+              presets={presets}
+              onEdit={onEdit}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The edit panel under the month grid: the phase covering the tapped day
+// (change its type, start, planned length, or delete it), or start a new
+// phase on that day. A phase runs until its planned end, or until the next
+// phase starts — whichever the calendar shows first.
+function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
+  const covering = phaseOnDate(dietPhases, day);
+  const [mode, setMode] = useState(covering ? "view" : "new");
+  const blank = { presetId: "", start: day, weeks: "", openEnded: false };
+  const [form, setForm] = useState(blank);
+  const [saving, setSaving] = useState(false);
+  const typedPresets = presets.filter((p) => p.phase_type);
+
+  const startForm = (row) => {
+    if (row) {
+      const prog = phaseProgress(row, row.start_date);
+      setForm({ presetId: row.phase_id, start: row.start_date, weeks: prog.plannedWeeks || "", openEnded: !row.planned_end_date });
+      setMode("edit");
+    } else {
+      setForm(blank);
+      setMode("new");
+    }
+  };
+
+  const preset = presets.find((p) => p.id === form.presetId) || null;
+  const weeksValue = form.weeks === "" ? defaultPhaseWeeks(preset) : Number(form.weeks);
+  const plannedEnd = form.openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
+
+  const save = async () => {
+    if (!preset) return window.alert("pick a phase first");
+    setSaving(true);
+    const ok = await onEdit((session) =>
+      mode === "edit"
+        ? sbUpdateDietPhase(session, covering.id, {
+            phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type,
+            start_date: form.start, planned_end_date: plannedEnd,
+            end_date: covering.end_date && covering.end_date < form.start ? null : covering.end_date,
+          })
+        : sbInsertDietPhase(session, { preset, start_date: form.start, planned_end_date: plannedEnd })
+    );
+    setSaving(false);
+    if (ok) setMode("view");
+  };
+
+  const remove = async () => {
+    if (!window.confirm(`Delete ${covering.phase_name} (from ${covering.start_date})?`)) return;
+    await onEdit((session) => sbDeleteDietPhase(session, covering.id));
+  };
+
+  const dayLabel = parseISO(day).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+
+  if (mode === "view" && covering) {
+    const prog = phaseProgress(covering, day);
+    return (
+      <div style={{ ...S.phaseCard, marginTop: 12 }}>
+        <div style={{ fontSize: 11, color: dim, letterSpacing: 1 }}>{dayLabel.toUpperCase()}</div>
+        <div style={{ fontWeight: 700, color: PHASE_COLORS[covering.phase_type], marginTop: 4 }}>
+          {covering.phase_name} · week {prog.week}{prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : ""}
+        </div>
+        <div style={{ fontSize: 12, color: dim, marginTop: 2 }}>
+          from {covering.start_date}
+          {covering.planned_end_date ? ` · planned to ${covering.planned_end_date}` : " · open-ended"}
+          {covering.end_date ? ` · ended ${covering.end_date}` : ""}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => startForm(covering)}>edit</button>
+          <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => startForm(null)}>new phase here</button>
+          <button style={{ ...S.ghostBtn, color: "#ff5d7a" }} onClick={remove}>delete</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...S.phaseCard, marginTop: 12 }}>
+      <div style={{ fontSize: 11, color: dim, letterSpacing: 1, marginBottom: 8 }}>
+        {mode === "edit" ? "EDIT PHASE" : `NEW PHASE FROM ${dayLabel.toUpperCase()}`}
+      </div>
+      <select
+        value={form.presetId}
+        onChange={(e) => setForm({ ...form, presetId: e.target.value, weeks: "" })}
+        style={{ ...S.fInput, width: "100%", marginBottom: 8 }}
+      >
+        <option value="" disabled>phase…</option>
+        {typedPresets.map((p) => (
+          <option key={p.id} value={p.id}>{p.name} ({p.phase_type})</option>
+        ))}
+      </select>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+        <label style={{ fontSize: 12, color: dim, width: 64 }}>starts</label>
+        <input type="date" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} style={{ ...S.fInput, flex: 1 }} />
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+        <label style={{ fontSize: 12, color: dim, width: 64 }}>weeks</label>
+        <input
+          type="number" min="1" inputMode="numeric"
+          disabled={form.openEnded}
+          placeholder={defaultPhaseWeeks(preset) ? String(defaultPhaseWeeks(preset)) : "—"}
+          value={form.weeks}
+          onChange={(e) => setForm({ ...form, weeks: e.target.value })}
+          style={{ ...S.fInput, flex: 1 }}
+        />
+        <label style={{ fontSize: 12, color: dim, display: "flex", gap: 4, alignItems: "center" }}>
+          <input type="checkbox" checked={form.openEnded} onChange={(e) => setForm({ ...form, openEnded: e.target.checked })} />
+          open-ended
+        </label>
+      </div>
+      <div style={{ fontSize: 12, color: dim, marginBottom: 10 }}>
+        {plannedEnd ? `planned end: ${plannedEnd}` : "no planned end — runs until the next phase starts"}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={{ ...S.primaryBtn, flex: 1 }} onClick={save} disabled={saving}>{saving ? "saving…" : "save"}</button>
+        {(covering || mode === "edit") && (
+          <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => setMode(covering ? "view" : "new")}>cancel</button>
+        )}
+      </div>
     </div>
   );
 }
@@ -2088,7 +2483,8 @@ function BodyweightModal({ onSave, onSkip }) {
   );
 }
 
-function Phases({ phases, setPhases, dietPhase, onSwitchPhase }) {
+function Phases({ phases, setPhases, dietPhase, onSwitchPhase, onOpenCalendar }) {
+  const prog = phaseProgress(dietPhase, todayISO());
   const set = (id, key, sub, val) =>
     setPhases((prev) =>
       prev.map((p) =>
@@ -2110,7 +2506,9 @@ function Phases({ phases, setPhases, dietPhase, onSwitchPhase }) {
             <div>
               <div style={{ fontWeight: 700, fontSize: 15 }}>{dietPhase.phase_name}</div>
               <div style={{ fontSize: 12, color: dim }}>
-                {dietPhase.phase_type} · since {dietPhase.start_date}
+                {dietPhase.phase_type} · since {dietPhase.start_date} · week {prog.week}
+                {prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : ""}
+                {prog.overrun ? " · past planned end" : ""}
               </div>
             </div>
             <select
@@ -2132,6 +2530,9 @@ function Phases({ phases, setPhases, dietPhase, onSwitchPhase }) {
         ) : (
           <div style={{ fontSize: 13, color: dim }}>no phase set yet</div>
         )}
+        <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} onClick={onOpenCalendar}>
+          plan phases on the calendar
+        </button>
       </div>
       <p style={S.note}>
         Phases are macro-target profiles. Assign one to a day in Plan and the
@@ -2382,6 +2783,26 @@ const S = {
     cursor: "pointer",
   },
   dayTabOn: { background: panel2, color: accent, borderColor: accent },
+
+  // date strip + month sheet
+  dateHead: { display: "flex", alignItems: "center", gap: 6, marginBottom: 8 },
+  dateTitle: {
+    background: "transparent", border: "none", color: text, padding: 0,
+    fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 20, cursor: "pointer",
+  },
+  dateNavBtn: {
+    background: panel, border: `1px solid ${line}`, color: text, borderRadius: 8,
+    padding: "5px 10px", fontSize: 13, cursor: "pointer", fontFamily: "inherit",
+  },
+  phaseChip: {
+    display: "inline-block", border: "1px solid", borderRadius: 999, padding: "3px 10px",
+    fontSize: 11, fontWeight: 700, letterSpacing: 0.3, marginBottom: 10,
+  },
+  monthGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 },
+  monthCell: {
+    aspectRatio: "1 / 1", borderRadius: 10, fontSize: 13, cursor: "pointer",
+    fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center",
+  },
   dayCopyBtn: {
     width: "100%",
     padding: "3px 0",
