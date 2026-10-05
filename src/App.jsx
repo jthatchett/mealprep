@@ -15,6 +15,11 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 
 const STORE_KEY = "mealprep:v1";
 const SESSION_KEY = "mealprep:session";
+const BW_SKIP_KEY = "mealprep:bw-skip"; // holds the date the weigh-in prompt was skipped
+
+function bwSkippedOn(day) {
+  try { return localStorage.getItem(BW_SKIP_KEY) === day; } catch { return false; }
+}
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /* ---------- Supabase config ---------- */
@@ -51,10 +56,10 @@ function sbRefreshToken(refresh_token) {
   return sbAuthFetch("token?grant_type=refresh_token", { refresh_token });
 }
 
-// fetch the user's app_data row
+// fetch the user's app_data row (updated_at is the version a save must match)
 async function sbLoadAppData(session) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/app_data?select=foods,phases,week&user_id=eq.${session.user.id}`,
+    `${SUPABASE_URL}/rest/v1/app_data?select=foods,phases,week,updated_at&user_id=eq.${session.user.id}`,
     {
       headers: {
         apikey: SUPABASE_ANON_KEY,
@@ -67,28 +72,49 @@ async function sbLoadAppData(session) {
   return rows[0] || null;
 }
 
-// upsert the user's app_data row
-async function sbSaveAppData(session, data) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${session.access_token}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates",
-    },
-    body: JSON.stringify({
-      user_id: session.user.id,
-      foods: data.foods,
-      phases: data.phases,
-      week: data.week,
-      updated_at: new Date().toISOString(),
-    }),
+// thrown when the row changed on another device since this one loaded it
+class SaveConflictError extends Error {
+  constructor() {
+    super("changed on another device");
+    this.conflict = true;
+  }
+}
+
+// Save the user's app_data row, but only over the version this device last
+// saw (baseUpdatedAt, from the load or the previous save). The whole blob is
+// written at once, so a blind upsert lets a stale device silently wipe edits
+// made elsewhere. If the row has moved on, nothing is written and this
+// throws SaveConflictError. baseUpdatedAt null = no row yet (new user):
+// insert, which conflicts if another device created the row first.
+// Returns the new updated_at to use as the base for the next save.
+async function sbSaveAppData(session, data, baseUpdatedAt) {
+  const body = JSON.stringify({
+    user_id: session.user.id,
+    foods: data.foods,
+    phases: data.phases,
+    week: data.week,
+    updated_at: new Date().toISOString(),
   });
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${session.access_token}`,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+  const res = baseUpdatedAt
+    ? await fetch(
+        `${SUPABASE_URL}/rest/v1/app_data?user_id=eq.${session.user.id}&updated_at=eq.${encodeURIComponent(baseUpdatedAt)}&select=updated_at`,
+        { method: "PATCH", headers, body }
+      )
+    : await fetch(`${SUPABASE_URL}/rest/v1/app_data?select=updated_at`, { method: "POST", headers, body });
+  if (res.status === 409) throw new SaveConflictError();
   if (!res.ok) {
     const err = await res.text();
     throw new Error("Failed to save data: " + res.status + " " + err);
   }
+  const rows = await res.json();
+  if (!rows.length) throw new SaveConflictError(); // PATCH matched nothing: updated_at moved on
+  return rows[0].updated_at;
 }
 
 // local calendar date (not UTC) — matters near midnight
@@ -599,10 +625,20 @@ export default function App() {
   const [loadError, setLoadError] = useState(false); // true = load threw; block saving so we can't overwrite good data
   const [reloadNonce, setReloadNonce] = useState(0); // bump to retry a failed load
   const [saveError, setSaveError] = useState(null);  // last save error message, shown as a banner
+  const [saveConflict, setSaveConflict] = useState(false); // row changed on another device — autosave paused
+  // What the server holds as far as this device knows: its updated_at (the
+  // version a save must match) and the serialized store it matches. A store
+  // equal to `json` has nothing to save — so just opening the app writes nothing.
+  const savedRef = useRef({ updatedAt: null, json: null });
+  // saves run one at a time: two in flight from the same base would make the
+  // second look like a conflict with the first
+  const saveChainRef = useRef(Promise.resolve());
   const [dietPhases, setDietPhases] = useState([]);  // every diet_phases row (history + planned)
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwToday, setBwToday] = useState(undefined);  // undefined = not checked yet, null = not logged
   const [showBwModal, setShowBwModal] = useState(false);
+  const [sideLoadError, setSideLoadError] = useState(null); // diet phase / weigh-in load failed — shown as a banner
+  const [sideLoadNonce, setSideLoadNonce] = useState(0);   // bump to retry that load
   const dbg = (msg) => setDebugLog((prev) => [`${new Date().toLocaleTimeString()}: ${msg}`, ...prev.slice(0, 19)]);
 
   // restore session from local storage on mount (per-device, just holds the token)
@@ -636,30 +672,77 @@ export default function App() {
     setSession(sess);
   };
 
+  // Queue a save of `data` behind any save already running. Skips it if it
+  // matches what the server already has; otherwise saves over the last-seen
+  // version and advances the baseline. Rejects with the error (conflict or not).
+  const queueSave = (data) => {
+    const run = saveChainRef.current.then(async () => {
+      const json = JSON.stringify(data);
+      if (json === savedRef.current.json) return;
+      const updatedAt = await sbSaveAppData(session, data, savedRef.current.updatedAt);
+      savedRef.current = { updatedAt, json };
+      dbg("saved to supabase — foods:" + data.foods?.length + " phases:" + data.phases?.length);
+    });
+    saveChainRef.current = run.catch(() => {}); // a failed save mustn't block the next
+    return run;
+  };
+
   const signOut = async () => {
     // Flush any pending (debounced) edit before tearing down. Without this, the 400ms save
     // timer is cancelled by the teardown below, silently dropping the user's last edit.
     try {
-      if (loaded && store && session && !loadError) {
-        await sbSaveAppData(session, store);
+      if (loaded && store && session && !loadError && !saveConflict) {
+        await queueSave(store);
       }
     } catch (e) {
       dbg("final save on signOut FAILED: " + e.message);
       const proceed = window.confirm(
-        "Your most recent changes could not be saved. Sign out anyway and lose them?"
+        e.conflict
+          ? "Your data was changed on another device, so your latest changes here weren't saved. Sign out anyway and lose them?"
+          : "Your most recent changes could not be saved. Sign out anyway and lose them?"
       );
       if (!proceed) return; // abort sign-out so the user can stay and retry
     }
+    if (saveConflict && !window.confirm("Changes here weren't saved (data changed on another device). Sign out anyway and lose them?")) return;
     localStorage.removeItem(SESSION_KEY);
     setSession(null);
     setStore(null);
     setLoaded(false);
     setLoadError(false);
     setSaveError(null);
+    setSaveConflict(false);
+    setSideLoadError(null);
+    setShowBwModal(false);
+    savedRef.current = { updatedAt: null, json: null };
+    dailyCheckDayRef.current = null;
   };
 
   // retry a failed load without a full page reload
   const retryLoad = () => { setLoadError(false); setReloadNonce((n) => n + 1); };
+
+  // conflict → "load latest": drop this device's unsaved changes, re-read the row
+  const conflictLoadLatest = () => {
+    setSaveConflict(false);
+    setSaveError(null);
+    setLoaded(false);
+    setReloadNonce((n) => n + 1);
+  };
+
+  // conflict → "keep mine": take the server's current version as the base, so
+  // the next save deliberately overwrites what the other device wrote
+  const conflictKeepMine = async () => {
+    try {
+      const row = await sbLoadAppData(session);
+      savedRef.current = { updatedAt: row ? row.updated_at : null, json: null };
+      setSaveConflict(false);
+      setSaveError(null);
+      await queueSave(store);
+    } catch (e) {
+      dbg("keep-mine save FAILED: " + e.message);
+      if (e.conflict) setSaveConflict(true);
+      else setSaveError(e.message || "save failed");
+    }
+  };
 
   // convenience destructure — safe because render is gated on loaded+store
   const foods  = store ? store.foods  : SEED_ALL;
@@ -713,10 +796,17 @@ export default function App() {
             loadedWeek = patched;
           }
 
-          setStore({ foods: loadedFoods, phases: loadedPhases, week: loadedWeek });
+          const loadedStore = { foods: loadedFoods, phases: loadedPhases, week: loadedWeek };
+          // baseline = what was loaded, so opening the app doesn't re-save it.
+          // (Seed fallbacks / the id migration above save with the next real edit.)
+          savedRef.current = { updatedAt: row.updated_at, json: JSON.stringify(loadedStore) };
+          setStore(loadedStore);
         } else {
-          // new user (query SUCCEEDED, returned no row) — seed defaults, saved on first change
-          setStore({ foods: SEED_ALL, phases: SEED_PHASES, week: seedWeek() });
+          // new user (query SUCCEEDED, returned no row) — seed defaults, saved on first change.
+          // A row with no foods still exists, so its updated_at is the base to save over.
+          const seeded = { foods: SEED_ALL, phases: SEED_PHASES, week: seedWeek() };
+          savedRef.current = { updatedAt: row ? row.updated_at : null, json: JSON.stringify(seeded) };
+          setStore(seeded);
         }
         setLoaded(true); // only mark loaded on a SUCCESSFUL read — this is what enables saving
       } catch (e) {
@@ -732,38 +822,58 @@ export default function App() {
   }, [session, reloadNonce]);
 
   // save — to Supabase, triggered by store changes (debounced)
+  // Paused while a conflict is unresolved, so this device can't keep writing
+  // over the other one; the banner offers "load latest" or "keep mine".
   useEffect(() => {
-    if (!loaded || !store || !session || loadError) return;
+    if (!loaded || !store || !session || loadError || saveConflict) return;
     const t = setTimeout(() => {
-      sbSaveAppData(session, store)
-        .then(() => { dbg("saved to supabase — foods:" + store.foods?.length + " phases:" + store.phases?.length); setSaveError(null); })
-        .catch((e) => { dbg("SAVE FAILED: " + e.message); setSaveError(e.message || "save failed"); });
+      queueSave(store)
+        .then(() => setSaveError(null))
+        .catch((e) => {
+          dbg("SAVE FAILED: " + e.message);
+          if (e.conflict) setSaveConflict(true);
+          else setSaveError(e.message || "save failed");
+        });
     }, 400);
     return () => clearTimeout(t);
-  }, [store, loaded, session, loadError]);
+  }, [store, loaded, session, loadError, saveConflict]);
 
-  // diet phase + bodyweight — separate tables from app_data, loaded once signed in.
-  // Decides whether to pop the once-daily bodyweight modal.
+  // Once-a-day check, run on load AND whenever the app comes back to the
+  // foreground on a new day — a home-screen app can sit suspended overnight
+  // without reloading, so "on load" alone would miss the morning. Diet phases
+  // reload with it (the phase in effect can change at midnight). The two loads
+  // fail independently, and a failure shows a banner rather than vanishing
+  // into the debug log (a permissions break once hid this prompt for weeks).
+  const dailyCheckDayRef = useRef(null); // the day the check last succeeded for
   useEffect(() => {
     if (!loaded || !session) return;
     let cancelled = false;
-    (async () => {
-      try {
-        const [phaseRows, weight] = await Promise.all([
-          sbLoadDietPhases(session),
-          sbGetBodyweightToday(session),
-        ]);
-        if (cancelled) return;
-        setDietPhases(phaseRows);
-        setBwToday(weight);
-        const dismissedToday = sessionStorage.getItem(`mealprep:bw-skip:${todayISO()}`) === "1";
-        if (weight === null && !dismissedToday) setShowBwModal(true);
-      } catch (e) {
-        dbg("diet phase / bodyweight load FAILED: " + e.message);
+    const runDailyCheck = async () => {
+      const day = todayISO();
+      if (dailyCheckDayRef.current === day) return;
+      const [phases, weight] = await Promise.allSettled([
+        sbLoadDietPhases(session),
+        sbGetBodyweightToday(session),
+      ]);
+      if (cancelled) return;
+      const failed = [];
+      if (phases.status === "fulfilled") setDietPhases(phases.value);
+      else { failed.push("diet phases"); dbg("diet phase load FAILED: " + phases.reason?.message); }
+      if (weight.status === "fulfilled") {
+        dailyCheckDayRef.current = day;
+        setBwToday(weight.value);
+        if (weight.value === null && !bwSkippedOn(day)) setShowBwModal(true);
+      } else {
+        failed.push("today's weigh-in");
+        dbg("bodyweight load FAILED: " + weight.reason?.message);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [loaded, session]);
+      setSideLoadError(failed.length ? `couldn't load ${failed.join(" or ")}` : null);
+    };
+    runDailyCheck();
+    const onVisible = () => { if (document.visibilityState === "visible") runDailyCheck(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVisible); };
+  }, [loaded, session, sideLoadNonce]);
 
   const reloadDietPhases = async () => setDietPhases(await sbLoadDietPhases(session));
 
@@ -802,10 +912,14 @@ export default function App() {
     }
   };
 
+  // localStorage, not sessionStorage: iOS clears session storage whenever it
+  // kills a suspended home-screen app, which would re-ask after a skip
   const skipBodyweight = () => {
-    sessionStorage.setItem(`mealprep:bw-skip:${todayISO()}`, "1");
+    try { localStorage.setItem(BW_SKIP_KEY, todayISO()); } catch { /* storage blocked — skip lasts this session only */ }
     setShowBwModal(false);
   };
+
+  const retrySideLoad = () => { dailyCheckDayRef.current = null; setSideLoadError(null); setSideLoadNonce((n) => n + 1); };
 
   // not checked session yet — brief splash
   if (!sessionChecked) {
@@ -873,6 +987,19 @@ export default function App() {
           onEdit={editDietPhases}
           onClose={() => setShowMonth(false)}
         />
+      )}
+      {saveConflict && (
+        <div style={S.saveBanner}>
+          <span>⚠ changed on another device — your edits here aren't saved</span>
+          <button style={S.saveBannerBtn} onClick={conflictLoadLatest}>load latest</button>
+          <button style={S.saveBannerBtn} onClick={conflictKeepMine}>keep mine</button>
+        </div>
+      )}
+      {sideLoadError && (
+        <div style={S.saveBanner}>
+          <span>⚠ {sideLoadError}</span>
+          <button style={S.saveBannerBtn} onClick={retrySideLoad}>retry</button>
+        </div>
       )}
       {saveError && (
         <div style={S.saveBanner}>
