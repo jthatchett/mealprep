@@ -15,6 +15,11 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 
 const STORE_KEY = "mealprep:v1";
 const SESSION_KEY = "mealprep:session";
+const BW_SKIP_KEY = "mealprep:bw-skip"; // holds the date the weigh-in prompt was skipped
+
+function bwSkippedOn(day) {
+  try { return localStorage.getItem(BW_SKIP_KEY) === day; } catch { return false; }
+}
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /* ---------- Supabase config ---------- */
@@ -632,6 +637,8 @@ export default function App() {
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwToday, setBwToday] = useState(undefined);  // undefined = not checked yet, null = not logged
   const [showBwModal, setShowBwModal] = useState(false);
+  const [sideLoadError, setSideLoadError] = useState(null); // diet phase / weigh-in load failed — shown as a banner
+  const [sideLoadNonce, setSideLoadNonce] = useState(0);   // bump to retry that load
   const dbg = (msg) => setDebugLog((prev) => [`${new Date().toLocaleTimeString()}: ${msg}`, ...prev.slice(0, 19)]);
 
   // restore session from local storage on mount (per-device, just holds the token)
@@ -704,7 +711,10 @@ export default function App() {
     setLoadError(false);
     setSaveError(null);
     setSaveConflict(false);
+    setSideLoadError(null);
+    setShowBwModal(false);
     savedRef.current = { updatedAt: null, json: null };
+    dailyCheckDayRef.current = null;
   };
 
   // retry a failed load without a full page reload
@@ -828,28 +838,42 @@ export default function App() {
     return () => clearTimeout(t);
   }, [store, loaded, session, loadError, saveConflict]);
 
-  // diet phase + bodyweight — separate tables from app_data, loaded once signed in.
-  // Decides whether to pop the once-daily bodyweight modal.
+  // Once-a-day check, run on load AND whenever the app comes back to the
+  // foreground on a new day — a home-screen app can sit suspended overnight
+  // without reloading, so "on load" alone would miss the morning. Diet phases
+  // reload with it (the phase in effect can change at midnight). The two loads
+  // fail independently, and a failure shows a banner rather than vanishing
+  // into the debug log (a permissions break once hid this prompt for weeks).
+  const dailyCheckDayRef = useRef(null); // the day the check last succeeded for
   useEffect(() => {
     if (!loaded || !session) return;
     let cancelled = false;
-    (async () => {
-      try {
-        const [phaseRows, weight] = await Promise.all([
-          sbLoadDietPhases(session),
-          sbGetBodyweightToday(session),
-        ]);
-        if (cancelled) return;
-        setDietPhases(phaseRows);
-        setBwToday(weight);
-        const dismissedToday = sessionStorage.getItem(`mealprep:bw-skip:${todayISO()}`) === "1";
-        if (weight === null && !dismissedToday) setShowBwModal(true);
-      } catch (e) {
-        dbg("diet phase / bodyweight load FAILED: " + e.message);
+    const runDailyCheck = async () => {
+      const day = todayISO();
+      if (dailyCheckDayRef.current === day) return;
+      const [phases, weight] = await Promise.allSettled([
+        sbLoadDietPhases(session),
+        sbGetBodyweightToday(session),
+      ]);
+      if (cancelled) return;
+      const failed = [];
+      if (phases.status === "fulfilled") setDietPhases(phases.value);
+      else { failed.push("diet phases"); dbg("diet phase load FAILED: " + phases.reason?.message); }
+      if (weight.status === "fulfilled") {
+        dailyCheckDayRef.current = day;
+        setBwToday(weight.value);
+        if (weight.value === null && !bwSkippedOn(day)) setShowBwModal(true);
+      } else {
+        failed.push("today's weigh-in");
+        dbg("bodyweight load FAILED: " + weight.reason?.message);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [loaded, session]);
+      setSideLoadError(failed.length ? `couldn't load ${failed.join(" or ")}` : null);
+    };
+    runDailyCheck();
+    const onVisible = () => { if (document.visibilityState === "visible") runDailyCheck(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVisible); };
+  }, [loaded, session, sideLoadNonce]);
 
   const reloadDietPhases = async () => setDietPhases(await sbLoadDietPhases(session));
 
@@ -888,10 +912,14 @@ export default function App() {
     }
   };
 
+  // localStorage, not sessionStorage: iOS clears session storage whenever it
+  // kills a suspended home-screen app, which would re-ask after a skip
   const skipBodyweight = () => {
-    sessionStorage.setItem(`mealprep:bw-skip:${todayISO()}`, "1");
+    try { localStorage.setItem(BW_SKIP_KEY, todayISO()); } catch { /* storage blocked — skip lasts this session only */ }
     setShowBwModal(false);
   };
+
+  const retrySideLoad = () => { dailyCheckDayRef.current = null; setSideLoadError(null); setSideLoadNonce((n) => n + 1); };
 
   // not checked session yet — brief splash
   if (!sessionChecked) {
@@ -965,6 +993,12 @@ export default function App() {
           <span>⚠ changed on another device — your edits here aren't saved</span>
           <button style={S.saveBannerBtn} onClick={conflictLoadLatest}>load latest</button>
           <button style={S.saveBannerBtn} onClick={conflictKeepMine}>keep mine</button>
+        </div>
+      )}
+      {sideLoadError && (
+        <div style={S.saveBanner}>
+          <span>⚠ {sideLoadError}</span>
+          <button style={S.saveBannerBtn} onClick={retrySideLoad}>retry</button>
         </div>
       )}
       {saveError && (
