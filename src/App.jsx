@@ -544,10 +544,12 @@ const ZERO = { p: 0, f: 0, c: 0, cal: 0 };
 const r1 = (n) => Math.round(n * 10) / 10;
 const r0 = (n) => Math.round(n);
 
-/* ---------- default day ---------- */
-function newDay(phaseId) {
+/* ---------- default day ----------
+   targetId: an optional per-weekday macro-target override (e.g. Sat =
+   Refeed). null = follow the diet phase in effect on the date (B2). */
+function newDay() {
   return {
-    phaseId: phaseId || "phase-maintenance",
+    targetId: null,
     slots: [
       { id: uid(), name: "Meal 1", entries: [] },
       { id: uid(), name: "Meal 2", entries: [] },
@@ -564,10 +566,10 @@ function newDay(phaseId) {
 // render, so there's no cross-day collision to worry about — a full
 // replace is simplest and safest (idempotent, no risk of a merge
 // duplicating entries if the action is triggered twice).
-// phaseId is left untouched on targets unless copyPhase is true —
-// a day's phase (e.g. "Weekend/Refeed") is often intentionally
-// different from the day you're copying meals from.
-function copyDayTo(week, sourceKey, targetKeys, { copyPhase = false } = {}) {
+// targetId (the day's target override) is left untouched unless
+// copyTarget is true — an override (e.g. Sat = Refeed) is usually
+// specific to that day, not the day you're copying meals from.
+function copyDayTo(week, sourceKey, targetKeys, { copyTarget = false } = {}) {
   const source = week[sourceKey];
   if (!source) return week;
   const next = { ...week };
@@ -576,7 +578,7 @@ function copyDayTo(week, sourceKey, targetKeys, { copyPhase = false } = {}) {
     next[key] = {
       ...next[key],
       slots: JSON.parse(JSON.stringify(source.slots)),
-      phaseId: copyPhase ? source.phaseId : next[key].phaseId,
+      targetId: copyTarget ? source.targetId ?? null : next[key].targetId ?? null,
     };
   }
   return next;
@@ -843,7 +845,7 @@ export default function App() {
       setLoadError(false);
       const seedWeek = () => {
         const w = {};
-        DAYS.forEach((d) => (w[d] = newDay("phase-maintenance")));
+        DAYS.forEach((d) => (w[d] = newDay()));
         return w;
       };
       const nameToStableId = {
@@ -870,13 +872,17 @@ export default function App() {
           });
 
           let loadedWeek = row.week && Object.keys(row.week).length ? row.week : seedWeek();
-          if (Object.keys(idRemap).length > 0) {
-            const patched = {};
-            for (const [day, val] of Object.entries(loadedWeek)) {
-              patched[day] = { ...val, phaseId: idRemap[val.phaseId] || val.phaseId };
-            }
-            loadedWeek = patched;
+          // Days saved before targets followed the diet phase carry a
+          // per-weekday phaseId that was always set (default Maintenance).
+          // One-time move: drop it so the day follows its diet phase; any
+          // deliberate override is re-picked in the TARGETS dropdown.
+          const migrated = {};
+          for (const [day, val] of Object.entries(loadedWeek)) {
+            const { phaseId, ...rest } = val;
+            const targetId = "targetId" in val ? val.targetId : null;
+            migrated[day] = { ...rest, targetId: targetId ? idRemap[targetId] || targetId : null };
           }
+          loadedWeek = migrated;
 
           const loadedStore = { foods: loadedFoods, phases: loadedPhases, week: loadedWeek };
           // baseline = what was loaded, so opening the app doesn't re-save it.
@@ -1229,7 +1235,17 @@ export default function App() {
    ============================================================ */
 function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, onOpenMonth }) {
   const day = week[activeDay];
-  const phase = phases.find((p) => p.id === day.phaseId) || null;
+  // The day's macro targets: the preset of the diet phase in effect on the
+  // selected date, unless this weekday has its own override (e.g. Refeed).
+  const dietPhaseOnDay = phaseOnDate(dietPhases, selectedDate);
+  const followed = dietPhaseOnDay ? phases.find((p) => p.id === dietPhaseOnDay.phase_id) || null : null;
+  const override = day.targetId ? phases.find((p) => p.id === day.targetId) || null : null;
+  const phase = override || followed;
+  const followLabel = followed
+    ? `${followed.name} (diet phase)`
+    : dietPhaseOnDay
+      ? `${dietPhaseOnDay.phase_name} — no matching targets`
+      : "no diet phase set";
   // Where a picked / scanned food goes:
   //   { mode: "template", slotId }            → the weekly plan (every <weekday>)
   //   { mode: "log", slotId, slotName }       → this date's food log only
@@ -1338,19 +1354,19 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
       {/* phase + target dashboard */}
       <div style={S.dash}>
         <div style={S.dashHead}>
-          {/* the day's macro-target profile (a Phases-tab template) — not the
-              diet phase, which the chip above the week strip shows */}
+          {/* follows the diet phase by default; picking a preset overrides it
+              for this weekday (every week) */}
           <label style={S.dashLabel}>TARGETS</label>
           <select
-            key={day.phaseId || "none"}
-            value={day.phaseId || ""}
-            onChange={(e) => update((d) => (d.phaseId = e.target.value || null))}
+            key={day.targetId || "follow"}
+            value={day.targetId || ""}
+            onChange={(e) => update((d) => (d.targetId = e.target.value || null))}
             style={S.select}
           >
-            <option value="">— none —</option>
+            <option value="">{followLabel}</option>
             {phases.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name}
+                {p.name} · every {activeDay}
               </option>
             ))}
           </select>
@@ -1472,8 +1488,8 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           sourceDay={copySource}
           days={DAYS}
           onClose={() => setCopySource(null)}
-          onApply={(targetKeys, copyPhase) => {
-            setWeek((w) => copyDayTo(w, copySource, targetKeys, { copyPhase }));
+          onApply={(targetKeys, copyTarget) => {
+            setWeek((w) => copyDayTo(w, copySource, targetKeys, { copyTarget }));
             setCopySource(null);
           }}
         />
@@ -2253,12 +2269,12 @@ function CopyDayModal({ sourceDay, days, onClose, onApply }) {
   const restOfWeek = days.slice(idx + 1); // empty on Sun — nothing left to fill
   const otherDays = days.filter((d) => d !== sourceDay);
   const [picked, setPicked] = useState([]);
-  const [copyPhase, setCopyPhase] = useState(false);
+  const [copyTarget, setCopyTarget] = useState(false);
 
   const toggle = (d) =>
     setPicked((p) => (p.includes(d) ? p.filter((x) => x !== d) : [...p, d]));
 
-  const apply = (targets) => targets.length > 0 && onApply(targets, copyPhase);
+  const apply = (targets) => targets.length > 0 && onApply(targets, copyTarget);
 
   return (
     <div style={S.modalWrap} onClick={onClose}>
@@ -2298,11 +2314,11 @@ function CopyDayModal({ sourceDay, days, onClose, onApply }) {
           ))}
 
           <label style={{ ...S.pickItem, cursor: "pointer", marginTop: 4 }}>
-            <span>also copy phase</span>
+            <span>also copy its targets override</span>
             <input
               type="checkbox"
-              checked={copyPhase}
-              onChange={(e) => setCopyPhase(e.target.checked)}
+              checked={copyTarget}
+              onChange={(e) => setCopyTarget(e.target.checked)}
             />
           </label>
 
@@ -2982,9 +2998,9 @@ function Phases({ phases, setPhases, dietPhase, onSwitchPhase, onOpenCalendar })
         </button>
       </div>
       <p style={S.note}>
-        Phases are macro-target profiles. Assign one to a day in Plan and the
-        bars measure against it. Targets reverse-engineered from your docs —
-        adjust to your current numbers.
+        These are your macro targets. Each day in Plan uses the targets of the
+        diet phase it falls in (a Cut day uses Cut). To give one weekday its own
+        targets, such as a Saturday refeed, pick it in that day's TARGETS menu.
       </p>
       {phases.map((p) => (
         <div key={p.id} style={S.phaseCard}>
