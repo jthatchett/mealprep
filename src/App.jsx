@@ -265,6 +265,65 @@ async function sbLoadRecentBodyweight(session) {
   return res.json();
 }
 
+/* ---------- food log (intake_log) ----------
+   What was actually eaten, by date. The weekly plan is only a template;
+   checking off a meal copies its foods in here with their macros PER UNIT
+   as they are at that moment, so later edits to the plan or the food
+   library never change what was logged. */
+const INTAKE_COLS = "id,date,slot_id,slot_name,food_id,food_name,unit,qty,p,f,c,cal,source";
+
+async function sbLoadIntake(session, date) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/intake_log?select=${INTAKE_COLS}&user_id=eq.${session.user.id}&date=eq.${date}&order=id.asc`,
+    { headers: sbHeaders(session) }
+  );
+  if (!res.ok) throw new Error("Failed to load food log: " + res.status);
+  return res.json();
+}
+
+async function sbInsertIntake(session, rows) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/intake_log`, {
+    method: "POST",
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+    body: JSON.stringify(rows.map((r) => ({ ...r, user_id: session.user.id }))),
+  });
+  if (!res.ok) throw new Error("Failed to log food: " + res.status);
+}
+
+// filter: PostgREST query, always scoped to the user
+async function sbDeleteIntake(session, filter) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/intake_log?user_id=eq.${session.user.id}&${filter}`, {
+    method: "DELETE",
+    headers: sbHeaders(session, { Prefer: "return=minimal" }),
+  });
+  if (!res.ok) throw new Error("Failed to remove from log: " + res.status);
+}
+
+async function sbUpdateIntake(session, id, patch) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/intake_log?id=eq.${id}`, {
+    method: "PATCH",
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error("Failed to update log: " + res.status);
+}
+
+// a log row for `qty` of `food`, with its per-unit macros copied in now
+function intakeRow(date, { slotId, slotName, food, foods, qty, source }) {
+  const m = foodMacros(food, foods);
+  return {
+    date, slot_id: slotId || null, slot_name: slotName, food_id: food.id,
+    food_name: food.name, unit: food.unit, qty, p: m.p, f: m.f, c: m.c, cal: m.cal, source,
+  };
+}
+
+// macro totals for log rows (qty × per-unit macros)
+function intakeTotal(rows) {
+  let t = ZERO;
+  for (const r of rows || []) t = addM(t, scale({ p: Number(r.p), f: Number(r.f), c: Number(r.c), cal: Number(r.cal) }, Number(r.qty)));
+  return t;
+}
+
 /* ---------- weight trend ----------
    Same rule RepReport uses (computeWeeklyWeightRate): the average of the
    7 days ending today against the 7 days before, and only when each week
@@ -655,6 +714,8 @@ export default function App() {
   const [dietPhases, setDietPhases] = useState([]);  // every diet_phases row (history + planned)
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwLog, setBwLog] = useState([]);             // last 14 days of weigh-ins, oldest first
+  const [intake, setIntake] = useState({});           // food log rows by date (loaded on demand)
+  const [intakeError, setIntakeError] = useState(null);
   const [showBwModal, setShowBwModal] = useState(false);
   const [sideLoadError, setSideLoadError] = useState(null); // diet phase / weigh-in load failed — shown as a banner
   const [sideLoadNonce, setSideLoadNonce] = useState(0);   // bump to retry that load
@@ -734,6 +795,8 @@ export default function App() {
     setShowBwModal(false);
     savedRef.current = { updatedAt: null, json: null };
     dailyCheckDayRef.current = null;
+    setIntake({});
+    setIntakeError(null);
   };
 
   // retry a failed load without a full page reload
@@ -942,6 +1005,59 @@ export default function App() {
 
   const retrySideLoad = () => { dailyCheckDayRef.current = null; setSideLoadError(null); setSideLoadNonce((n) => n + 1); };
 
+  // Food log for the date being viewed in Plan — only today and past dates
+  // can be logged. Cached per date; every write re-reads that date so the
+  // screen always shows what's actually stored.
+  const loggable = selectedDate <= todayISO();
+  const reloadIntake = async (date) => {
+    try {
+      const rows = await sbLoadIntake(session, date);
+      setIntake((m) => ({ ...m, [date]: rows }));
+      setIntakeError(null);
+    } catch (e) {
+      dbg("food log load FAILED: " + e.message);
+      setIntakeError(e.message);
+    }
+  };
+  useEffect(() => {
+    if (!loaded || !session || !loggable || intake[selectedDate]) return;
+    reloadIntake(selectedDate);
+  }, [loaded, session, selectedDate, loggable]);
+
+  // one write at a time per date+key, so a double tap can't log a meal twice
+  const intakeBusyRef = useRef(new Set());
+  const intakeWrite = async (key, write) => {
+    const date = selectedDate;
+    const k = date + ":" + key;
+    if (intakeBusyRef.current.has(k)) return;
+    intakeBusyRef.current.add(k);
+    try {
+      await write(session, date);
+    } catch (e) {
+      dbg("food log write FAILED: " + e.message);
+      window.alert("Couldn't update the food log — " + e.message);
+    } finally {
+      intakeBusyRef.current.delete(k);
+      await reloadIntake(date);
+    }
+  };
+  const intakeOps = {
+    checkSlot: (slot) =>
+      intakeWrite("slot:" + slot.id, (s, date) => {
+        const rows = slot.entries
+          .map((e) => ({ e, food: foods.find((x) => x.id === e.foodId) }))
+          .filter(({ food }) => food)
+          .map(({ e, food }) => intakeRow(date, { slotId: slot.id, slotName: slot.name, food, foods, qty: e.qty, source: "plan" }));
+        return rows.length ? sbInsertIntake(s, rows) : null;
+      }),
+    uncheckSlot: (slotId) =>
+      intakeWrite("slot:" + slotId, (s, date) => sbDeleteIntake(s, `date=eq.${date}&slot_id=eq.${encodeURIComponent(slotId)}`)),
+    addFood: ({ slotId, slotName, food, qty, source }) =>
+      intakeWrite("add:" + uid(), (s, date) => sbInsertIntake(s, [intakeRow(date, { slotId, slotName, food, foods, qty, source })])),
+    setQty: (id, qty) => intakeWrite("row:" + id, (s) => sbUpdateIntake(s, id, { qty })),
+    remove: (id) => intakeWrite("row:" + id, (s) => sbDeleteIntake(s, `id=eq.${id}`)),
+  };
+
   // not checked session yet — brief splash
   if (!sessionChecked) {
     return (
@@ -1072,6 +1188,11 @@ export default function App() {
             setSelectedDate={setSelectedDate}
             dietPhases={dietPhases}
             bwLog={bwLog}
+            loggable={loggable}
+            intakeRows={loggable ? intake[selectedDate] || null : null}
+            intakeError={intakeError}
+            onRetryIntake={() => reloadIntake(selectedDate)}
+            intakeOps={intakeOps}
             onOpenMonth={() => setShowMonth(true)}
           />
         )}
@@ -1106,13 +1227,30 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, onOpenMonth }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, onOpenMonth }) {
   const day = week[activeDay];
   const phase = phases.find((p) => p.id === day.phaseId) || null;
-  const [picker, setPicker] = useState(null); // slotId being edited
-  const [scanningSlot, setScanningSlot] = useState(null); // slotId being scanned
-  const [pendingScan, setPendingScan] = useState(null); // { slotId, barcode }
+  // Where a picked / scanned food goes:
+  //   { mode: "template", slotId }            → the weekly plan (every <weekday>)
+  //   { mode: "log", slotId, slotName }       → this date's food log only
+  const [picker, setPicker] = useState(null);
+  const [scanTarget, setScanTarget] = useState(null);
+  const [pendingScan, setPendingScan] = useState(null); // { target, barcode }
   const [copySource, setCopySource] = useState(null); // day key being copied FROM, or null
+
+  // food log rows for this date, by template meal; rows whose meal isn't in
+  // the template (extras, or a meal since deleted) go under Extras
+  const slotIds = new Set(day.slots.map((s) => s.id));
+  const loggedBySlot = {};
+  const extraRows = [];
+  for (const r of intakeRows || []) {
+    if (r.slot_id && slotIds.has(r.slot_id)) (loggedBySlot[r.slot_id] ||= []).push(r);
+    else extraRows.push(r);
+  }
+  const eaten = useMemo(() => intakeTotal(intakeRows), [intakeRows]);
+
+  const addToLog = (target, food, qty, source) =>
+    intakeOps.addFood({ slotId: target.slotId || null, slotName: target.slotName || "Extras", food, qty, source });
 
   const dayTotal = useMemo(() => {
     let t = ZERO;
@@ -1217,8 +1355,21 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
             ))}
           </select>
         </div>
-        <MacroBars total={dayTotal} target={phase ? phase.target : null} />
+        {/* today / past: what was eaten (the food log); future: the plan */}
+        <div style={S.dashMode}>
+          {loggable
+            ? <>EATEN <span style={S.dashModeSub}>· planned {r0(dayTotal.cal)} kcal, {r1(dayTotal.p)}P</span></>
+            : "PLANNED"}
+        </div>
+        <MacroBars total={loggable ? eaten : dayTotal} target={phase ? phase.target : null} />
       </div>
+
+      {loggable && intakeError && (
+        <div style={{ ...S.verifyBanner, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <span>⚠ couldn't load the food log — {intakeError}</span>
+          <button style={S.saveBannerBtn} onClick={onRetryIntake}>retry</button>
+        </div>
+      )}
 
       {/* meal slots — reorderable via up/down */}
       {day.slots.map((slot, si) => (
@@ -1226,6 +1377,14 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           key={slot.id}
           slot={slot}
           foods={foods}
+          loggable={loggable && intakeRows !== null}
+          logged={loggedBySlot[slot.id] || null}
+          onCheck={() => intakeOps.checkSlot(slot)}
+          onUncheck={() =>
+            window.confirm(`Remove ${slot.name} from this day's food log?`) && intakeOps.uncheckSlot(slot.id)
+          }
+          onLogQty={(id, qty) => intakeOps.setQty(id, qty)}
+          onLogRemove={(id) => intakeOps.remove(id)}
           isFirst={si === 0}
           isLast={si === day.slots.length - 1}
           onMoveUp={() => moveSlot(si, -1)}
@@ -1238,8 +1397,8 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           }
           onCopyNext={() => copySlotToNextDay(slot)}
           canCopyNext={!!nextDayKey}
-          onAdd={() => setPicker(slot.id)}
-          onScan={() => setScanningSlot(slot.id)}
+          onAdd={() => setPicker(loggedBySlot[slot.id] ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
+          onScan={() => setScanTarget(loggedBySlot[slot.id] ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
           onQty={(ei, qty) =>
             update((d) => (d.slots[si].entries[ei].qty = qty))
           }
@@ -1264,29 +1423,52 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
         + add meal slot
       </button>
 
+      {/* unplanned food on this date — goes in the log only, never the template */}
+      {loggable && intakeRows !== null && (
+        <div style={S.slot}>
+          <div style={S.slotHead}>
+            <span style={{ ...S.slotName, flex: 1, borderBottom: "none" }}>Extras</span>
+            <span style={S.slotMacros}>
+              {(() => { const t = intakeTotal(extraRows); return `${r0(t.cal)} kcal · ${r1(t.p)}P · ${r1(t.f)}F · ${r1(t.c)}C`; })()}
+            </span>
+          </div>
+          {extraRows.length === 0 && <div style={S.extrasNote}>Anything not in the plan — a snack, a protein bar. Logged to this day only.</div>}
+          {extraRows.map((r) => (
+            <LogEntry key={r.id} row={r} onQty={(q) => intakeOps.setQty(r.id, q)} onRemove={() => intakeOps.remove(r.id)} />
+          ))}
+          <button style={S.addEntry} onClick={() => setPicker({ mode: "log", slotId: null, slotName: "Extras" })}>+ food</button>
+          <button style={S.addEntry} onClick={() => setScanTarget({ mode: "log", slotId: null, slotName: "Extras" })}>+ scan barcode</button>
+        </div>
+      )}
+
       {picker && (
         <FoodPicker
           foods={foods}
           onClose={() => setPicker(null)}
           onCreateFood={createFood}
           onPick={(foodId) => {
-            update((d) => {
-              const slot = d.slots.find((s) => s.id === picker);
-              slot.entries.push({ foodId, qty: 1 });
-            });
+            if (picker.mode === "log") {
+              const food = foods.find((x) => x.id === foodId);
+              if (food) addToLog(picker, food, 1, "manual");
+            } else {
+              update((d) => {
+                const slot = d.slots.find((s) => s.id === picker.slotId);
+                if (slot) slot.entries.push({ foodId, qty: 1 });
+              });
+            }
             setPicker(null);
           }}
         />
       )}
 
-      {scanningSlot && (
+      {scanTarget && (
         <BarcodeScanner
           onDetected={(barcode) => {
-            const slotId = scanningSlot;
-            setScanningSlot(null);
-            setPendingScan({ slotId, barcode });
+            const target = scanTarget;
+            setScanTarget(null);
+            setPendingScan({ target, barcode });
           }}
-          onClose={() => setScanningSlot(null)}
+          onClose={() => setScanTarget(null)}
         />
       )}
 
@@ -1311,32 +1493,31 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
             // existingId reuses a food already scanned before; otherwise this
             // is the first time this barcode's been seen, so add it to the library.
             const foodId = existingId || uid();
+            const scanned = existingId
+              ? { ...foods.find((f) => f.id === existingId), name: draft.name, unit: draft.unit, macros: draft.macros }
+              : {
+                  id: foodId,
+                  name: draft.name,
+                  unit: draft.unit,
+                  type: "component",
+                  macros: draft.macros,
+                  verify: true, // scanned/best-effort, same as seeded foods — review later
+                  ingredients: [],
+                  servings: 1,
+                  barcode: pendingScan.barcode,
+                };
             setFoods((prev) =>
-              existingId
-                ? prev.map((f) =>
-                    f.id === existingId
-                      ? { ...f, name: draft.name, unit: draft.unit, macros: draft.macros }
-                      : f
-                  )
-                : [
-                    ...prev,
-                    {
-                      id: foodId,
-                      name: draft.name,
-                      unit: draft.unit,
-                      type: "component",
-                      macros: draft.macros,
-                      verify: true, // scanned/best-effort, same as seeded foods — review later
-                      ingredients: [],
-                      servings: 1,
-                      barcode: pendingScan.barcode,
-                    },
-                  ]
+              existingId ? prev.map((f) => (f.id === existingId ? scanned : f)) : [...prev, scanned]
             );
-            update((d) => {
-              const slot = d.slots.find((s) => s.id === pendingScan.slotId);
-              if (slot) slot.entries.push({ foodId, qty });
-            });
+            const { target } = pendingScan;
+            if (target.mode === "log") {
+              addToLog(target, scanned, qty, "barcode");
+            } else {
+              update((d) => {
+                const slot = d.slots.find((s) => s.id === target.slotId);
+                if (slot) slot.entries.push({ foodId, qty });
+              });
+            }
             setPendingScan(null);
           }}
         />
@@ -1754,9 +1935,15 @@ function Slot({
   onScan,
   onQty,
   onRemoveEntry,
+  loggable,     // date is today/past and its log has loaded — show the check circle
+  logged,       // this meal's food-log rows for the date, or null if not checked off
+  onCheck,
+  onUncheck,
+  onLogQty,
+  onLogRemove,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const total = useMemo(() => {
+  const planTotal = useMemo(() => {
     let t = ZERO;
     for (const e of slot.entries) {
       const food = foods.find((x) => x.id === e.foodId);
@@ -1764,10 +1951,23 @@ function Slot({
     }
     return t;
   }, [slot, foods]);
+  const total = logged ? intakeTotal(logged) : planTotal;
+  const canCheck = slot.entries.some((e) => foods.some((x) => x.id === e.foodId));
 
   return (
-    <div style={S.slot}>
+    <div style={{ ...S.slot, ...(logged ? S.slotLogged : {}) }}>
       <div style={S.slotHead}>
+        {loggable && (
+          <button
+            style={{ ...S.checkBtn, ...(logged ? S.checkBtnOn : {}), opacity: logged || canCheck ? 1 : 0.3 }}
+            disabled={!logged && !canCheck}
+            onClick={logged ? onUncheck : onCheck}
+            title={logged ? "logged — tap to remove from this day's log" : "ate this as planned — log it"}
+            aria-label={logged ? `unlog ${slot.name}` : `log ${slot.name} as eaten`}
+          >
+            {logged ? "✓" : ""}
+          </button>
+        )}
         <div style={S.moveButtons}>
           <button
             style={{...S.moveBtn, opacity: isFirst ? 0.2 : 1}}
@@ -1823,7 +2023,16 @@ function Slot({
         </div>
       </div>
 
-      {slot.entries.map((e, ei) => {
+      {logged && (
+        <>
+          <div style={S.loggedNote}>logged for this day · edits here change the log, not your plan</div>
+          {logged.map((r) => (
+            <LogEntry key={r.id} row={r} onQty={(q) => onLogQty(r.id, q)} onRemove={() => onLogRemove(r.id)} />
+          ))}
+        </>
+      )}
+
+      {!logged && slot.entries.map((e, ei) => {
         const food = foods.find((x) => x.id === e.foodId);
         if (!food) return null;
         const m = scale(foodMacros(food, foods), e.qty);
@@ -1858,6 +2067,37 @@ function Slot({
       <button style={S.addEntry} onClick={onScan}>
         + scan barcode
       </button>
+    </div>
+  );
+}
+
+// one food-log row: the amount saves when the field loses focus (or Enter),
+// not on every keystroke, so typing "1.5" isn't three writes
+function LogEntry({ row, onQty, onRemove }) {
+  const [qty, setQty] = useState(String(row.qty));
+  useEffect(() => setQty(String(row.qty)), [row.qty]);
+  const commit = () => {
+    const n = parseFloat(qty);
+    if (isNaN(n) || n < 0) return setQty(String(row.qty));
+    if (n !== Number(row.qty)) onQty(n);
+  };
+  const m = scale({ p: Number(row.p), f: Number(row.f), c: Number(row.c), cal: Number(row.cal) }, Number(row.qty));
+  return (
+    <div style={S.entry}>
+      <input
+        type="number"
+        step="0.25"
+        inputMode="decimal"
+        value={qty}
+        onChange={(e) => setQty(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
+        style={S.qty}
+      />
+      <span style={S.entryUnit}>{row.unit}</span>
+      <span style={S.entryName}>{row.food_name}</span>
+      <span style={S.entryMacros}>{r0(m.cal)} · {r1(m.p)}P</span>
+      <button style={S.xBtnSm} onClick={onRemove} aria-label={`remove ${row.food_name} from log`}>✕</button>
     </div>
   );
 }
@@ -3094,6 +3334,19 @@ const S = {
     padding: 12,
     marginBottom: 10,
   },
+  // food-log check-off
+  slotLogged: { borderColor: "rgba(70,230,160,0.45)" },
+  checkBtn: {
+    width: 26, height: 26, flexShrink: 0, borderRadius: "50%",
+    border: `2px solid ${dim}`, background: "transparent", color: ink,
+    fontSize: 15, fontWeight: 800, lineHeight: 1, padding: 0,
+    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  checkBtnOn: { background: accent, borderColor: accent },
+  loggedNote: { color: accent, fontSize: 11, letterSpacing: 0.3, marginBottom: 6, opacity: 0.85 },
+  extrasNote: { color: dim, fontSize: 12, marginBottom: 6 },
+  dashMode: { fontSize: 10, letterSpacing: 2, color: text, fontWeight: 700, margin: "10px 0 2px" },
+  dashModeSub: { color: dim, letterSpacing: 0, fontWeight: 500, fontSize: 11 },
   slotHead: {
     display: "flex",
     alignItems: "center",
