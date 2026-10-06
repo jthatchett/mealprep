@@ -1355,12 +1355,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
             ))}
           </select>
         </div>
-        {/* today / past: what was eaten (the food log); future: the plan */}
-        <div style={S.dashMode}>
-          {loggable
-            ? <>EATEN <span style={S.dashModeSub}>· planned {r0(dayTotal.cal)} kcal, {r1(dayTotal.p)}P</span></>
-            : "PLANNED"}
-        </div>
+        {/* today / past: what was eaten (checked-off meals + extras); future: the plan */}
         <MacroBars total={loggable ? eaten : dayTotal} target={phase ? phase.target : null} />
       </div>
 
@@ -3345,8 +3340,6 @@ const S = {
   checkBtnOn: { background: accent, borderColor: accent },
   loggedNote: { color: accent, fontSize: 11, letterSpacing: 0.3, marginBottom: 6, opacity: 0.85 },
   extrasNote: { color: dim, fontSize: 12, marginBottom: 6 },
-  dashMode: { fontSize: 10, letterSpacing: 2, color: text, fontWeight: 700, margin: "10px 0 2px" },
-  dashModeSub: { color: dim, letterSpacing: 0, fontWeight: 500, fontSize: 11 },
   slotHead: {
     display: "flex",
     alignItems: "center",
