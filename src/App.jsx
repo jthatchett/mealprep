@@ -254,15 +254,34 @@ async function sbSwitchDietPhase(session, preset, rows) {
   await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
 }
 
-// fetch today's logged bodyweight, or null if not logged yet
-async function sbGetBodyweightToday(session) {
+// fetch the last 14 days of weigh-ins (today included) — enough for today's
+// prompt check and the two-week weight trend
+async function sbLoadRecentBodyweight(session) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/bodyweight_log?select=weight&user_id=eq.${session.user.id}&date=eq.${todayISO()}`,
+    `${SUPABASE_URL}/rest/v1/bodyweight_log?select=date,weight&user_id=eq.${session.user.id}&date=gte.${addDaysISO(todayISO(), -13)}&order=date.asc`,
     { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
   );
   if (!res.ok) throw new Error("Failed to load bodyweight: " + res.status);
-  const rows = await res.json();
-  return rows[0] ? rows[0].weight : null;
+  return res.json();
+}
+
+/* ---------- weight trend ----------
+   Same rule RepReport uses (computeWeeklyWeightRate): the average of the
+   7 days ending today against the 7 days before, and only when each week
+   has at least 4 weigh-ins — single weigh-ins swing 1–2% on water alone.
+   Keep the two in step. */
+const TREND_MIN_WEIGHINS = 4;
+function weightTrend(log, today) {
+  const week = (from, to) =>
+    (log || []).filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)).filter((w) => w > 0);
+  const recent = week(addDaysISO(today, -6), today);
+  const prior = week(addDaysISO(today, -13), addDaysISO(today, -7));
+  const avg = (v) => v.reduce((a, b) => a + b, 0) / v.length;
+  if (recent.length < TREND_MIN_WEIGHINS || prior.length < TREND_MIN_WEIGHINS) {
+    return { ready: false, recentCount: recent.length, priorCount: prior.length };
+  }
+  const now = avg(recent), before = avg(prior);
+  return { ready: true, avg: now, perWeek: now - before, pctPerWeek: ((now - before) / before) * 100 };
 }
 
 // log (or overwrite) today's bodyweight
@@ -635,7 +654,7 @@ export default function App() {
   const saveChainRef = useRef(Promise.resolve());
   const [dietPhases, setDietPhases] = useState([]);  // every diet_phases row (history + planned)
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
-  const [bwToday, setBwToday] = useState(undefined);  // undefined = not checked yet, null = not logged
+  const [bwLog, setBwLog] = useState([]);             // last 14 days of weigh-ins, oldest first
   const [showBwModal, setShowBwModal] = useState(false);
   const [sideLoadError, setSideLoadError] = useState(null); // diet phase / weigh-in load failed — shown as a banner
   const [sideLoadNonce, setSideLoadNonce] = useState(0);   // bump to retry that load
@@ -851,21 +870,22 @@ export default function App() {
     const runDailyCheck = async () => {
       const day = todayISO();
       if (dailyCheckDayRef.current === day) return;
-      const [phases, weight] = await Promise.allSettled([
+      const [phases, weights] = await Promise.allSettled([
         sbLoadDietPhases(session),
-        sbGetBodyweightToday(session),
+        sbLoadRecentBodyweight(session),
       ]);
       if (cancelled) return;
       const failed = [];
       if (phases.status === "fulfilled") setDietPhases(phases.value);
       else { failed.push("diet phases"); dbg("diet phase load FAILED: " + phases.reason?.message); }
-      if (weight.status === "fulfilled") {
+      if (weights.status === "fulfilled") {
         dailyCheckDayRef.current = day;
-        setBwToday(weight.value);
-        if (weight.value === null && !bwSkippedOn(day)) setShowBwModal(true);
+        setBwLog(weights.value);
+        const todayRow = weights.value.find((r) => r.date === day);
+        if (!todayRow && !bwSkippedOn(day)) setShowBwModal(true);
       } else {
         failed.push("today's weigh-in");
-        dbg("bodyweight load FAILED: " + weight.reason?.message);
+        dbg("bodyweight load FAILED: " + weights.reason?.message);
       }
       setSideLoadError(failed.length ? `couldn't load ${failed.join(" or ")}` : null);
     };
@@ -904,7 +924,8 @@ export default function App() {
   const saveBodyweight = async (weight) => {
     try {
       await sbLogBodyweight(session, weight);
-      setBwToday(weight);
+      const day = todayISO();
+      setBwLog((log) => [...log.filter((r) => r.date !== day), { date: day, weight }].sort((a, b) => (a.date < b.date ? -1 : 1)));
       setShowBwModal(false);
     } catch (e) {
       dbg("log bodyweight FAILED: " + e.message);
@@ -1050,6 +1071,7 @@ export default function App() {
             selectedDate={selectedDate}
             setSelectedDate={setSelectedDate}
             dietPhases={dietPhases}
+            bwLog={bwLog}
             onOpenMonth={() => setShowMonth(true)}
           />
         )}
@@ -1084,7 +1106,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, onOpenMonth }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, onOpenMonth }) {
   const day = week[activeDay];
   const phase = phases.find((p) => p.id === day.phaseId) || null;
   const [picker, setPicker] = useState(null); // slotId being edited
@@ -1165,6 +1187,8 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
 
   return (
     <div>
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} />
+
       <DateStrip
         selectedDate={selectedDate}
         setSelectedDate={setSelectedDate}
@@ -1322,7 +1346,67 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
 }
 
 /* ============================================================
-   DATE STRIP — "September 16 ›" (opens the month calendar), then the
+   PHASE CARD — the diet phase in effect today: week X of Y with a
+   progress bar, and the two-week weight trend once there are enough
+   weigh-ins to trust it (otherwise how many more it needs). Weights are
+   shown in whatever unit they were logged in — the log stores no unit.
+   ============================================================ */
+function PhaseCard({ dietPhases, bwLog, onOpenMonth }) {
+  const today = todayISO();
+  const phase = phaseOnDate(dietPhases, today);
+  const trend = weightTrend(bwLog, today);
+
+  if (!phase) {
+    return (
+      <button style={{ ...S.pcCard, ...S.pcEmpty }} onClick={onOpenMonth}>
+        No diet phase set — tap to start one on the calendar
+      </button>
+    );
+  }
+
+  const color = PHASE_COLORS[phase.phase_type];
+  const prog = phaseProgress(phase, today);
+  const pct = prog.plannedWeeks ? Math.min(100, (prog.week / prog.plannedWeeks) * 100) : null;
+  const weeksLeft = prog.plannedWeeks ? prog.plannedWeeks - prog.week : null;
+  const sign = (n, digits) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(digits);
+
+  return (
+    <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
+      <div style={S.pcTop}>
+        <div>
+          <div style={{ ...S.pcName, color }}>{phase.phase_name}</div>
+          <div style={S.pcWeek}>
+            week {prog.week}{prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : " · open-ended"}
+          </div>
+        </div>
+        <button style={S.pcLink} onClick={onOpenMonth}>
+          {prog.overrun ? "past planned end" : weeksLeft != null ? `${weeksLeft} wk${weeksLeft === 1 ? "" : "s"} left` : "plan"} ›
+        </button>
+      </div>
+      {pct != null && (
+        <div style={S.pcTrack}>
+          <div style={{ ...S.pcFill, width: pct + "%", background: color }} />
+        </div>
+      )}
+      {trend.ready ? (
+        <div style={S.pcStats}>
+          <div><div style={S.pcStatN}>{trend.avg.toFixed(1)}</div><div style={S.pcStatL}>7-day avg</div></div>
+          <div><div style={S.pcStatN}>{sign(trend.perWeek, 1)}</div><div style={S.pcStatL}>per week</div></div>
+          <div><div style={S.pcStatN}>{sign(trend.pctPerWeek, 2)}%</div><div style={S.pcStatL}>bodyweight / wk</div></div>
+        </div>
+      ) : (
+        <div style={S.pcNeed}>
+          Weight trend needs {TREND_MIN_WEIGHINS} weigh-ins in each of the last 2 weeks
+          — this week {Math.min(trend.recentCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS},
+          last week {Math.min(trend.priorCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   DATE STRIP —"September 16 ›" (opens the month calendar), then the
    Mon–Sun week holding the selected date, each day tinted by the diet
    phase it falls in. Swipe or use the arrows to move a week. Each day
    keeps its copy button underneath, as the old day tabs had.
@@ -1359,7 +1443,8 @@ function DateStrip({ selectedDate, setSelectedDate, dietPhases, onOpenMonth, onC
         <button style={S.dateNavBtn} onClick={() => shiftWeek(-1)} aria-label="previous week">‹</button>
         <button style={S.dateNavBtn} onClick={() => shiftWeek(1)} aria-label="next week">›</button>
       </div>
-      {current && (
+      {/* today's phase is on the card above; the chip only shows when browsing another date */}
+      {current && selectedDate !== today && (
         <div style={{ ...S.phaseChip, borderColor: PHASE_COLORS[current.phase_type], color: PHASE_COLORS[current.phase_type] }}>
           {current.phase_name} · week {prog.week}
           {prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : ""}
@@ -2921,6 +3006,26 @@ const S = {
     background: panel, border: `1px solid ${line}`, color: text, borderRadius: 8,
     padding: "5px 10px", fontSize: 13, cursor: "pointer", fontFamily: "inherit",
   },
+  // phase card (top of Plan)
+  pcCard: {
+    display: "block", width: "100%", boxSizing: "border-box", textAlign: "left",
+    background: panel, border: `1px solid ${line}`, borderRadius: 12,
+    padding: 14, marginBottom: 14, color: text, fontFamily: "inherit",
+  },
+  pcEmpty: { color: dim, fontSize: 13, cursor: "pointer" },
+  pcTop: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 },
+  pcName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 16, letterSpacing: 0.5 },
+  pcWeek: { color: dim, fontSize: 12, marginTop: 2 },
+  pcLink: {
+    background: "transparent", border: "none", color: dim, fontSize: 12,
+    cursor: "pointer", fontFamily: "inherit", padding: 0, whiteSpace: "nowrap",
+  },
+  pcTrack: { height: 6, background: panel2, borderRadius: 3, overflow: "hidden", marginTop: 10 },
+  pcFill: { height: "100%", borderRadius: 3 },
+  pcStats: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 12 },
+  pcStatN: { fontSize: 16, fontWeight: 700 },
+  pcStatL: { color: dim, fontSize: 11, marginTop: 1 },
+  pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   phaseChip: {
     display: "inline-block", border: "1px solid", borderRadius: 999, padding: "3px 10px",
     fontSize: 11, fontWeight: 700, letterSpacing: 0.3, marginBottom: 10,
