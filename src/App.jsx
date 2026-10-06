@@ -1100,6 +1100,23 @@ export default function App() {
       intakeWrite("slot:" + slotId, (s, date) => sbDeleteIntake(s, `date=eq.${date}&slot_id=eq.${encodeURIComponent(slotId)}`)),
     addFood: ({ slotId, slotName, food, qty, source }) =>
       intakeWrite("add:" + uid(), (s, date) => sbInsertIntake(s, [intakeRow(date, { slotId, slotName, food, foods, qty, source })])),
+    // Quick Add: a one-off entry logged straight to the day. p/f/c null =
+    // unknown (calories-only). With saveFood it also becomes a library food.
+    addQuick: ({ slotId, slotName, name, p, f, c, cal, saveFood }) => {
+      let foodId = null;
+      if (saveFood) {
+        foodId = uid();
+        setFoods((prev) => [...prev, {
+          id: foodId, name, unit: "serving", type: "component",
+          // calories-only: macros unknown, so flag it for verification
+          macros: { p: p ?? 0, f: f ?? 0, c: c ?? 0, cal }, verify: p == null, ingredients: [], servings: 1,
+        }]);
+      }
+      return intakeWrite("add:" + uid(), (s, date) => sbInsertIntake(s, [{
+        date, slot_id: slotId || null, slot_name: slotName, food_id: foodId,
+        food_name: name || "Quick add", unit: "serving", qty: 1, p, f, c, cal, source: "quick",
+      }]));
+    },
     setQty: (id, qty) => intakeWrite("row:" + id, (s) => sbUpdateIntake(s, id, { qty })),
     remove: (id) => intakeWrite("row:" + id, (s) => sbDeleteIntake(s, `id=eq.${id}`)),
   };
@@ -1291,6 +1308,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
   //   { mode: "log", slotId, slotName }       → this date's food log only
   const [picker, setPicker] = useState(null);
   const [scanTarget, setScanTarget] = useState(null);
+  const [quickTarget, setQuickTarget] = useState(null); // { slotId, slotName } for Quick Add
   const [pendingScan, setPendingScan] = useState(null); // { target, barcode }
   const [copySource, setCopySource] = useState(null); // day key being copied FROM, or null
 
@@ -1436,6 +1454,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           }
           onLogQty={(id, qty) => intakeOps.setQty(id, qty)}
           onLogRemove={(id) => intakeOps.remove(id)}
+          onQuickAdd={() => setQuickTarget({ slotId: slot.id, slotName: slot.name })}
           isFirst={si === 0}
           isLast={si === day.slots.length - 1}
           onMoveUp={() => moveSlot(si, -1)}
@@ -1487,6 +1506,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           {extraRows.map((r) => (
             <LogEntry key={r.id} row={r} onQty={(q) => intakeOps.setQty(r.id, q)} onRemove={() => intakeOps.remove(r.id)} />
           ))}
+          <button style={S.addEntry} onClick={() => setQuickTarget({ slotId: null, slotName: "Extras" })}>+ quick add</button>
           <button style={S.addEntry} onClick={() => setPicker({ mode: "log", slotId: null, slotName: "Extras" })}>+ food</button>
           <button style={S.addEntry} onClick={() => setScanTarget({ mode: "log", slotId: null, slotName: "Extras" })}>+ scan barcode</button>
         </div>
@@ -1508,6 +1528,16 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
               });
             }
             setPicker(null);
+          }}
+        />
+      )}
+
+      {quickTarget && (
+        <QuickAddModal
+          onClose={() => setQuickTarget(null)}
+          onLog={(entry) => {
+            intakeOps.addQuick({ ...quickTarget, ...entry });
+            setQuickTarget(null);
           }}
         />
       )}
@@ -2097,6 +2127,7 @@ function Slot({
   onUncheck,
   onLogQty,
   onLogRemove,
+  onQuickAdd,   // logged meals only: one-off entry for this day
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const planTotal = useMemo(() => {
@@ -2217,6 +2248,11 @@ function Slot({
         );
       })}
 
+      {logged && (
+        <button style={S.addEntry} onClick={onQuickAdd}>
+          + quick add
+        </button>
+      )}
       <button style={S.addEntry} onClick={onAdd}>
         + food
       </button>
@@ -2238,6 +2274,7 @@ function LogEntry({ row, onQty, onRemove }) {
     if (n !== Number(row.qty)) onQty(n);
   };
   const m = scale({ p: Number(row.p), f: Number(row.f), c: Number(row.c), cal: Number(row.cal) }, Number(row.qty));
+  const calOnly = row.p == null && row.f == null && row.c == null;
   return (
     <div style={S.entry}>
       <input
@@ -2251,9 +2288,93 @@ function LogEntry({ row, onQty, onRemove }) {
         style={S.qty}
       />
       <span style={S.entryUnit}>{row.unit}</span>
-      <span style={S.entryName}>{row.food_name}</span>
-      <span style={S.entryMacros}>{r0(m.cal)} · {r1(m.p)}P</span>
+      <span style={S.entryName}>
+        {row.food_name}
+        {row.source === "quick" && <span style={S.recipeTag}>quick</span>}
+      </span>
+      <span style={S.entryMacros}>{r0(m.cal)} · {calOnly ? "cal only" : `${r1(m.p)}P`}</span>
       <button style={S.xBtnSm} onClick={onRemove} aria-label={`remove ${row.food_name} from log`}>✕</button>
+    </div>
+  );
+}
+
+/* Quick Add — log a one-off to this day without creating a saved food
+   (MacroFactor-style). Calories fill in from the macros (4/4/9) until
+   edited by hand; calories alone are allowed, leaving the macros unknown.
+   "Save to my foods" also adds it to the library for next time. */
+function QuickAddModal({ onClose, onLog }) {
+  const [name, setName] = useState("");
+  const [mac, setMac] = useState({ p: "", c: "", f: "" });
+  const [calText, setCalText] = useState("");
+  const [calTouched, setCalTouched] = useState(false);
+  const [saveFood, setSaveFood] = useState(false);
+  const [err, setErr] = useState("");
+
+  const num = (v) => (v === "" ? null : parseFloat(v));
+  const p = num(mac.p), c = num(mac.c), f = num(mac.f);
+  const anyMacro = p != null || c != null || f != null;
+  const autoCal = Math.round(4 * (p || 0) + 4 * (c || 0) + 9 * (f || 0));
+  const calShown = calTouched ? calText : anyMacro ? String(autoCal) : "";
+  const cal = parseFloat(calShown);
+
+  const submit = () => {
+    if ([p, c, f].some((v) => v != null && (isNaN(v) || v < 0))) return setErr("macros must be 0 or more");
+    if (isNaN(cal) || cal <= 0) return setErr("enter calories, or some macros");
+    if (saveFood && !name.trim()) return setErr("give it a name to save it to your foods");
+    onLog({
+      name: name.trim(),
+      // calories-only: macros unknown (null); otherwise blanks count as 0
+      p: anyMacro ? p || 0 : null, f: anyMacro ? f || 0 : null, c: anyMacro ? c || 0 : null,
+      cal, saveFood,
+    });
+  };
+
+  return (
+    <div style={S.modalWrap} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+        <div style={S.modalHead}>
+          <strong style={{ fontSize: 13, letterSpacing: 1 }}>QUICK ADD</strong>
+          <button style={S.xBtn} onClick={onClose}>✕</button>
+        </div>
+        <div style={S.editorBody}>
+          <label style={S.fLabel}>Name (optional)</label>
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} style={S.fInput} placeholder="e.g. restaurant burrito" />
+          <label style={S.fLabel}>Macros (optional)</label>
+          <div style={S.macroGrid}>
+            {[["Protein", "p"], ["Carbs", "c"], ["Fat", "f"]].map(([lab, k]) => (
+              <div key={k}>
+                <span style={S.macroMini}>{lab} (g)</span>
+                <input
+                  type="number" step="1" inputMode="decimal" value={mac[k]}
+                  onChange={(e) => { setMac({ ...mac, [k]: e.target.value }); setErr(""); }}
+                  style={S.fInput}
+                />
+              </div>
+            ))}
+            <div>
+              <span style={S.macroMini}>Calories{calTouched || !anyMacro ? "" : " (auto)"}</span>
+              <input
+                type="number" step="1" inputMode="decimal" value={calShown}
+                onChange={(e) => { setCalText(e.target.value); setCalTouched(true); setErr(""); }}
+                style={S.fInput}
+              />
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: dim, marginTop: 6 }}>
+            {anyMacro ? "Calories fill in from your macros — edit to override." : "Only know the calories? Enter just those; protein stays unknown."}
+          </div>
+          <label style={S.checkRow}>
+            <input type="checkbox" checked={saveFood} onChange={(e) => setSaveFood(e.target.checked)} />
+            <span>also save to my foods</span>
+          </label>
+          {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 6 }}>{err}</div>}
+        </div>
+        <div style={S.editorFoot}>
+          <div style={{ flex: 1 }} />
+          <button style={S.ghostBtn} onClick={onClose}>cancel</button>
+          <button style={S.primaryBtn} onClick={submit}>log it</button>
+        </div>
+      </div>
     </div>
   );
 }
