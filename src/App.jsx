@@ -1588,9 +1588,12 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth }) {
         </div>
       ) : (
         <div style={S.pcNeed}>
-          Weight trend needs {TREND_MIN_WEIGHINS} weigh-ins in each of the last 2 weeks
-          — this week {Math.min(trend.recentCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS},
-          last week {Math.min(trend.priorCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS}
+          A single weigh-in can swing 1–2 lb on water, salt or a big dinner, so it only
+          trusts an average once a 7-day window has at least {TREND_MIN_WEIGHINS} weigh-ins.
+          <div style={S.pcNeedCount}>
+            This week {Math.min(trend.recentCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS} ·
+            last week {Math.min(trend.priorCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS}
+          </div>
         </div>
       )}
     </div>
@@ -3277,6 +3280,7 @@ const S = {
   pcStatN: { fontSize: 16, fontWeight: 700 },
   pcStatL: { color: dim, fontSize: 11, marginTop: 1 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
+  pcNeedCount: { color: text, fontSize: 12, fontWeight: 600, marginTop: 6 },
   phaseChip: {
     display: "inline-block", border: "1px solid", borderRadius: 999, padding: "3px 10px",
     fontSize: 11, fontWeight: 700, letterSpacing: 0.3, marginBottom: 10,
