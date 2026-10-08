@@ -205,6 +205,79 @@ const roundRate = (n) => Math.round(n * 1e4) / 1e4;
 
 const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46e6a0" };
 
+/* ---------- training volume impact (mirrors RepReport) ----------
+   How much the diet phase is moving RepReport's recovery ceilings (MRV):
+   the average change across muscles, as a % of each muscle's baseline.
+   This is a straight port of RepReport's resolveDietPhaseContext +
+   applyDietPhaseShift (src/App.jsx there) — keep the two in step. In
+   short: a cut lowers each MRV toward the low end of RP's published range
+   and a bulk raises it toward the high end; the shift builds with how far
+   through the phase you are (planned length, else 12 weeks) and scales
+   with how fast weight is actually moving (1%/wk loss or 0.5%/wk gain =
+   full effect; half until a weight trend exists). Maintenance phases
+   don't shift anything. Bounded by RP's ranges, so it tops out near ±17%. */
+const VOLUME_MRV = {
+  // muscle: [baseline MRV, RP low, RP high]
+  chest: [20, 16, 24], horizontalBack: [23, 20, 26], verticalBack: [23, 20, 26],
+  biceps: [23, 20, 26], triceps: [18, 16, 20], frontDelts: [10, 8, 12],
+  sideDelts: [27, 24, 30], rearDelts: [16, 12, 20], traps: [16, 12, 20],
+  forearms: [27, 24, 30], quads: [16, 14, 18], hamstrings: [11, 8, 14],
+  glutes: [27, 24, 30], calves: [20, 16, 24], abs: [16, 12, 20],
+};
+const VOLUME_FULL_EFFECT_WEEKS = 12;
+const VOLUME_DEFICIT_FULL_RATE = 0.01;
+const VOLUME_SURPLUS_FULL_RATE = 0.005;
+const VOLUME_DEFAULT_STRENGTH = 0.5;
+const VOLUME_SCALE = 20; // the bar runs -20%..+20%
+
+// The phase's context on a date: back-to-back phases of the same type are
+// one block (the clock runs from the first); the planned end comes from
+// the covering phase, else the nearest earlier one in the block.
+function dietPhaseContext(rows, iso, bwLog) {
+  const sorted = [...(rows || [])].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+  const idx = sorted.map((r) => r.start_date <= iso && (!r.end_date || r.end_date >= iso)).lastIndexOf(true);
+  if (idx === -1) return null;
+  const phase = sorted[idx];
+  let blockStart = phase.start_date;
+  let plannedEnd = phase.planned_end_date || null;
+  for (let i = idx - 1; i >= 0 && sorted[i].phase_type === phase.phase_type; i--) {
+    blockStart = sorted[i].start_date;
+    if (!plannedEnd && sorted[i].planned_end_date) plannedEnd = sorted[i].planned_end_date;
+  }
+  const weeksIn = Math.max(0, daysBetween(blockStart, iso) / 7);
+  const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(blockStart, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
+  const progress = Math.min(1, weeksIn / plannedWeeks);
+  const trend = weightTrend(bwLog, iso);
+  const rate = trend.ready ? trend.pctPerWeek / 100 : null;
+  let strength = 0;
+  if (phase.phase_type === "deficit") strength = rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0;
+  if (phase.phase_type === "surplus") strength = rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0;
+  return { phase, type: phase.phase_type, blockStart, progress, strength, estimated: rate === null };
+}
+
+// Average MRV change across muscles, in % (negative = less volume).
+function volumeImpactPct(ctx) {
+  if (!ctx || !ctx.strength || (ctx.type !== "deficit" && ctx.type !== "surplus")) return 0;
+  const shifts = Object.values(VOLUME_MRV).map(([base, lo, hi]) =>
+    (ctx.type === "deficit" ? -(base - lo) : hi - base) * ctx.progress * ctx.strength / base);
+  return (shifts.reduce((a, b) => a + b, 0) / shifts.length) * 100;
+}
+
+// Average daily calorie target for a phase's week (weekday overrides such
+// as a Saturday refeed count), and its % against the Maintenance template.
+function phaseCalories(phaseRow, presets, week) {
+  const followed = presets.find((p) => p.id === phaseRow?.phase_id) || null;
+  const maint = presets.find((p) => p.id === "phase-maintenance") || presets.find((p) => /maint/i.test(p.name)) || null;
+  if (!followed) return null;
+  const days = Object.values(week || {});
+  const cals = days.length
+    ? days.map((d) => (d.targetId ? presets.find((p) => p.id === d.targetId)?.target.cal : null) ?? followed.target.cal)
+    : [followed.target.cal];
+  const avg = cals.reduce((a, b) => a + b, 0) / cals.length;
+  const pct = maint?.target.cal ? ((avg - maint.target.cal) / maint.target.cal) * 100 : null;
+  return { avg, pct, baseOnly: followed.target.cal, isMaintenance: followed === maint };
+}
+
 function sbHeaders(session, extra) {
   return { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}`, ...extra };
 }
@@ -278,11 +351,11 @@ async function sbSwitchDietPhase(session, preset, rows) {
   await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
 }
 
-// fetch the last 28 days of weigh-ins (today included) — today's prompt
-// check, the two-week trend, and the four-week trend bulks are judged on
+// fetch every weigh-in, oldest first — today's prompt check, the two-week
+// trend, the four-week trend bulks are judged on, and Phase History
 async function sbLoadRecentBodyweight(session) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/bodyweight_log?select=date,weight&user_id=eq.${session.user.id}&date=gte.${addDaysISO(todayISO(), -27)}&order=date.asc`,
+    `${SUPABASE_URL}/rest/v1/bodyweight_log?select=date,weight&user_id=eq.${session.user.id}&order=date.asc`,
     { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
   );
   if (!res.ok) throw new Error("Failed to load bodyweight: " + res.status);
@@ -1267,6 +1340,8 @@ export default function App() {
             phases={phases}
             setPhases={setPhases}
             dietPhase={dietPhase}
+            dietPhases={dietPhases}
+            bwLog={bwLog}
             onSwitchPhase={switchPhase}
             onOpenCalendar={() => { setTab("plan"); setShowMonth(true); }}
           />
@@ -1399,7 +1474,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
 
   return (
     <div>
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} />
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -1615,7 +1690,13 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
    over 2 weeks; bulks per month over 4 weeks, since a week of bulk gain
    is smaller than day-to-day noise.
    ============================================================ */
-function PhaseCard({ dietPhases, bwLog, onOpenMonth }) {
+const PHASE_BLURB = {
+  deficit: "Lower calories reduce recovery capacity, so RepReport trims your training volume ceilings as the cut goes on.",
+  surplus: "Extra calories improve recovery, so RepReport raises your training volume ceilings as the bulk goes on.",
+  maintenance: "Calories at maintenance. Training volume runs at your normal baseline.",
+};
+
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
 
@@ -1630,8 +1711,13 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth }) {
   const color = PHASE_COLORS[phase.phase_type];
   const prog = phaseProgress(phase, today);
   const pct = prog.plannedWeeks ? Math.min(100, (prog.week / prog.plannedWeeks) * 100) : null;
-  const weeksLeft = prog.plannedWeeks ? prog.plannedWeeks - prog.week : null;
   const sign = (n, digits) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(digits);
+  const cals = phaseCalories(phase, presets || [], week);
+  const ctx = dietPhaseContext(dietPhases, today, bwLog);
+  const impact = volumeImpactPct(ctx);
+  const impactR = Math.round(impact);
+  const markerPct = 50 + (Math.max(-VOLUME_SCALE, Math.min(VOLUME_SCALE, impact)) / VOLUME_SCALE) * 50;
+  const impactColor = impactR < 0 ? PHASE_COLORS.deficit : impactR > 0 ? PHASE_COLORS.surplus : PHASE_COLORS.maintenance;
 
   const monthly = rateIsMonthly(phase.phase_type);
   const ratePct = phaseRatePct(phase);                                   // % per week
@@ -1678,36 +1764,58 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth }) {
     <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
       <div style={S.pcTop}>
         <div>
-          <div style={{ ...S.pcName, color }}>{phase.phase_name}</div>
-          <div style={S.pcWeek}>
-            week {prog.week}{prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : " · open-ended"}
+          <div style={S.pcKicker}>CURRENT PHASE</div>
+          <div style={{ ...S.pcName, color }}>
+            {phase.phase_name.toUpperCase()} · WEEK {prog.week}
           </div>
         </div>
         <button style={S.pcLink} onClick={onOpenMonth}>
-          {prog.overrun ? "past planned end" : weeksLeft != null ? `${weeksLeft} wk${weeksLeft === 1 ? "" : "s"} left` : "plan"} ›
+          {prog.overrun ? "past planned end" : "plan"} ›
         </button>
       </div>
-      {pct != null && (
-        <div style={S.pcTrack}>
-          <div style={{ ...S.pcFill, width: pct + "%", background: color }} />
+      <div style={S.pcBlurb}>{PHASE_BLURB[phase.phase_type] || PHASE_BLURB.maintenance}</div>
+
+      <div style={S.pcStats}>
+        <div>
+          <div style={S.pcStatL}>Calories</div>
+          <div style={S.pcStatN}>{cals ? Math.round(cals.avg).toLocaleString() : "—"}</div>
+          <div style={{ ...S.pcStatSub, color: cals?.pct ? color : dim }}>
+            {cals?.pct == null ? "no maintenance target" : cals.isMaintenance || Math.abs(cals.pct) < 0.5 ? "maintenance" : `${sign(cals.pct, 0)}%`}
+          </div>
         </div>
-      )}
+        <div>
+          <div style={S.pcStatL}>Body weight</div>
+          <div style={S.pcStatN}>{trend.ready ? trend.avg.toFixed(1) : "—"}</div>
+          <div style={{ ...S.pcStatSub, color: trend.ready ? color : dim }}>
+            {trend.ready
+              ? monthly ? `${sign(trend.perMonth, 1)} / mo` : `${sign(trend.perWeek, 1)} / wk`
+              : "trend not ready"}
+          </div>
+        </div>
+        <div>
+          <div style={S.pcStatL}>Phase length</div>
+          <div style={S.pcStatN}>{prog.plannedWeeks ? `${prog.week} / ${prog.plannedWeeks}` : `wk ${prog.week}`}</div>
+          {pct != null ? (
+            <div style={{ ...S.pcTrack, marginTop: 6 }}>
+              <div style={{ ...S.pcFill, width: pct + "%", background: color }} />
+            </div>
+          ) : (
+            <div style={{ ...S.pcStatSub, color: dim }}>open-ended</div>
+          )}
+        </div>
+      </div>
+
+      {/* target rate and pace (cuts/maintenance per week, bulks per month) */}
       <div style={S.pcTarget}>{targetText}</div>
       {trend.ready ? (
-        <>
-          <div style={S.pcStats}>
-            <div><div style={S.pcStatN}>{trend.avg.toFixed(1)}</div><div style={S.pcStatL}>7-day avg</div></div>
-            <div>
-              <div style={S.pcStatN}>{sign(monthly ? trend.perMonth : trend.perWeek, 1)}</div>
-              <div style={S.pcStatL}>{WEIGHT_UNIT} per {monthly ? "month" : "week"}</div>
-            </div>
-            <div>
-              <div style={S.pcStatN}>{sign(monthly ? trend.pctPerMonth : trend.pctPerWeek, 2)}%</div>
-              <div style={S.pcStatL}>bodyweight / {per}</div>
-            </div>
+        pace && (
+          <div style={{ ...S.pcPace, color: pace.ok ? accent : "#ffb454" }}>
+            {pace.ok ? "●" : "▲"} {pace.text}
+            <span style={{ color: dim, fontWeight: 500 }}>
+              {" "}· actual {sign(monthly ? trend.pctPerMonth : trend.pctPerWeek, 2)}%/{per}
+            </span>
           </div>
-          {pace && <div style={{ ...S.pcPace, color: pace.ok ? accent : "#ffb454" }}>{pace.ok ? "●" : "▲"} {pace.text}</div>}
-        </>
+        )
       ) : (
         <div style={S.pcNeed}>
           A single weigh-in can swing 1–2 lb on water, salt or a big dinner, so it only
@@ -1722,6 +1830,25 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth }) {
         </div>
       )}
       {projection && <div style={S.pcProj}>{projection}</div>}
+
+      <div style={S.viHead}>
+        <span>Training volume impact</span>
+        <span style={{ color: impactColor, fontWeight: 700 }}>
+          {impactR === 0 ? "baseline" : `${sign(impactR, 0)}%`}
+        </span>
+      </div>
+      <div style={S.viBar}>
+        <div style={{ ...S.viMarker, left: `calc(${markerPct}% - 7px)` }} />
+      </div>
+      <div style={S.viScale}>
+        <span>−{VOLUME_SCALE}% deficit</span><span>baseline</span><span>+{VOLUME_SCALE}% surplus</span>
+      </div>
+      <div style={S.viNote}>
+        {impactR === 0
+          ? "Volume ceilings are at your normal baseline."
+          : `Recovery ceilings are ~${Math.abs(impactR)}% ${impactR < 0 ? "below" : "above"} baseline right now. RepReport applies this to your mesos automatically.`}
+        {ctx?.estimated && ctx.strength > 0 ? " Estimated at half strength until the weight trend is ready." : ""}
+      </div>
     </div>
   );
 }
@@ -3212,7 +3339,69 @@ function BodyweightModal({ onSave, onSkip }) {
   );
 }
 
-function Phases({ phases, setPhases, dietPhase, onSwitchPhase, onOpenCalendar }) {
+// Past and current diet phase blocks, newest first. Back-to-back phases of
+// the same type are one block (same rule the volume math uses). Each shows
+// its calories vs Maintenance and the training volume impact it had
+// reached by its last day (or today, for the current one).
+function PhaseHistory({ dietPhases, bwLog, presets }) {
+  const today = todayISO();
+  const sorted = [...(dietPhases || [])]
+    .filter((r) => r.start_date <= today)
+    .sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+  const blocks = [];
+  sorted.forEach((r) => {
+    const last = blocks[blocks.length - 1];
+    if (last && last.type === r.phase_type) last.rows.push(r);
+    else blocks.push({ type: r.phase_type, rows: [r] });
+  });
+  blocks.forEach((b, i) => {
+    const lastRow = b.rows[b.rows.length - 1];
+    const nextStart = blocks[i + 1]?.rows[0].start_date;
+    let end = nextStart ? addDaysISO(nextStart, -1) : today;
+    if (lastRow.end_date && lastRow.end_date < end) end = lastRow.end_date;
+    b.start = b.rows[0].start_date;
+    b.end = end;
+    b.current = !nextStart && (!lastRow.end_date || lastRow.end_date >= today);
+    b.weeks = Math.max(1, Math.round((daysBetween(b.start, end) + 1) / 7));
+    b.name = b.rows[0].phase_name;
+    b.cals = phaseCalories(lastRow, presets, null);
+    b.impact = Math.round(volumeImpactPct(dietPhaseContext(dietPhases, end, bwLog)));
+  });
+  if (!blocks.length) return null;
+  const fmt = (iso) => parseISO(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const sign = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={S.phKicker}>PHASE HISTORY</div>
+      {blocks.slice().reverse().map((b) => {
+        const color = PHASE_COLORS[b.type] || dim;
+        const calPct = b.cals?.pct == null ? null : Math.round(b.cals.pct);
+        return (
+          <div key={b.start} style={{ ...S.phRow, borderLeft: `3px solid ${color}` }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{b.name}{b.current ? " · now" : ""}</div>
+              <div style={{ color: dim, fontSize: 12 }}>
+                {fmt(b.start)} – {b.current
+                  ? `today (week ${Math.floor(daysBetween(b.start, today) / 7) + 1})`
+                  : `${fmt(b.end)} (${b.weeks} wk${b.weeks === 1 ? "" : "s"})`}
+              </div>
+            </div>
+            <div style={{ textAlign: "right", fontSize: 12, flexShrink: 0 }}>
+              <div style={{ color: calPct ? color : dim, fontWeight: 600 }}>
+                {calPct == null ? "—" : calPct === 0 ? "0% cals" : `${sign(calPct)}% cals`}
+              </div>
+              <div style={{ color: b.impact ? color : dim }}>
+                {b.impact ? `${sign(b.impact)}% volume` : "baseline volume"}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, onSwitchPhase, onOpenCalendar }) {
   const prog = phaseProgress(dietPhase, todayISO());
   const set = (id, key, sub, val) =>
     setPhases((prev) =>
@@ -3263,6 +3452,7 @@ function Phases({ phases, setPhases, dietPhase, onSwitchPhase, onOpenCalendar })
           plan phases on the calendar
         </button>
       </div>
+      <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} />
       <p style={S.note}>
         These are your macro targets. Each day in Plan uses the targets of the
         diet phase it falls in (a Cut day uses Cut). To give one weekday its own
@@ -3541,7 +3731,26 @@ const S = {
   pcFill: { height: "100%", borderRadius: 3 },
   pcStats: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 12 },
   pcStatN: { fontSize: 16, fontWeight: 700 },
-  pcStatL: { color: dim, fontSize: 11, marginTop: 1 },
+  pcStatL: { color: dim, fontSize: 11, marginBottom: 3 },
+  pcStatSub: { fontSize: 12, fontWeight: 600, marginTop: 2 },
+  phKicker: { color: dim, fontSize: 11, letterSpacing: 1, marginBottom: 8 },
+  phRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
+    background: panel, borderRadius: 8, padding: "10px 12px", marginBottom: 6,
+  },
+  pcKicker: { color: dim, fontSize: 10, letterSpacing: 1.2, marginBottom: 3 },
+  pcBlurb: { color: dim, fontSize: 12.5, lineHeight: 1.45, marginTop: 8, paddingBottom: 12, borderBottom: `1px solid ${panel2}` },
+  viHead: { display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 13, fontWeight: 600, marginTop: 16 },
+  viBar: {
+    position: "relative", height: 8, borderRadius: 4, marginTop: 10,
+    background: `linear-gradient(90deg, ${PHASE_COLORS.deficit}, ${PHASE_COLORS.maintenance} 50%, ${PHASE_COLORS.surplus})`,
+  },
+  viMarker: {
+    position: "absolute", top: -3, width: 14, height: 14, borderRadius: 7,
+    background: "#fff", boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
+  },
+  viScale: { display: "flex", justifyContent: "space-between", color: dim, fontSize: 10.5, marginTop: 6 },
+  viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeedCount: { color: text, fontSize: 12, fontWeight: 600, marginTop: 6 },
   pcTarget: { color: text, fontSize: 12, marginTop: 10, opacity: 0.85 },
