@@ -181,6 +181,28 @@ function defaultPhaseWeeks(preset) {
   return null;
 }
 
+/* ---------- target rate of weight change ----------
+   Stored on each diet_phases row as % of bodyweight PER WEEK (negative =
+   loss); null = the default for the phase type. Defaults:
+     cut −0.7%/wk, mini-cut −1.0%/wk (Helms 2014: 0.5–1%/wk; Garthe 2011)
+     bulk +0.75%/month (Helms, Muscle & Strength Pyramid: intermediates
+          0.5–1%/month) — shown and judged per MONTH, since ~0.3 lb/wk is
+          smaller than day-to-day noise
+     maintenance 0, ±0.25%/wk counts as on target */
+const WEEKS_PER_MONTH = 30.44 / 7;
+const WEIGHT_UNIT = "lb";
+function defaultRatePct(phaseType, name) {
+  if (phaseType === "deficit") return /mini/i.test(name || "") ? -1.0 : -0.7;
+  if (phaseType === "surplus") return 0.75 / WEEKS_PER_MONTH;
+  return 0;
+}
+function phaseRatePct(row) {
+  return row.target_rate_pct != null ? Number(row.target_rate_pct) : defaultRatePct(row.phase_type, row.phase_name);
+}
+// bulks are read and entered per month; cuts and maintenance per week
+const rateIsMonthly = (phaseType) => phaseType === "surplus";
+const roundRate = (n) => Math.round(n * 1e4) / 1e4;
+
 const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46e6a0" };
 
 /* ---------- training volume impact (mirrors RepReport) ----------
@@ -262,14 +284,14 @@ function sbHeaders(session, extra) {
 
 async function sbLoadDietPhases(session) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/diet_phases?select=id,phase_id,phase_name,phase_type,start_date,end_date,planned_end_date&user_id=eq.${session.user.id}&order=start_date.asc`,
+    `${SUPABASE_URL}/rest/v1/diet_phases?select=id,phase_id,phase_name,phase_type,start_date,end_date,planned_end_date,target_rate_pct&user_id=eq.${session.user.id}&order=start_date.asc`,
     { headers: sbHeaders(session) }
   );
   if (!res.ok) throw new Error("Failed to load diet phases: " + res.status);
   return res.json();
 }
 
-async function sbInsertDietPhase(session, { preset, start_date, planned_end_date }) {
+async function sbInsertDietPhase(session, { preset, start_date, planned_end_date, target_rate_pct }) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/diet_phases`, {
     method: "POST",
     headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "return=minimal" }),
@@ -281,6 +303,7 @@ async function sbInsertDietPhase(session, { preset, start_date, planned_end_date
       start_date,
       planned_end_date: planned_end_date || null,
       end_date: null,
+      target_rate_pct: target_rate_pct ?? roundRate(defaultRatePct(preset.phase_type, preset.name)),
     }),
   });
   if (!res.ok) throw new Error("Failed to add phase: " + res.status);
@@ -320,6 +343,7 @@ async function sbSwitchDietPhase(session, preset, rows) {
   if (current && current.start_date === today) {
     await sbUpdateDietPhase(session, current.id, {
       phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type, planned_end_date: planned,
+      target_rate_pct: roundRate(defaultRatePct(preset.phase_type, preset.name)),
     });
     return;
   }
@@ -327,8 +351,8 @@ async function sbSwitchDietPhase(session, preset, rows) {
   await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
 }
 
-// fetch the last 14 days of weigh-ins (today included) — enough for today's
-// prompt check and the two-week weight trend
+// fetch every weigh-in, oldest first — today's prompt check, the two-week
+// trend, the four-week trend bulks are judged on, and Phase History
 async function sbLoadRecentBodyweight(session) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/bodyweight_log?select=date,weight&user_id=eq.${session.user.id}&order=date.asc`,
@@ -414,6 +438,22 @@ function weightTrend(log, today) {
   }
   const now = avg(recent), before = avg(prior);
   return { ready: true, avg: now, perWeek: now - before, pctPerWeek: ((now - before) / before) * 100 };
+}
+
+// Four-week version for bulks: the last 7 days against days 22–28 ago
+// (window centres 21 days apart), scaled to a month. Same 4-weigh-in rule.
+function monthlyWeightTrend(log, today) {
+  const week = (from, to) =>
+    (log || []).filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)).filter((w) => w > 0);
+  const recent = week(addDaysISO(today, -6), today);
+  const old = week(addDaysISO(today, -27), addDaysISO(today, -21));
+  const avg = (v) => v.reduce((a, b) => a + b, 0) / v.length;
+  if (recent.length < TREND_MIN_WEIGHINS || old.length < TREND_MIN_WEIGHINS) {
+    return { ready: false, recentCount: recent.length, oldCount: old.length };
+  }
+  const now = avg(recent), before = avg(old);
+  const perMonth = ((now - before) / 21) * 30.44;
+  return { ready: true, avg: now, perMonth, pctPerMonth: (perMonth / before) * 100 };
 }
 
 // log (or overwrite) today's bodyweight
@@ -1133,6 +1173,23 @@ export default function App() {
       intakeWrite("slot:" + slotId, (s, date) => sbDeleteIntake(s, `date=eq.${date}&slot_id=eq.${encodeURIComponent(slotId)}`)),
     addFood: ({ slotId, slotName, food, qty, source }) =>
       intakeWrite("add:" + uid(), (s, date) => sbInsertIntake(s, [intakeRow(date, { slotId, slotName, food, foods, qty, source })])),
+    // Quick Add: a one-off entry logged straight to the day. p/f/c null =
+    // unknown (calories-only). With saveFood it also becomes a library food.
+    addQuick: ({ slotId, slotName, name, p, f, c, cal, saveFood }) => {
+      let foodId = null;
+      if (saveFood) {
+        foodId = uid();
+        setFoods((prev) => [...prev, {
+          id: foodId, name, unit: "serving", type: "component",
+          // calories-only: macros unknown, so flag it for verification
+          macros: { p: p ?? 0, f: f ?? 0, c: c ?? 0, cal }, verify: p == null, ingredients: [], servings: 1,
+        }]);
+      }
+      return intakeWrite("add:" + uid(), (s, date) => sbInsertIntake(s, [{
+        date, slot_id: slotId || null, slot_name: slotName, food_id: foodId,
+        food_name: name || "Quick add", unit: "serving", qty: 1, p, f, c, cal, source: "quick",
+      }]));
+    },
     setQty: (id, qty) => intakeWrite("row:" + id, (s) => sbUpdateIntake(s, id, { qty })),
     remove: (id) => intakeWrite("row:" + id, (s) => sbDeleteIntake(s, `id=eq.${id}`)),
   };
@@ -1326,6 +1383,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
   //   { mode: "log", slotId, slotName }       → this date's food log only
   const [picker, setPicker] = useState(null);
   const [scanTarget, setScanTarget] = useState(null);
+  const [quickTarget, setQuickTarget] = useState(null); // { slotId, slotName } for Quick Add
   const [pendingScan, setPendingScan] = useState(null); // { target, barcode }
   const [copySource, setCopySource] = useState(null); // day key being copied FROM, or null
 
@@ -1471,6 +1529,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           }
           onLogQty={(id, qty) => intakeOps.setQty(id, qty)}
           onLogRemove={(id) => intakeOps.remove(id)}
+          onQuickAdd={() => setQuickTarget({ slotId: slot.id, slotName: slot.name })}
           isFirst={si === 0}
           isLast={si === day.slots.length - 1}
           onMoveUp={() => moveSlot(si, -1)}
@@ -1522,6 +1581,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           {extraRows.map((r) => (
             <LogEntry key={r.id} row={r} onQty={(q) => intakeOps.setQty(r.id, q)} onRemove={() => intakeOps.remove(r.id)} />
           ))}
+          <button style={S.addEntry} onClick={() => setQuickTarget({ slotId: null, slotName: "Extras" })}>+ quick add</button>
           <button style={S.addEntry} onClick={() => setPicker({ mode: "log", slotId: null, slotName: "Extras" })}>+ food</button>
           <button style={S.addEntry} onClick={() => setScanTarget({ mode: "log", slotId: null, slotName: "Extras" })}>+ scan barcode</button>
         </div>
@@ -1543,6 +1603,16 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
               });
             }
             setPicker(null);
+          }}
+        />
+      )}
+
+      {quickTarget && (
+        <QuickAddModal
+          onClose={() => setQuickTarget(null)}
+          onLog={(entry) => {
+            intakeOps.addQuick({ ...quickTarget, ...entry });
+            setQuickTarget(null);
           }}
         />
       )}
@@ -1614,9 +1684,11 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
 
 /* ============================================================
    PHASE CARD — the diet phase in effect today: week X of Y with a
-   progress bar, and the two-week weight trend once there are enough
-   weigh-ins to trust it (otherwise how many more it needs). Weights are
-   shown in whatever unit they were logged in — the log stores no unit.
+   progress bar, its target rate, and once there are enough weigh-ins
+   to trust it, the actual trend against that target (on pace or not)
+   and the projected end weight. Cuts and maintenance are read per week
+   over 2 weeks; bulks per month over 4 weeks, since a week of bulk gain
+   is smaller than day-to-day noise.
    ============================================================ */
 const PHASE_BLURB = {
   deficit: "Lower calories reduce recovery capacity, so RepReport trims your training volume ceilings as the cut goes on.",
@@ -1627,7 +1699,6 @@ const PHASE_BLURB = {
 function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
-  const trend = weightTrend(bwLog, today);
 
   if (!phase) {
     return (
@@ -1647,6 +1718,47 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
   const impactR = Math.round(impact);
   const markerPct = 50 + (Math.max(-VOLUME_SCALE, Math.min(VOLUME_SCALE, impact)) / VOLUME_SCALE) * 50;
   const impactColor = impactR < 0 ? PHASE_COLORS.deficit : impactR > 0 ? PHASE_COLORS.surplus : PHASE_COLORS.maintenance;
+
+  const monthly = rateIsMonthly(phase.phase_type);
+  const ratePct = phaseRatePct(phase);                                   // % per week
+  const targetPct = monthly ? ratePct * WEEKS_PER_MONTH : ratePct;       // in display units
+  const per = monthly ? "mo" : "wk";
+  const trend = monthly ? monthlyWeightTrend(bwLog, today) : weightTrend(bwLog, today);
+  const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
+  const refWeight = trend.ready ? trend.avg : latest;
+
+  // pace: actual vs target, in display units
+  let pace = null;
+  if (trend.ready) {
+    const actual = monthly ? trend.pctPerMonth : trend.pctPerWeek;
+    if (phase.phase_type === "maintenance") {
+      pace = Math.abs(actual) <= 0.25 ? { ok: true, text: "Holding steady" }
+        : { ok: false, text: actual > 0 ? "Drifting up" : "Drifting down" };
+    } else {
+      const tol = monthly ? 0.25 : 0.2;
+      const diff = actual - targetPct;
+      const losing = phase.phase_type === "deficit";
+      if (Math.abs(diff) <= tol) pace = { ok: true, text: "On pace" };
+      else if (losing) pace = { ok: false, text: actual >= 0 ? "Not losing yet" : diff > 0 ? "Losing slower than target" : "Losing faster than target" };
+      else pace = { ok: false, text: actual <= 0 ? "Not gaining yet" : diff < 0 ? "Gaining slower than target" : "Gaining faster than target" };
+    }
+  }
+
+  // projected weight at the planned end, at the target pace
+  let projection = null;
+  if (refWeight && phase.planned_end_date && !prog.overrun && ratePct !== 0) {
+    const weeksToEnd = daysBetween(today, phase.planned_end_date) / 7;
+    if (weeksToEnd > 0) {
+      const end = refWeight * Math.pow(1 + ratePct / 100, weeksToEnd);
+      const by = parseISO(phase.planned_end_date).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      projection = `≈ ${end.toFixed(1)} ${WEIGHT_UNIT} by ${by} at target pace`;
+    }
+  }
+
+  const targetText = phase.phase_type === "maintenance"
+    ? "Target: hold weight (±0.25%/wk)"
+    : `Target: ${sign(targetPct, 2)}%/${per}` +
+      (refWeight ? ` (${sign((refWeight * targetPct) / 100, monthly ? 1 : 2)} ${WEIGHT_UNIT}/${per})` : "");
 
   return (
     <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
@@ -1676,8 +1788,8 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
           <div style={S.pcStatN}>{trend.ready ? trend.avg.toFixed(1) : "—"}</div>
           <div style={{ ...S.pcStatSub, color: trend.ready ? color : dim }}>
             {trend.ready
-              ? `${sign(trend.perWeek, 1)} / wk`
-              : `weigh-ins ${Math.min(trend.recentCount, TREND_MIN_WEIGHINS)}/${TREND_MIN_WEIGHINS} · ${Math.min(trend.priorCount, TREND_MIN_WEIGHINS)}/${TREND_MIN_WEIGHINS}`}
+              ? monthly ? `${sign(trend.perMonth, 1)} / mo` : `${sign(trend.perWeek, 1)} / wk`
+              : "trend not ready"}
           </div>
         </div>
         <div>
@@ -1692,6 +1804,32 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
           )}
         </div>
       </div>
+
+      {/* target rate and pace (cuts/maintenance per week, bulks per month) */}
+      <div style={S.pcTarget}>{targetText}</div>
+      {trend.ready ? (
+        pace && (
+          <div style={{ ...S.pcPace, color: pace.ok ? accent : "#ffb454" }}>
+            {pace.ok ? "●" : "▲"} {pace.text}
+            <span style={{ color: dim, fontWeight: 500 }}>
+              {" "}· actual {sign(monthly ? trend.pctPerMonth : trend.pctPerWeek, 2)}%/{per}
+            </span>
+          </div>
+        )
+      ) : (
+        <div style={S.pcNeed}>
+          A single weigh-in can swing 1–2 lb on water, salt or a big dinner, so it only
+          trusts an average once a 7-day window has at least {TREND_MIN_WEIGHINS} weigh-ins.
+          {monthly && " A bulk is judged over 4 weeks."}
+          <div style={S.pcNeedCount}>
+            This week {Math.min(trend.recentCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS} ·{" "}
+            {monthly
+              ? <>4 weeks ago {Math.min(trend.oldCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS}</>
+              : <>last week {Math.min(trend.priorCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS}</>}
+          </div>
+        </div>
+      )}
+      {projection && <div style={S.pcProj}>{projection}</div>}
 
       <div style={S.viHead}>
         <span>Training volume impact</span>
@@ -1891,7 +2029,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
 function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   const covering = phaseOnDate(dietPhases, day);
   const [mode, setMode] = useState(covering ? "view" : "new");
-  const blank = { presetId: "", start: day, weeks: "", openEnded: false };
+  const blank = { presetId: "", start: day, weeks: "", openEnded: false, rate: "" }; // rate "" = default
   const [form, setForm] = useState(blank);
   const [saving, setSaving] = useState(false);
   const typedPresets = presets.filter((p) => p.phase_type);
@@ -1899,7 +2037,9 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   const startForm = (row) => {
     if (row) {
       const prog = phaseProgress(row, row.start_date);
-      setForm({ presetId: row.phase_id, start: row.start_date, weeks: prog.plannedWeeks || "", openEnded: !row.planned_end_date });
+      const m = rateIsMonthly(row.phase_type);
+      const rate = row.target_rate_pct == null ? "" : String(roundRate(Number(row.target_rate_pct) * (m ? WEEKS_PER_MONTH : 1)).toFixed(2));
+      setForm({ presetId: row.phase_id, start: row.start_date, weeks: prog.plannedWeeks || "", openEnded: !row.planned_end_date, rate });
       setMode("edit");
     } else {
       setForm(blank);
@@ -1911,8 +2051,28 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   const weeksValue = form.weeks === "" ? defaultPhaseWeeks(preset) : Number(form.weeks);
   const plannedEnd = form.openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
 
+  // target rate, entered per week (cuts) or per month (bulks); stored per week
+  const monthly = preset ? rateIsMonthly(preset.phase_type) : false;
+  const rateUnit = monthly ? "%/month" : "%/week";
+  const defaultShown = preset ? defaultRatePct(preset.phase_type, preset.name) * (monthly ? WEEKS_PER_MONTH : 1) : 0;
+  const rateHint = !preset ? "" : preset.phase_type === "deficit"
+    ? "evidence range −0.5 to −1.0 %/week (mini-cuts up to ~−1.25)"
+    : preset.phase_type === "surplus"
+      ? "by training age: ~1–1.5 beginner · 0.5–1 intermediate · ≤0.5 advanced (%/month)"
+      : "";
+  const rateWeekly = () => {
+    if (!preset || preset.phase_type === "maintenance") return 0;
+    if (form.rate === "") return roundRate(defaultRatePct(preset.phase_type, preset.name));
+    const n = parseFloat(form.rate);
+    return isNaN(n) ? null : roundRate(monthly ? n / WEEKS_PER_MONTH : n);
+  };
+
   const save = async () => {
     if (!preset) return window.alert("pick a phase first");
+    const target_rate_pct = rateWeekly();
+    if (target_rate_pct == null || Math.abs(target_rate_pct) > 2) return window.alert("enter a target rate between −2 and 2 %/week");
+    if (preset.phase_type === "deficit" && target_rate_pct > 0) return window.alert("a cut's target rate should be negative (a loss)");
+    if (preset.phase_type === "surplus" && target_rate_pct < 0) return window.alert("a bulk's target rate should be positive (a gain)");
     setSaving(true);
     const ok = await onEdit((session) =>
       mode === "edit"
@@ -1920,8 +2080,9 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
             phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type,
             start_date: form.start, planned_end_date: plannedEnd,
             end_date: covering.end_date && covering.end_date < form.start ? null : covering.end_date,
+            target_rate_pct,
           })
-        : sbInsertDietPhase(session, { preset, start_date: form.start, planned_end_date: plannedEnd })
+        : sbInsertDietPhase(session, { preset, start_date: form.start, planned_end_date: plannedEnd, target_rate_pct })
     );
     setSaving(false);
     if (ok) setMode("view");
@@ -1947,6 +2108,11 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
           {covering.planned_end_date ? ` · planned to ${covering.planned_end_date}` : " · open-ended"}
           {covering.end_date ? ` · ended ${covering.end_date}` : ""}
         </div>
+        <div style={{ fontSize: 12, color: dim, marginTop: 2 }}>
+          {covering.phase_type === "maintenance"
+            ? "target: hold weight"
+            : `target: ${(phaseRatePct(covering) * (rateIsMonthly(covering.phase_type) ? WEEKS_PER_MONTH : 1)).toFixed(2).replace("-", "−")} ${rateIsMonthly(covering.phase_type) ? "%/month" : "%/week"}`}
+        </div>
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => startForm(covering)}>edit</button>
           <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => startForm(null)}>new phase here</button>
@@ -1963,7 +2129,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
       </div>
       <select
         value={form.presetId}
-        onChange={(e) => setForm({ ...form, presetId: e.target.value, weeks: "" })}
+        onChange={(e) => setForm({ ...form, presetId: e.target.value, weeks: "", rate: "" })}
         style={{ ...S.fInput, width: "100%", marginBottom: 8 }}
       >
         <option value="" disabled>phase…</option>
@@ -1993,6 +2159,24 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
       <div style={{ fontSize: 12, color: dim, marginBottom: 10 }}>
         {plannedEnd ? `planned end: ${plannedEnd}` : "no planned end — runs until the next phase starts"}
       </div>
+      {preset && preset.phase_type !== "maintenance" && (
+        <>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+            <label style={{ fontSize: 12, color: dim, width: 64 }}>target</label>
+            <input
+              type="number" step="0.05" inputMode="decimal"
+              placeholder={defaultShown.toFixed(2)}
+              value={form.rate}
+              onChange={(e) => setForm({ ...form, rate: e.target.value })}
+              style={{ ...S.fInput, flex: 1 }}
+            />
+            <span style={{ fontSize: 12, color: dim, width: 64 }}>{rateUnit}</span>
+          </div>
+          <div style={{ fontSize: 11, color: dim, marginBottom: 10 }}>
+            {form.rate === "" ? `default ${defaultShown.toFixed(2)} ${rateUnit} · ` : ""}{rateHint}
+          </div>
+        </>
+      )}
       <div style={{ display: "flex", gap: 8 }}>
         <button style={{ ...S.primaryBtn, flex: 1 }} onClick={save} disabled={saving}>{saving ? "saving…" : "save"}</button>
         {(covering || mode === "edit") && (
@@ -2070,6 +2254,7 @@ function Slot({
   onUncheck,
   onLogQty,
   onLogRemove,
+  onQuickAdd,   // logged meals only: one-off entry for this day
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const planTotal = useMemo(() => {
@@ -2190,6 +2375,11 @@ function Slot({
         );
       })}
 
+      {logged && (
+        <button style={S.addEntry} onClick={onQuickAdd}>
+          + quick add
+        </button>
+      )}
       <button style={S.addEntry} onClick={onAdd}>
         + food
       </button>
@@ -2211,6 +2401,7 @@ function LogEntry({ row, onQty, onRemove }) {
     if (n !== Number(row.qty)) onQty(n);
   };
   const m = scale({ p: Number(row.p), f: Number(row.f), c: Number(row.c), cal: Number(row.cal) }, Number(row.qty));
+  const calOnly = row.p == null && row.f == null && row.c == null;
   return (
     <div style={S.entry}>
       <input
@@ -2224,9 +2415,93 @@ function LogEntry({ row, onQty, onRemove }) {
         style={S.qty}
       />
       <span style={S.entryUnit}>{row.unit}</span>
-      <span style={S.entryName}>{row.food_name}</span>
-      <span style={S.entryMacros}>{r0(m.cal)} · {r1(m.p)}P</span>
+      <span style={S.entryName}>
+        {row.food_name}
+        {row.source === "quick" && <span style={S.recipeTag}>quick</span>}
+      </span>
+      <span style={S.entryMacros}>{r0(m.cal)} · {calOnly ? "cal only" : `${r1(m.p)}P`}</span>
       <button style={S.xBtnSm} onClick={onRemove} aria-label={`remove ${row.food_name} from log`}>✕</button>
+    </div>
+  );
+}
+
+/* Quick Add — log a one-off to this day without creating a saved food
+   (MacroFactor-style). Calories fill in from the macros (4/4/9) until
+   edited by hand; calories alone are allowed, leaving the macros unknown.
+   "Save to my foods" also adds it to the library for next time. */
+function QuickAddModal({ onClose, onLog }) {
+  const [name, setName] = useState("");
+  const [mac, setMac] = useState({ p: "", c: "", f: "" });
+  const [calText, setCalText] = useState("");
+  const [calTouched, setCalTouched] = useState(false);
+  const [saveFood, setSaveFood] = useState(false);
+  const [err, setErr] = useState("");
+
+  const num = (v) => (v === "" ? null : parseFloat(v));
+  const p = num(mac.p), c = num(mac.c), f = num(mac.f);
+  const anyMacro = p != null || c != null || f != null;
+  const autoCal = Math.round(4 * (p || 0) + 4 * (c || 0) + 9 * (f || 0));
+  const calShown = calTouched ? calText : anyMacro ? String(autoCal) : "";
+  const cal = parseFloat(calShown);
+
+  const submit = () => {
+    if ([p, c, f].some((v) => v != null && (isNaN(v) || v < 0))) return setErr("macros must be 0 or more");
+    if (isNaN(cal) || cal <= 0) return setErr("enter calories, or some macros");
+    if (saveFood && !name.trim()) return setErr("give it a name to save it to your foods");
+    onLog({
+      name: name.trim(),
+      // calories-only: macros unknown (null); otherwise blanks count as 0
+      p: anyMacro ? p || 0 : null, f: anyMacro ? f || 0 : null, c: anyMacro ? c || 0 : null,
+      cal, saveFood,
+    });
+  };
+
+  return (
+    <div style={S.modalWrap} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+        <div style={S.modalHead}>
+          <strong style={{ fontSize: 13, letterSpacing: 1 }}>QUICK ADD</strong>
+          <button style={S.xBtn} onClick={onClose}>✕</button>
+        </div>
+        <div style={S.editorBody}>
+          <label style={S.fLabel}>Name (optional)</label>
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} style={S.fInput} placeholder="e.g. restaurant burrito" />
+          <label style={S.fLabel}>Macros (optional)</label>
+          <div style={S.macroGrid}>
+            {[["Protein", "p"], ["Carbs", "c"], ["Fat", "f"]].map(([lab, k]) => (
+              <div key={k}>
+                <span style={S.macroMini}>{lab} (g)</span>
+                <input
+                  type="number" step="1" inputMode="decimal" value={mac[k]}
+                  onChange={(e) => { setMac({ ...mac, [k]: e.target.value }); setErr(""); }}
+                  style={S.fInput}
+                />
+              </div>
+            ))}
+            <div>
+              <span style={S.macroMini}>Calories{calTouched || !anyMacro ? "" : " (auto)"}</span>
+              <input
+                type="number" step="1" inputMode="decimal" value={calShown}
+                onChange={(e) => { setCalText(e.target.value); setCalTouched(true); setErr(""); }}
+                style={S.fInput}
+              />
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: dim, marginTop: 6 }}>
+            {anyMacro ? "Calories fill in from your macros — edit to override." : "Only know the calories? Enter just those; protein stays unknown."}
+          </div>
+          <label style={S.checkRow}>
+            <input type="checkbox" checked={saveFood} onChange={(e) => setSaveFood(e.target.checked)} />
+            <span>also save to my foods</span>
+          </label>
+          {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 6 }}>{err}</div>}
+        </div>
+        <div style={S.editorFoot}>
+          <div style={{ flex: 1 }} />
+          <button style={S.ghostBtn} onClick={onClose}>cancel</button>
+          <button style={S.primaryBtn} onClick={submit}>log it</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3478,6 +3753,9 @@ const S = {
   viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeedCount: { color: text, fontSize: 12, fontWeight: 600, marginTop: 6 },
+  pcTarget: { color: text, fontSize: 12, marginTop: 10, opacity: 0.85 },
+  pcPace: { fontSize: 12, fontWeight: 700, marginTop: 8 },
+  pcProj: { color: dim, fontSize: 12, marginTop: 6 },
   phaseChip: {
     display: "inline-block", border: "1px solid", borderRadius: 999, padding: "3px 10px",
     fontSize: 11, fontWeight: 700, letterSpacing: 0.3, marginBottom: 10,
