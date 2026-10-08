@@ -3588,11 +3588,6 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
         </button>
       </div>
       <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} targetHistory={targetHistory} />
-      <p style={S.note}>
-        These are your macro targets. Each day in Plan uses the targets of the
-        diet phase it falls in (a Cut day uses Cut). To give one weekday its own
-        targets, such as a Saturday refeed, pick it in that day's TARGETS menu.
-      </p>
       {phases.map((p) => (
         <div key={p.id} style={S.phaseCard}>
           <input
