@@ -236,7 +236,8 @@ const VOLUME_SCALE = 20; // the bar runs -20%..+20%
    whatever phase actually comes next (skipping maintenance doesn't skip
    the fatigue). RP Diet 2.0: maintenance after a cut ≈ ⅔–1× the cut's
    length (⅔ used); after a bulk 2–4 wk (Israetel / McDonald — practitioner
-   advice, no trial behind it; 3 used); none after a mini-cut, which goes
+   advice, no trial behind it; scaled by the bulk's length: up to 8 wk → 2,
+   up to 16 → 3, longer → 4); none after a mini-cut, which goes
    straight back into the bulk. The same lengths are what the calendar
    suggests and auto-adds as a Maintenance phase. Back-to-back blocks of
    the same type chain: a cut that starts while the last one is still
@@ -244,13 +245,13 @@ const VOLUME_SCALE = 20; // the bar runs -20%..+20%
    next fade (a short maintenance between two cuts works as a diet break —
    a pause, not a reset). */
 const CUT_MAINTENANCE_FRACTION = 2 / 3;
-const BULK_MAINTENANCE_WEEKS = 3;
+const bulkMaintenanceWeeks = (bulkWeeks) => (bulkWeeks <= 8 ? 2 : bulkWeeks <= 16 ? 3 : 4);
 const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "");
 
 // weeks of maintenance RP suggests after a block (null = none)
 function suggestedMaintenanceWeeks(type, name, blockWeeks) {
   if (type === "deficit") return isMiniCut(type, name) ? null : Math.max(1, Math.round(blockWeeks * CUT_MAINTENANCE_FRACTION));
-  if (type === "surplus") return BULK_MAINTENANCE_WEEKS;
+  if (type === "surplus") return bulkMaintenanceWeeks(blockWeeks);
   return null;
 }
 
@@ -325,7 +326,7 @@ function dietPhaseContext(rows, iso, bwLog) {
     const prev = carry[b.type];
     const level = held(b, own(b, b.end).level);
     const weeks = blockWeeksTo(b, b.end) + (residual(prev, b.start) > 0 ? prev.weeks : 0);
-    const fadeWeeks = b.type === "deficit" ? weeks * CUT_MAINTENANCE_FRACTION : BULK_MAINTENANCE_WEEKS;
+    const fadeWeeks = b.type === "deficit" ? weeks * CUT_MAINTENANCE_FRACTION : bulkMaintenanceWeeks(weeks);
     carry[b.type] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name };
   }
   return null;
@@ -360,11 +361,11 @@ function transitionNote(rows, start, type, weeks, exclude = []) {
   if (!prev || !prev.maintenanceWeeks || prev.type === type) return null;
   if (type === "maintenance") {
     if (weeks && weeks < prev.maintenanceWeeks) {
-      return `RP suggests ~${prev.maintenanceWeeks} wk of maintenance after a ${blockLabel(prev)}. Shorter is fine — the training effect still fades on that schedule.`;
+      return `Suggested: ~${prev.maintenanceWeeks} wk of maintenance after a ${blockLabel(prev)}. Shorter is fine — the training effect still fades on that schedule.`;
     }
     return null;
   }
-  return `RP suggests ~${prev.maintenanceWeeks} wk of maintenance after a ${blockLabel(prev)} before a ${type === "deficit" ? "cut" : "bulk"}. Your call — the training effect still fades on that schedule.`;
+  return `Suggested: ~${prev.maintenanceWeeks} wk of maintenance after a ${blockLabel(prev)} before a ${type === "deficit" ? "cut" : "bulk"}. Your call — the training effect still fades on that schedule.`;
 }
 
 // Average daily calorie target for a phase's week (weekday overrides such
@@ -2207,7 +2208,17 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   const prevBlock = precedingBlock(dietPhases, form.start, editingId ? [editingId] : []);
   const defaultWeeks = preset?.phase_type === "maintenance" ? prevBlock?.maintenanceWeeks || null : defaultPhaseWeeks(preset);
   const weeksValue = form.weeks === "" ? defaultWeeks : Number(form.weeks);
+  // the maintenance a cut/bulk gets after it, and the phase (other than
+  // that maintenance) already planned to start by then, if any
+  const typedBlock = preset && (preset.phase_type === "deficit" || preset.phase_type === "surplus") && !isMiniCut(preset.phase_type, preset.name);
   const plannedEnd = form.openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
+  const autoMaint = typedBlock && plannedEnd ? suggestedMaintenanceWeeks(preset.phase_type, preset.name, weeksValue) : null;
+  const ownMaint = mode === "edit" ? followingMaintenance(dietPhases, covering) : null;
+  const blockedBy = autoMaint
+    ? [...dietPhases]
+        .filter((r) => r.id !== editingId && r !== ownMaint && r.start_date > form.start && r.start_date <= addDaysISO(plannedEnd, 1))
+        .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0] || null
+    : null;
 
   // target rate, entered per week (cuts) or per month (bulks); stored per week
   const monthly = preset ? rateIsMonthly(preset.phase_type) : false;
@@ -2273,6 +2284,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
 
   if (mode === "view" && covering) {
     const prog = phaseProgress(covering, day);
+    const viewNote = transitionNote(dietPhases, covering.start_date, covering.phase_type, prog.plannedWeeks, [covering.id]);
     return (
       <div style={{ ...S.phaseCard, marginTop: 12 }}>
         <div style={{ fontSize: 11, color: dim, letterSpacing: 1 }}>{dayLabel.toUpperCase()}</div>
@@ -2289,6 +2301,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
             ? "target: hold weight"
             : `target: ${(phaseRatePct(covering) * (rateIsMonthly(covering.phase_type) ? WEEKS_PER_MONTH : 1)).toFixed(2).replace("-", "−")} ${rateIsMonthly(covering.phase_type) ? "%/month" : "%/week"}`}
         </div>
+        {viewNote && <div style={{ fontSize: 12, color: PHASE_COLORS[covering.phase_type], marginTop: 6 }}>{viewNote}</div>}
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => startForm(covering)}>edit</button>
           <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => startForm(null)}>new phase here</button>
@@ -2334,8 +2347,10 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
       </div>
       <div style={{ fontSize: 12, color: dim, marginBottom: 10 }}>
         {plannedEnd ? `planned end: ${plannedEnd}` : "no planned end — runs until the next phase starts"}
-        {preset && plannedEnd && (preset.phase_type === "deficit" || preset.phase_type === "surplus") && !isMiniCut(preset.phase_type, preset.name)
-          ? ` · then ~${suggestedMaintenanceWeeks(preset.phase_type, preset.name, weeksValue)} wk maintenance is added after it (unless something's already planned)`
+        {autoMaint
+          ? blockedBy
+            ? ` · ${blockedBy.phase_name} is already planned right after, so no maintenance is added (suggested: ~${autoMaint} wk)`
+            : ` · then ~${autoMaint} wk maintenance is added after it`
           : ""}
       </div>
       {preset && transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : []) && (
