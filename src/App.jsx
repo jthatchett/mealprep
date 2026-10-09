@@ -215,7 +215,8 @@ const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46
    through the phase you are (planned length, else 12 weeks) and scales
    with how fast weight is actually moving (1%/wk loss or 0.5%/wk gain =
    full effect; half until a weight trend exists). Maintenance phases
-   don't shift anything. Bounded by RP's ranges, so it tops out near ±17%. */
+   don't shift anything. Bounded by RP's ranges, so it tops out near ±17% —
+   except a mini-cut, which takes ~30% off (see MINICUT_VOLUME_CUT). */
 const VOLUME_MRV = {
   // muscle: [baseline MRV, RP low, RP high]
   chest: [20, 16, 24], horizontalBack: [23, 20, 26], verticalBack: [23, 20, 26],
@@ -228,7 +229,7 @@ const VOLUME_FULL_EFFECT_WEEKS = 12;
 const VOLUME_DEFICIT_FULL_RATE = 0.01;
 const VOLUME_SURPLUS_FULL_RATE = 0.005;
 const VOLUME_DEFAULT_STRENGTH = 0.5;
-const VOLUME_SCALE = 20; // the bar runs -20%..+20%
+const VOLUME_SCALE = 30; // the bar runs -30%..+30% (a mini-cut reaches -30%)
 
 /* ---------- phase transitions ----------
    A cut's or bulk's effect on training volume doesn't stop the day the
@@ -247,6 +248,18 @@ const VOLUME_SCALE = 20; // the bar runs -20%..+20%
 const CUT_MAINTENANCE_FRACTION = 2 / 3;
 const bulkMaintenanceWeeks = (bulkWeeks) => (bulkWeeks <= 8 ? 2 : bulkWeeks <= 16 ? 3 : 4);
 const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "");
+
+/* Mini-cuts cut volume harder than the landmark ranges allow a regular
+   cut to: ~30% off MRV and the volume target, from week 1 rather than
+   building across the phase (a 2–6 wk crash phase has no time to build).
+   Coaching guidance for mini-cuts puts training at ~⅔–¾ of usual volume;
+   30% is the middle of that — a starting point to refine. Scaled by the
+   weight trend like any phase, but assumed at full strength until a trend
+   exists, since a mini-cut's target pace (~1%/wk) is the full-effect rate. */
+const MINICUT_VOLUME_CUT = 0.3;
+// a row's kind: deficit / surplus / maintenance, with mini-cuts their own
+const phaseKind = (r) => (isMiniCut(r.phase_type, r.phase_name) ? "minicut" : r.phase_type);
+const KIND_LABEL = { deficit: "cut", surplus: "bulk", minicut: "mini-cut" };
 
 // weeks of maintenance RP suggests after a block (null = none)
 function suggestedMaintenanceWeeks(type, name, blockWeeks) {
@@ -267,8 +280,8 @@ function phaseBlocks(rows) {
     let end = r.end_date || null;
     if (next && (!end || end >= next.start_date)) end = addDaysISO(next.start_date, -1);
     const last = blocks[blocks.length - 1];
-    if (last && last.type === r.phase_type) { last.rows.push(r); last.end = end; }
-    else blocks.push({ type: r.phase_type, name: r.phase_name, start: r.start_date, end, rows: [r] });
+    if (last && last.kind === phaseKind(r)) { last.rows.push(r); last.end = end; }
+    else blocks.push({ type: r.phase_type, kind: phaseKind(r), name: r.phase_name, start: r.start_date, end, rows: [r] });
   });
   return blocks;
 }
@@ -283,9 +296,10 @@ const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
 function dietPhaseContext(rows, iso, bwLog) {
   const phase = phaseOnDate(rows, iso);
   if (!phase) return null;
-  const strengthOn = (type, day) => {
+  const strengthOn = (type, day, kind) => {
     const trend = weightTrend(bwLog, day);
     const rate = trend.ready ? trend.pctPerWeek / 100 : null;
+    if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null };
     if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null };
     if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null };
     return { s: 0, estimated: rate === null };
@@ -296,47 +310,50 @@ function dietPhaseContext(rows, iso, bwLog) {
     const plannedEnd = (covering.find((r) => r.planned_end_date) || {}).planned_end_date || null;
     const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
     const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
-    const progress = Math.min(1, weeksIn / plannedWeeks);
-    const { s, estimated } = strengthOn(b.type, day);
+    const progress = b.kind === "minicut" ? 1 : Math.min(1, weeksIn / plannedWeeks);
+    const { s, estimated } = strengthOn(b.type, day, b.kind);
     return { progress, strength: s, estimated, level: progress * s };
   };
-  const carry = { deficit: null, surplus: null }; // { v, end, fadeDays, weeks }
+  const KINDS = ["deficit", "surplus", "minicut"];
+  const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name }
   const residual = (c, day) => (c ? c.v * Math.max(0, 1 - daysBetween(c.end, day) / c.fadeDays) : 0);
   // a block of the same type as one still fading picks up where that one
   // stood when it started (held, not decaying) until its own effect passes it
-  const held = (b, level) => Math.min(1, Math.max(residual(carry[b.type], b.start), level));
+  const held = (b, level) => Math.min(1, Math.max(residual(carry[b.kind], b.start), level));
   for (const b of phaseBlocks(rows)) {
     if (b.start > iso) break;
-    const typed = b.type === "deficit" || b.type === "surplus";
+    const typed = KINDS.includes(b.kind);
     if (b.end === null || b.end >= iso) {
       const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, level: 0 };
-      const levels = { deficit: residual(carry.deficit, iso), surplus: residual(carry.surplus, iso) };
-      if (typed) levels[b.type] = held(b, o.level);
+      const levels = Object.fromEntries(KINDS.map((k) => [k, residual(carry[k], iso)]));
+      if (typed) levels[b.kind] = held(b, o.level);
       // the earlier phase still fading (the larger, if both are)
       let fading = null;
-      for (const t of ["deficit", "surplus"]) {
+      for (const t of KINDS) {
         const c = carry[t], r = residual(c, iso);
-        if (t !== b.type && r > 0.005 && (!fading || r > fading.level)) {
+        if (t !== b.kind && r > 0.005 && (!fading || r > fading.level)) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, ...levels, fading };
     }
     if (!typed) continue;
-    const prev = carry[b.type];
+    const prev = carry[b.kind];
     const level = held(b, own(b, b.end).level);
     const weeks = blockWeeksTo(b, b.end) + (residual(prev, b.start) > 0 ? prev.weeks : 0);
-    const fadeWeeks = b.type === "deficit" ? weeks * CUT_MAINTENANCE_FRACTION : bulkMaintenanceWeeks(weeks);
-    carry[b.type] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name };
+    const fadeWeeks = b.kind === "surplus" ? bulkMaintenanceWeeks(weeks) : weeks * CUT_MAINTENANCE_FRACTION;
+    carry[b.kind] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name };
   }
   return null;
 }
 
 // Average MRV change across muscles, in % (negative = less volume).
 function volumeImpactPct(ctx) {
-  if (!ctx || (!ctx.deficit && !ctx.surplus)) return 0;
+  if (!ctx || (!ctx.deficit && !ctx.surplus && !ctx.minicut)) return 0;
+  // a cut still fading under a mini-cut doesn't stack on it: the larger
+  // of the two reductions applies
   const shifts = Object.values(VOLUME_MRV).map(([base, lo, hi]) =>
-    (-(base - lo) * ctx.deficit + (hi - base) * ctx.surplus) / base);
+    (-Math.max((base - lo) * ctx.deficit, base * MINICUT_VOLUME_CUT * ctx.minicut) + (hi - base) * ctx.surplus) / base);
   return (shifts.reduce((a, b) => a + b, 0) / shifts.length) * 100;
 }
 
@@ -2000,8 +2017,8 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
         {impactR === 0
           ? "Volume ceilings are at your normal baseline."
           : `Recovery ceilings are ~${Math.abs(impactR)}% ${impactR < 0 ? "below" : "above"} baseline right now. RepReport applies this to your mesos automatically.`}
-        {ctx?.estimated && ctx.strength > 0 ? " Estimated at half strength until the weight trend is ready." : ""}
-        {ctx?.fading ? ` The last ${ctx.fading.type === "deficit" ? "cut" : "bulk"} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
+        {ctx?.estimated && ctx.strength > 0 ? (ctx.kind === "minicut" ? " Assumed at full strength until the weight trend is ready." : " Estimated at half strength until the weight trend is ready.") : ""}
+        {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
       </div>
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
     </div>
