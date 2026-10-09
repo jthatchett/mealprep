@@ -400,6 +400,50 @@ function phaseCalories(phaseRow, presets, week) {
   return { avg, pct, baseOnly: followed.target.cal, isMaintenance: followed === maint };
 }
 
+/* ---------- target history ----------
+   Each macro-target preset's values by the date they took effect
+   (target_history table), so a past day is measured against the target it
+   had THEN. A row dated BASELINE_DATE is the value when tracking began. */
+const BASELINE_DATE = "1970-01-01";
+const sameTarget = (a, b) => !!a && !!b && ["p", "f", "c", "cal"].every((k) => Number(a[k]) === Number(b[k]));
+
+// presets with each target as it was on `date` (today and later: as now)
+function presetsAsOf(presets, history, date) {
+  if (!history?.length || !date || date >= todayISO()) return presets;
+  return presets.map((p) => {
+    let best = null;
+    for (const h of history) {
+      if (h.preset_id === p.id && h.effective_date <= date && (!best || h.effective_date > best.effective_date)) best = h;
+    }
+    return best ? { ...p, target: { p: Number(best.p), f: Number(best.f), c: Number(best.c), cal: Number(best.cal) } } : p;
+  });
+}
+
+async function sbLoadTargetHistory(session) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/target_history?select=preset_id,effective_date,p,f,c,cal&user_id=eq.${session.user.id}&order=effective_date.asc`,
+    { headers: sbHeaders(session) }
+  );
+  if (!res.ok) throw new Error("Failed to load target history: " + res.status);
+  return res.json();
+}
+
+// one row per preset per day — a second change the same day replaces the first
+async function sbUpsertTargetHistory(session, rows) {
+  if (!rows.length) return;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/target_history?on_conflict=user_id,preset_id,effective_date`, {
+    method: "POST",
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify(rows.map((r) => ({ ...r, user_id: session.user.id }))),
+  });
+  if (!res.ok) throw new Error("Failed to record target change: " + res.status);
+}
+
+const historyRow = (preset, effective_date) => ({
+  preset_id: preset.id, effective_date,
+  p: Number(preset.target.p) || 0, f: Number(preset.target.f) || 0, c: Number(preset.target.c) || 0, cal: Number(preset.target.cal) || 0,
+});
+
 function sbHeaders(session, extra) {
   return { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}`, ...extra };
 }
@@ -998,6 +1042,11 @@ export default function App() {
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwLog, setBwLog] = useState([]);             // last 14 days of weigh-ins, oldest first
   const [intake, setIntake] = useState({});           // food log rows by date (loaded on demand)
+  const [targetHistory, setTargetHistory] = useState([]); // target_history rows, oldest first
+  // latest history for the save path (its closure can be a render behind), and
+  // whether it loaded — never record against a history we failed to read
+  const historyRef = useRef({ loaded: false, rows: [] });
+  useEffect(() => { historyRef.current.rows = targetHistory; }, [targetHistory]);
   const [intakeError, setIntakeError] = useState(null);
   const [showBwModal, setShowBwModal] = useState(false);
   const [sideLoadError, setSideLoadError] = useState(null); // diet phase / weigh-in load failed — shown as a banner
@@ -1045,10 +1094,65 @@ export default function App() {
       const updatedAt = await sbSaveAppData(session, data, savedRef.current.updatedAt);
       savedRef.current = { updatedAt, json };
       dbg("saved to supabase — foods:" + data.foods?.length + " phases:" + data.phases?.length);
+      recordTargetChanges(data.phases || []);
     });
     saveChainRef.current = run.catch(() => {}); // a failed save mustn't block the next
     return run;
   };
+
+  // After a save: compare each preset with its latest history row and
+  // date-stamp any target that differs (a new preset gets its baseline).
+  // Compared against history, not the previous save, so paths without a
+  // previous copy (e.g. "keep mine") can't overwrite real baselines. Never
+  // blocks the save; a failure shows a banner.
+  const recordTargetChanges = async (next) => {
+    if (!historyRef.current.loaded) return;
+    const today = todayISO();
+    const rows = [];
+    for (const p of next) {
+      let latest = null;
+      for (const h of historyRef.current.rows) {
+        if (h.preset_id === p.id && (!latest || h.effective_date > latest.effective_date)) latest = h;
+      }
+      if (!latest) rows.push(historyRow(p, BASELINE_DATE));
+      else if (!sameTarget(latest, p.target)) rows.push(historyRow(p, today));
+    }
+    if (!rows.length) return;
+    try {
+      await sbUpsertTargetHistory(session, rows);
+      const key = (r) => r.preset_id + "|" + r.effective_date;
+      const merged = new Map(historyRef.current.rows.map((r) => [key(r), r]));
+      rows.forEach((r) => merged.set(key(r), r));
+      const all = [...merged.values()].sort((a, b) => (a.effective_date < b.effective_date ? -1 : 1));
+      historyRef.current.rows = all;
+      setTargetHistory(all);
+    } catch (e) {
+      dbg("target history FAILED: " + e.message);
+      setSaveError("target change saved, but its history wasn't recorded — " + e.message);
+    }
+  };
+
+  // Load target history once data is loaded; any preset with no history yet
+  // gets a baseline row with its current values (tracking starts now).
+  useEffect(() => {
+    if (!loaded || !session || !store) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        let rows = await sbLoadTargetHistory(session);
+        const missing = (store.phases || []).filter((p) => !rows.some((r) => r.preset_id === p.id));
+        if (missing.length) {
+          const base = missing.map((p) => historyRow(p, BASELINE_DATE));
+          await sbUpsertTargetHistory(session, base);
+          rows = [...base, ...rows];
+        }
+        if (!cancelled) { historyRef.current = { loaded: true, rows }; setTargetHistory(rows); }
+      } catch (e) {
+        dbg("target history load FAILED: " + e.message); // past days fall back to current targets
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [loaded, session]);
 
   const signOut = async () => {
     // Flush any pending (debounced) edit before tearing down. Without this, the 400ms save
@@ -1080,6 +1184,8 @@ export default function App() {
     dailyCheckDayRef.current = null;
     setIntake({});
     setIntakeError(null);
+    setTargetHistory([]);
+    historyRef.current = { loaded: false, rows: [] };
   };
 
   // retry a failed load without a full page reload
@@ -1492,6 +1598,7 @@ export default function App() {
             setSelectedDate={setSelectedDate}
             dietPhases={dietPhases}
             bwLog={bwLog}
+            targetHistory={targetHistory}
             loggable={loggable}
             intakeRows={loggable ? intake[selectedDate] || null : null}
             intakeError={intakeError}
@@ -1510,6 +1617,7 @@ export default function App() {
             dietPhase={dietPhase}
             dietPhases={dietPhases}
             bwLog={bwLog}
+            targetHistory={targetHistory}
             onSwitchPhase={switchPhase}
             onOpenCalendar={() => { setTab("plan"); setShowMonth(true); }}
           />
@@ -1533,13 +1641,15 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, onOpenMonth }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, onOpenMonth }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
   const dietPhaseOnDay = phaseOnDate(dietPhases, selectedDate);
-  const followed = dietPhaseOnDay ? phases.find((p) => p.id === dietPhaseOnDay.phase_id) || null : null;
-  const override = day.targetId ? phases.find((p) => p.id === day.targetId) || null : null;
+  // targets as they were on the selected date (a past day keeps its old numbers)
+  const dated = presetsAsOf(phases, targetHistory, selectedDate);
+  const followed = dietPhaseOnDay ? dated.find((p) => p.id === dietPhaseOnDay.phase_id) || null : null;
+  const override = day.targetId ? dated.find((p) => p.id === day.targetId) || null : null;
   const phase = override || followed;
   const followLabel = followed
     ? `${followed.name} (diet phase)`
@@ -3559,7 +3669,7 @@ function BodyweightModal({ onSave, onSkip }) {
 // the same type are one block (same rule the volume math uses). Each shows
 // its calories vs Maintenance and the training volume impact it had
 // reached by its last day (or today, for the current one).
-function PhaseHistory({ dietPhases, bwLog, presets }) {
+function PhaseHistory({ dietPhases, bwLog, presets, targetHistory }) {
   const today = todayISO();
   const sorted = [...(dietPhases || [])]
     .filter((r) => r.start_date <= today)
@@ -3580,7 +3690,7 @@ function PhaseHistory({ dietPhases, bwLog, presets }) {
     b.current = !nextStart && (!lastRow.end_date || lastRow.end_date >= today);
     b.weeks = Math.max(1, Math.round((daysBetween(b.start, end) + 1) / 7));
     b.name = b.rows[0].phase_name;
-    b.cals = phaseCalories(lastRow, presets, null);
+    b.cals = phaseCalories(lastRow, presetsAsOf(presets, targetHistory, b.end), null); // targets as of the block's last day
     b.impact = Math.round(volumeImpactPct(dietPhaseContext(dietPhases, end, bwLog)));
   });
   if (!blocks.length) return null;
@@ -3617,7 +3727,32 @@ function PhaseHistory({ dietPhases, bwLog, presets }) {
   );
 }
 
-function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, onSwitchPhase, onOpenCalendar }) {
+// "Changed Oct 8 · was 2,352 kcal · 155P 52F 316C" under a preset, newest
+// change first; nothing while the preset still has its starting values
+function TargetChanges({ rows }) {
+  const changes = rows.filter((r) => r.effective_date !== BASELINE_DATE)
+    .sort((a, b) => (a.effective_date < b.effective_date ? 1 : -1));
+  if (!changes.length) return null;
+  const all = [...rows].sort((a, b) => (a.effective_date < b.effective_date ? -1 : 1));
+  const fmt = (iso) => parseISO(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return (
+    <div style={S.tcBox}>
+      {changes.slice(0, 3).map((ch) => {
+        const i = all.findIndex((r) => r.effective_date === ch.effective_date);
+        const was = all[i - 1];
+        return (
+          <div key={ch.effective_date}>
+            Changed {fmt(ch.effective_date)}
+            {was ? ` · was ${Math.round(Number(was.cal)).toLocaleString()} kcal · ${r0(was.p)}P ${r0(was.f)}F ${r0(was.c)}C` : ""}
+          </div>
+        );
+      })}
+      <div style={{ opacity: 0.8, marginTop: 2 }}>Past days in Plan keep the targets they had at the time.</div>
+    </div>
+  );
+}
+
+function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, onSwitchPhase, onOpenCalendar }) {
   const prog = phaseProgress(dietPhase, todayISO());
   const set = (id, key, sub, val) =>
     setPhases((prev) =>
@@ -3668,12 +3803,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, onSwitchPhase
           plan phases on the calendar
         </button>
       </div>
-      <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} />
-      <p style={S.note}>
-        These are your macro targets. Each day in Plan uses the targets of the
-        diet phase it falls in (a Cut day uses Cut). To give one weekday its own
-        targets, such as a Saturday refeed, pick it in that day's TARGETS menu.
-      </p>
+      <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} targetHistory={targetHistory} />
       {phases.map((p) => (
         <div key={p.id} style={S.phaseCard}>
           <input
@@ -3699,6 +3829,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, onSwitchPhase
               </div>
             ))}
           </div>
+          <TargetChanges rows={(targetHistory || []).filter((h) => h.preset_id === p.id)} />
           <button
             style={S.xBtnSm}
             onClick={() =>
@@ -3969,6 +4100,7 @@ const S = {
   viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeedCount: { color: text, fontSize: 12, fontWeight: 600, marginTop: 6 },
+  tcBox: { color: dim, fontSize: 11, lineHeight: 1.5, margin: "8px 0 6px" },
   pcTarget: { color: text, fontSize: 12, marginTop: 10, opacity: 0.85 },
   pcPace: { fontSize: 12, fontWeight: 700, marginTop: 8 },
   pcProj: { color: dim, fontSize: 12, marginTop: 6 },
