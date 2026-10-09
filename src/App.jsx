@@ -56,6 +56,46 @@ function sbRefreshToken(refresh_token) {
   return sbAuthFetch("token?grant_type=refresh_token", { refresh_token });
 }
 
+/* ---------- 18+ / terms consent ----------
+   Stored on the auth user's user_metadata, shared with RepReport (same
+   Supabase project, same user), so confirming in either app covers both.
+   Mirrors RepReport's src/supabase.js — bump TERMS_VERSION in both apps
+   together, and every user is asked again on their next open. */
+const TERMS_VERSION = "2026-10-09";
+const PRIVACY_URL = "https://repreport.app/privacy.html";
+const TERMS_URL = "https://repreport.app/terms.html";
+
+function hasConsent(user) {
+  const meta = user?.user_metadata;
+  return !!meta?.age_confirmed_at && meta?.terms_version === TERMS_VERSION;
+}
+
+// PUT /auth/v1/user merges `data` into user_metadata and returns the updated
+// user. Retries once with a refreshed token. Resolves to the new session.
+async function sbRecordConsent(session) {
+  const put = (s) => fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${s.access_token}`,
+    },
+    body: JSON.stringify({
+      data: { age_confirmed_at: new Date().toISOString(), terms_version: TERMS_VERSION },
+    }),
+  });
+  let sess = session;
+  let res = await put(sess);
+  if (res.status === 401 || res.status === 403) {
+    const refreshed = await sbRefreshToken(sess.refresh_token);
+    sess = { access_token: refreshed.access_token, refresh_token: refreshed.refresh_token, user: refreshed.user || sess.user };
+    res = await put(sess);
+  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || "couldn't save your confirmation");
+  return { ...sess, user: data };
+}
+
 // fetch the user's app_data row (updated_at is the version a save must match)
 async function sbLoadAppData(session) {
   const res = await fetch(
@@ -965,6 +1005,72 @@ function AuthScreen({ onAuthed }) {
 }
 
 /* ============================================================
+   CONSENT SCREEN — 18+ and terms, once per account (shared with RepReport)
+   ============================================================ */
+function ConsentScreen({ session, onConfirmed, onSignOut }) {
+  const [isAdult, setIsAdult] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      onConfirmed(await sbRecordConsent(session));
+    } catch (e) {
+      setErr(e.message);
+      setBusy(false);
+    }
+  };
+
+  const checkRow = { display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12, cursor: "pointer", fontSize: 14, lineHeight: 1.5, color: "#e8efe9" };
+  const box = { marginTop: 3, accentColor: "#46e6a0", flexShrink: 0 };
+  const link = { color: "#46e6a0" };
+  return (
+    <div style={{...S.app, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"}}>
+      <Style />
+      <div style={{...S.modal, maxWidth: 360, position:"static", margin:"0 16px"}}>
+        <div style={{padding: 24}}>
+          <div style={S.brand}>
+            <span style={S.brandMark}>◢</span>
+            <div>
+              <div style={S.brandName}>MEAL&nbsp;PREP</div>
+              <div style={S.brandSub}>before you start</div>
+            </div>
+          </div>
+          <p style={S.note}>
+            Meal Prep and RepReport give general nutrition and training suggestions, not medical
+            advice. One confirmation covers both apps.
+          </p>
+          <label style={checkRow}>
+            <input type="checkbox" checked={isAdult} onChange={(e) => setIsAdult(e.target.checked)} style={box} />
+            <span>I'm 18 or older.</span>
+          </label>
+          <label style={{...checkRow, marginBottom: 16}}>
+            <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} style={box} />
+            <span>
+              I agree to the <a href={TERMS_URL} target="_blank" rel="noreferrer" style={link}>Terms of Use</a> and
+              have read the <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={link}>Privacy Policy</a>.
+            </span>
+          </label>
+          <button style={{...S.primaryBtn, width:"100%", marginBottom: 8}} onClick={submit} disabled={!isAdult || !agreed || busy}>
+            {busy ? "saving…" : "continue"}
+          </button>
+          <button style={{...S.ghostBtn, width:"100%"}} onClick={onSignOut}>
+            sign out{session.user?.email ? ` (${session.user.email})` : ""}
+          </button>
+          {err && <div style={{...S.verifyBanner, marginTop: 12}}>{err}</div>}
+          <p style={{...S.note, fontSize: 12, marginTop: 16, marginBottom: 0}}>
+            Under 18? Please don't use the apps. Email us and we'll delete this account.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    APP
    ============================================================ */
 export default function App() {
@@ -1375,6 +1481,13 @@ export default function App() {
   // not signed in — show auth screen
   if (!session) {
     return <AuthScreen onAuthed={handleAuthed} />;
+  }
+
+  // shown once per account (and again whenever TERMS_VERSION changes),
+  // including accounts created before this gate existed. Data may load
+  // behind it, but the app doesn't render, so nothing is edited or saved.
+  if (!hasConsent(session.user)) {
+    return <ConsentScreen session={session} onConfirmed={handleAuthed} onSignOut={signOut} />;
   }
 
   // load failed — recoverable error screen. Critical: this must come BEFORE the SYNCING
@@ -3794,6 +3907,14 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog }) {
         </label>
       </div>
       {msg && <div style={S.verifyBanner}>{msg}</div>}
+
+      <p style={{...S.note, marginTop: 8, marginBottom: 8}}>
+        Legal (covers Meal Prep and RepReport) · general nutrition suggestions, not medical advice.
+      </p>
+      <div style={S.dataRow}>
+        <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>privacy policy</a>
+        <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>terms of use</a>
+      </div>
 
       {showExport && (
         <div style={{marginTop:12}}>
