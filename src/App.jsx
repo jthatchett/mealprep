@@ -230,37 +230,141 @@ const VOLUME_SURPLUS_FULL_RATE = 0.005;
 const VOLUME_DEFAULT_STRENGTH = 0.5;
 const VOLUME_SCALE = 20; // the bar runs -20%..+20%
 
-// The phase's context on a date: back-to-back phases of the same type are
-// one block (the clock runs from the first); the planned end comes from
-// the covering phase, else the nearest earlier one in the block.
-function dietPhaseContext(rows, iso, bwLog) {
+/* ---------- phase transitions ----------
+   A cut's or bulk's effect on training volume doesn't stop the day the
+   phase does — it fades out over the maintenance RP recommends after it,
+   whatever phase actually comes next (skipping maintenance doesn't skip
+   the fatigue). RP Diet 2.0: maintenance after a cut ≈ ⅔–1× the cut's
+   length (⅔ used); after a bulk 2–4 wk (Israetel / McDonald — practitioner
+   advice, no trial behind it; 3 used); none after a mini-cut, which goes
+   straight back into the bulk. The same lengths are what the calendar
+   suggests and auto-adds as a Maintenance phase. Back-to-back blocks of
+   the same type chain: a cut that starts while the last one is still
+   fading holds the effect where it stood and counts both cuts toward the
+   next fade (a short maintenance between two cuts works as a diet break —
+   a pause, not a reset). */
+const CUT_MAINTENANCE_FRACTION = 2 / 3;
+const BULK_MAINTENANCE_WEEKS = 3;
+const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "");
+
+// weeks of maintenance RP suggests after a block (null = none)
+function suggestedMaintenanceWeeks(type, name, blockWeeks) {
+  if (type === "deficit") return isMiniCut(type, name) ? null : Math.max(1, Math.round(blockWeeks * CUT_MAINTENANCE_FRACTION));
+  if (type === "surplus") return BULK_MAINTENANCE_WEEKS;
+  return null;
+}
+
+// Rows grouped into blocks: consecutive rows of the same type are one
+// block (the clock runs from the first). Each block runs until its last
+// row's end_date or the day before the next block starts, whichever is
+// first (end null = still running).
+function phaseBlocks(rows) {
   const sorted = [...(rows || [])].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
-  const idx = sorted.map((r) => r.start_date <= iso && (!r.end_date || r.end_date >= iso)).lastIndexOf(true);
-  if (idx === -1) return null;
-  const phase = sorted[idx];
-  let blockStart = phase.start_date;
-  let plannedEnd = phase.planned_end_date || null;
-  for (let i = idx - 1; i >= 0 && sorted[i].phase_type === phase.phase_type; i--) {
-    blockStart = sorted[i].start_date;
-    if (!plannedEnd && sorted[i].planned_end_date) plannedEnd = sorted[i].planned_end_date;
+  const blocks = [];
+  sorted.forEach((r, i) => {
+    const next = sorted[i + 1];
+    let end = r.end_date || null;
+    if (next && (!end || end >= next.start_date)) end = addDaysISO(next.start_date, -1);
+    const last = blocks[blocks.length - 1];
+    if (last && last.type === r.phase_type) { last.rows.push(r); last.end = end; }
+    else blocks.push({ type: r.phase_type, name: r.phase_name, start: r.start_date, end, rows: [r] });
+  });
+  return blocks;
+}
+
+// A block's weeks from its start to `iso` (inclusive)
+const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
+
+// The phase's context on a date: the covering phase and its own effect
+// (progress through the block × strength from the weight trend), plus
+// whatever an earlier cut or bulk still leaves behind. deficit / surplus
+// are the combined levels (0–1) the MRV shift uses.
+function dietPhaseContext(rows, iso, bwLog) {
+  const phase = phaseOnDate(rows, iso);
+  if (!phase) return null;
+  const strengthOn = (type, day) => {
+    const trend = weightTrend(bwLog, day);
+    const rate = trend.ready ? trend.pctPerWeek / 100 : null;
+    if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null };
+    if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null };
+    return { s: 0, estimated: rate === null };
+  };
+  // the block's own effect on a day inside it
+  const own = (b, day) => {
+    const covering = [...b.rows].reverse().filter((r) => r.start_date <= day);
+    const plannedEnd = (covering.find((r) => r.planned_end_date) || {}).planned_end_date || null;
+    const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
+    const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
+    const progress = Math.min(1, weeksIn / plannedWeeks);
+    const { s, estimated } = strengthOn(b.type, day);
+    return { progress, strength: s, estimated, level: progress * s };
+  };
+  const carry = { deficit: null, surplus: null }; // { v, end, fadeDays, weeks }
+  const residual = (c, day) => (c ? c.v * Math.max(0, 1 - daysBetween(c.end, day) / c.fadeDays) : 0);
+  // a block of the same type as one still fading picks up where that one
+  // stood when it started (held, not decaying) until its own effect passes it
+  const held = (b, level) => Math.min(1, Math.max(residual(carry[b.type], b.start), level));
+  for (const b of phaseBlocks(rows)) {
+    if (b.start > iso) break;
+    const typed = b.type === "deficit" || b.type === "surplus";
+    if (b.end === null || b.end >= iso) {
+      const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, level: 0 };
+      const levels = { deficit: residual(carry.deficit, iso), surplus: residual(carry.surplus, iso) };
+      if (typed) levels[b.type] = held(b, o.level);
+      // the earlier phase still fading (the larger, if both are)
+      let fading = null;
+      for (const t of ["deficit", "surplus"]) {
+        const c = carry[t], r = residual(c, iso);
+        if (t !== b.type && r > 0.005 && (!fading || r > fading.level)) {
+          fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
+        }
+      }
+      return { phase, type: b.type, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, ...levels, fading };
+    }
+    if (!typed) continue;
+    const prev = carry[b.type];
+    const level = held(b, own(b, b.end).level);
+    const weeks = blockWeeksTo(b, b.end) + (residual(prev, b.start) > 0 ? prev.weeks : 0);
+    const fadeWeeks = b.type === "deficit" ? weeks * CUT_MAINTENANCE_FRACTION : BULK_MAINTENANCE_WEEKS;
+    carry[b.type] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name };
   }
-  const weeksIn = Math.max(0, daysBetween(blockStart, iso) / 7);
-  const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(blockStart, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
-  const progress = Math.min(1, weeksIn / plannedWeeks);
-  const trend = weightTrend(bwLog, iso);
-  const rate = trend.ready ? trend.pctPerWeek / 100 : null;
-  let strength = 0;
-  if (phase.phase_type === "deficit") strength = rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0;
-  if (phase.phase_type === "surplus") strength = rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0;
-  return { phase, type: phase.phase_type, blockStart, progress, strength, estimated: rate === null };
+  return null;
 }
 
 // Average MRV change across muscles, in % (negative = less volume).
 function volumeImpactPct(ctx) {
-  if (!ctx || !ctx.strength || (ctx.type !== "deficit" && ctx.type !== "surplus")) return 0;
+  if (!ctx || (!ctx.deficit && !ctx.surplus)) return 0;
   const shifts = Object.values(VOLUME_MRV).map(([base, lo, hi]) =>
-    (ctx.type === "deficit" ? -(base - lo) : hi - base) * ctx.progress * ctx.strength / base);
+    (-(base - lo) * ctx.deficit + (hi - base) * ctx.surplus) / base);
   return (shifts.reduce((a, b) => a + b, 0) / shifts.length) * 100;
+}
+
+// The block that ended the day before `iso` (a cut/bulk the phase starting
+// that day would follow), ignoring rows in `exclude` — with its length and
+// the maintenance RP suggests after it.
+function precedingBlock(rows, iso, exclude = []) {
+  const kept = (rows || []).filter((r) => !exclude.includes(r.id) && r.start_date < iso);
+  const prevDay = addDaysISO(iso, -1);
+  const b = phaseBlocks(kept).find((x) => x.start <= prevDay && (x.end === null || x.end >= prevDay));
+  if (!b) return null;
+  const weeks = Math.max(1, Math.round(blockWeeksTo(b, prevDay)));
+  return { type: b.type, name: b.name, weeks, maintenanceWeeks: suggestedMaintenanceWeeks(b.type, b.name, weeks) };
+}
+
+const blockLabel = (b) => `${b.weeks}-wk ${isMiniCut(b.type, b.name) ? "mini-cut" : b.type === "deficit" ? "cut" : "bulk"}`;
+
+// A one-line, never-blocking note when a phase starting on `start` skips
+// or shortens the maintenance RP suggests after the block before it.
+function transitionNote(rows, start, type, weeks, exclude = []) {
+  const prev = precedingBlock(rows, start, exclude);
+  if (!prev || !prev.maintenanceWeeks || prev.type === type) return null;
+  if (type === "maintenance") {
+    if (weeks && weeks < prev.maintenanceWeeks) {
+      return `RP suggests ~${prev.maintenanceWeeks} wk of maintenance after a ${blockLabel(prev)}. Shorter is fine — the training effect still fades on that schedule.`;
+    }
+    return null;
+  }
+  return `RP suggests ~${prev.maintenanceWeeks} wk of maintenance after a ${blockLabel(prev)} before a ${type === "deficit" ? "cut" : "bulk"}. Your call — the training effect still fades on that schedule.`;
 }
 
 // Average daily calorie target for a phase's week (weekday overrides such
@@ -326,29 +430,75 @@ async function sbDeleteDietPhase(session, id) {
   if (!res.ok) throw new Error("Failed to delete phase: " + res.status);
 }
 
+// The Maintenance preset a suggested maintenance phase uses
+const maintenancePreset = (presets) =>
+  (presets || []).find((p) => p.id === "phase-maintenance") || (presets || []).find((p) => p.phase_type === "maintenance") || null;
+
+// After a cut or bulk with a planned end, add the maintenance RP suggests
+// (see suggestedMaintenanceWeeks) starting the next day — unless something
+// is already planned to start by then. It's an ordinary phase: edit or
+// delete it like any other. `weeks` overrides the suggested length.
+async function sbAddMaintenanceAfter(session, rows, row, presets, weeks) {
+  const maint = maintenancePreset(presets);
+  if (!maint || !row.planned_end_date || (row.phase_type !== "deficit" && row.phase_type !== "surplus")) return;
+  const start = addDaysISO(row.planned_end_date, 1);
+  const prev = precedingBlock([...(rows || []).filter((r) => r.id !== row.id), { ...row, end_date: row.planned_end_date }], start);
+  const len = weeks || prev?.maintenanceWeeks;
+  if (!len) return;
+  const next = (rows || [])
+    .filter((r) => r.id !== row.id && r.start_date > row.start_date)
+    .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0];
+  if (next && next.start_date <= start) return;
+  let planned = addDaysISO(start, len * 7 - 1);
+  if (next && planned >= next.start_date) planned = addDaysISO(next.start_date, -1);
+  await sbInsertDietPhase(session, { preset: maint, start_date: start, planned_end_date: planned });
+}
+
+// The maintenance phase planned right after `row` (start = its planned end
+// + 1) that hasn't started yet — the one sbAddMaintenanceAfter added.
+function followingMaintenance(rows, row) {
+  if (!row?.planned_end_date) return null;
+  const start = addDaysISO(row.planned_end_date, 1);
+  return (rows || []).find((r) => r.phase_type === "maintenance" && r.start_date === start && r.start_date > todayISO()) || null;
+}
+
 // quick switch: the phase covering today ends and `preset` starts today.
 // A phase that itself started today is changed in place instead (closing
 // it "yesterday" would end it before it began). Planned phases later in
 // the calendar are left alone — the new phase's planned end stops the day
 // before the next one starts, else uses the default length.
-async function sbSwitchDietPhase(session, preset, rows) {
+async function sbSwitchDietPhase(session, preset, rows, presets) {
   const today = todayISO();
   const current = phaseOnDate(rows, today);
+  // the maintenance planned after the current phase was for the plan being
+  // cut short — drop it; what follows is decided below
+  const stale = followingMaintenance(rows, current);
+  if (stale) {
+    await sbDeleteDietPhase(session, stale.id);
+    rows = rows.filter((r) => r.id !== stale.id);
+  }
   const next = [...(rows || [])]
     .filter((r) => r.start_date > today)
     .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0];
-  const weeks = defaultPhaseWeeks(preset);
+  // maintenance after a cut/bulk runs the length RP suggests for the block
+  // actually done; otherwise the phase's usual default
+  const weeks = preset.phase_type === "maintenance"
+    ? precedingBlock(rows.map((r) => (r === current && current.start_date !== today ? { ...r, end_date: addDaysISO(today, -1) } : r)), today, current?.start_date === today ? [current.id] : [])?.maintenanceWeeks || null
+    : defaultPhaseWeeks(preset);
   let planned = weeks ? addDaysISO(today, weeks * 7 - 1) : null;
   if (next && (!planned || planned >= next.start_date)) planned = addDaysISO(next.start_date, -1);
+  const fields = { phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type, start_date: today, planned_end_date: planned };
   if (current && current.start_date === today) {
     await sbUpdateDietPhase(session, current.id, {
-      phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type, planned_end_date: planned,
-      target_rate_pct: roundRate(defaultRatePct(preset.phase_type, preset.name)),
+      ...fields, target_rate_pct: roundRate(defaultRatePct(preset.phase_type, preset.name)),
     });
-    return;
+  } else {
+    if (current) await sbUpdateDietPhase(session, current.id, { end_date: addDaysISO(today, -1) });
+    await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
   }
-  if (current) await sbUpdateDietPhase(session, current.id, { end_date: addDaysISO(today, -1) });
-  await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
+  if (!isMiniCut(preset.phase_type, preset.name)) {
+    await sbAddMaintenanceAfter(session, rows.filter((r) => r !== current || current.start_date !== today), { id: null, ...fields }, presets);
+  }
 }
 
 // fetch every weigh-in, oldest first — today's prompt check, the two-week
@@ -1081,7 +1231,7 @@ export default function App() {
 
   const switchPhase = async (preset) => {
     try {
-      await sbSwitchDietPhase(session, preset, dietPhases);
+      await sbSwitchDietPhase(session, preset, dietPhases, phases);
       await reloadDietPhases();
     } catch (e) {
       dbg("switch phase FAILED: " + e.message);
@@ -1715,6 +1865,8 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
   const cals = phaseCalories(phase, presets || [], week);
   const ctx = dietPhaseContext(dietPhases, today, bwLog);
   const impact = volumeImpactPct(ctx);
+  // only while the last phase is still fading — after that it's history
+  const note = ctx?.fading ? transitionNote(dietPhases, phase.start_date, phase.phase_type, prog.plannedWeeks, [phase.id]) : null;
   const impactR = Math.round(impact);
   const markerPct = 50 + (Math.max(-VOLUME_SCALE, Math.min(VOLUME_SCALE, impact)) / VOLUME_SCALE) * 50;
   const impactColor = impactR < 0 ? PHASE_COLORS.deficit : impactR > 0 ? PHASE_COLORS.surplus : PHASE_COLORS.maintenance;
@@ -1848,7 +2000,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
           ? "Volume ceilings are at your normal baseline."
           : `Recovery ceilings are ~${Math.abs(impactR)}% ${impactR < 0 ? "below" : "above"} baseline right now. RepReport applies this to your mesos automatically.`}
         {ctx?.estimated && ctx.strength > 0 ? " Estimated at half strength until the weight trend is ready." : ""}
+        {ctx?.fading ? ` The last ${ctx.fading.type === "deficit" ? "cut" : "bulk"} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
       </div>
+      {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
     </div>
   );
 }
@@ -2048,7 +2202,11 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   };
 
   const preset = presets.find((p) => p.id === form.presetId) || null;
-  const weeksValue = form.weeks === "" ? defaultPhaseWeeks(preset) : Number(form.weeks);
+  const editingId = mode === "edit" ? covering?.id : null;
+  // maintenance right after a cut/bulk defaults to the length RP suggests
+  const prevBlock = precedingBlock(dietPhases, form.start, editingId ? [editingId] : []);
+  const defaultWeeks = preset?.phase_type === "maintenance" ? prevBlock?.maintenanceWeeks || null : defaultPhaseWeeks(preset);
+  const weeksValue = form.weeks === "" ? defaultWeeks : Number(form.weeks);
   const plannedEnd = form.openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
 
   // target rate, entered per week (cuts) or per month (bulks); stored per week
@@ -2074,16 +2232,34 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
     if (preset.phase_type === "deficit" && target_rate_pct > 0) return window.alert("a cut's target rate should be negative (a loss)");
     if (preset.phase_type === "surplus" && target_rate_pct < 0) return window.alert("a bulk's target rate should be positive (a gain)");
     setSaving(true);
-    const ok = await onEdit((session) =>
-      mode === "edit"
-        ? sbUpdateDietPhase(session, covering.id, {
-            phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type,
-            start_date: form.start, planned_end_date: plannedEnd,
-            end_date: covering.end_date && covering.end_date < form.start ? null : covering.end_date,
-            target_rate_pct,
-          })
-        : sbInsertDietPhase(session, { preset, start_date: form.start, planned_end_date: plannedEnd, target_rate_pct })
-    );
+    const ok = await onEdit(async (session) => {
+      const fields = { phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type, start_date: form.start, planned_end_date: plannedEnd };
+      let rows = dietPhases;
+      let keepWeeks = null;
+      if (mode === "edit") {
+        // the maintenance auto-added after this phase moves with it: same
+        // length if it was changed by hand, else the new suggestion
+        const old = followingMaintenance(dietPhases, covering);
+        if (old && old.planned_end_date !== null && (plannedEnd !== covering.planned_end_date || preset.phase_type !== covering.phase_type)) {
+          const oldPrev = precedingBlock(dietPhases, old.start_date, [old.id]);
+          const oldWeeks = Math.round((daysBetween(old.start_date, old.planned_end_date) + 1) / 7);
+          if (oldPrev?.maintenanceWeeks && oldWeeks !== oldPrev.maintenanceWeeks) keepWeeks = oldWeeks;
+          await sbDeleteDietPhase(session, old.id);
+          rows = rows.filter((r) => r.id !== old.id);
+        }
+        await sbUpdateDietPhase(session, covering.id, {
+          ...fields,
+          end_date: covering.end_date && covering.end_date < form.start ? null : covering.end_date,
+          target_rate_pct,
+        });
+        if (rows !== dietPhases || covering.planned_end_date !== plannedEnd) {
+          await sbAddMaintenanceAfter(session, rows, { ...covering, ...fields }, presets, keepWeeks);
+        }
+      } else {
+        await sbInsertDietPhase(session, { preset, ...fields, target_rate_pct });
+        await sbAddMaintenanceAfter(session, rows, { id: null, ...fields }, presets);
+      }
+    });
     setSaving(false);
     if (ok) setMode("view");
   };
@@ -2146,7 +2322,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
         <input
           type="number" min="1" inputMode="numeric"
           disabled={form.openEnded}
-          placeholder={defaultPhaseWeeks(preset) ? String(defaultPhaseWeeks(preset)) : "—"}
+          placeholder={defaultWeeks ? String(defaultWeeks) : "—"}
           value={form.weeks}
           onChange={(e) => setForm({ ...form, weeks: e.target.value })}
           style={{ ...S.fInput, flex: 1 }}
@@ -2158,7 +2334,15 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
       </div>
       <div style={{ fontSize: 12, color: dim, marginBottom: 10 }}>
         {plannedEnd ? `planned end: ${plannedEnd}` : "no planned end — runs until the next phase starts"}
+        {preset && plannedEnd && (preset.phase_type === "deficit" || preset.phase_type === "surplus") && !isMiniCut(preset.phase_type, preset.name)
+          ? ` · then ~${suggestedMaintenanceWeeks(preset.phase_type, preset.name, weeksValue)} wk maintenance is added after it (unless something's already planned)`
+          : ""}
       </div>
+      {preset && transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : []) && (
+        <div style={{ fontSize: 12, color: PHASE_COLORS[preset.phase_type], marginBottom: 10 }}>
+          {transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : [])}
+        </div>
+      )}
       {preset && preset.phase_type !== "maintenance" && (
         <>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
