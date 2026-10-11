@@ -56,6 +56,17 @@ function sbRefreshToken(refresh_token) {
   return sbAuthFetch("token?grant_type=refresh_token", { refresh_token });
 }
 
+// true if the access token has expired or will within `bufferSeconds`
+function tokenExpiringSoon(access_token, bufferSeconds = 300) {
+  try {
+    const b64 = access_token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const { exp } = JSON.parse(atob(b64 + "===".slice((b64.length + 3) % 4)));
+    return !exp || Date.now() / 1000 >= exp - bufferSeconds;
+  } catch {
+    return true; // can't read it — refreshing is the safe choice
+  }
+}
+
 // fetch the user's app_data row (updated_at is the version a save must match)
 async function sbLoadAppData(session) {
   const res = await fetch(
@@ -1188,7 +1199,76 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [session, reloadNonce]);
+  // Keyed on WHO is signed in, not the session object: a token refresh swaps
+  // the object every hour, and re-running the full load on each refresh could
+  // replace an edit that hasn't saved yet.
+  }, [session?.user?.id, reloadNonce]);
+
+  // Coming back to the app. A home-screen app on iOS isn't reloaded when it's
+  // reopened — it resumes, sometimes days later — so the launch-time token
+  // refresh and data load go stale: the token expires after ~1 hour (every
+  // save then fails) and edits made on another device never show up. On
+  // returning to the foreground, and every few minutes while open:
+  //   1. refresh the token if it's about to expire
+  //   2. if the saved data changed elsewhere, reload it — silently when
+  //      nothing here is unsaved, otherwise via the existing conflict banner
+  const latestRef = useRef({});
+  latestRef.current = { session, store, loaded, loadError, saveConflict };
+  const refreshingRef = useRef(null);
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    let cancelled = false;
+
+    const freshSession = async () => {
+      const current = latestRef.current.session;
+      if (!current || !tokenExpiringSoon(current.access_token)) return current;
+      if (!refreshingRef.current) {
+        // one refresh at a time — refresh tokens are single-use
+        refreshingRef.current = sbRefreshToken(current.refresh_token)
+          .then((r) => {
+            const next = { access_token: r.access_token, refresh_token: r.refresh_token, user: r.user || current.user };
+            try { localStorage.setItem(SESSION_KEY, JSON.stringify(next)); } catch { /* storage blocked */ }
+            if (!cancelled) setSession(next);
+            return next;
+          })
+          .catch((e) => { dbg("token refresh FAILED: " + e.message); return current; })
+          .finally(() => { refreshingRef.current = null; });
+      }
+      return refreshingRef.current;
+    };
+
+    const syncFromServer = async (sess) => {
+      const { store: st, loaded: ld, loadError: le, saveConflict: sc } = latestRef.current;
+      if (!ld || le || sc || !st) return;
+      let row;
+      try { row = await sbLoadAppData(sess); } catch { return; } // offline etc. — try again next time
+      if (cancelled || !row || row.updated_at === savedRef.current.updatedAt) return;
+      const unsaved = JSON.stringify(latestRef.current.store) !== savedRef.current.json;
+      dbg("data changed on another device — " + (unsaved ? "conflict" : "reloading"));
+      if (unsaved) setSaveConflict(true);
+      else {
+        setIntake({}); // re-read the food log too
+        setReloadNonce((n) => n + 1);
+      }
+    };
+
+    const onForeground = async () => {
+      if (document.visibilityState !== "visible") return;
+      const sess = await freshSession();
+      if (!cancelled && sess) await syncFromServer(sess);
+    };
+
+    document.addEventListener("visibilitychange", onForeground);
+    window.addEventListener("pageshow", onForeground);
+    const timer = setInterval(() => { freshSession(); }, 4 * 60 * 1000);
+    freshSession();
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onForeground);
+      window.removeEventListener("pageshow", onForeground);
+      clearInterval(timer);
+    };
+  }, [session?.user?.id]);
 
   // save — to Supabase, triggered by store changes (debounced)
   // Paused while a conflict is unresolved, so this device can't keep writing
