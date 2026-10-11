@@ -793,6 +793,15 @@ const SEED_RECIPES = [
 
 const SEED_ALL = [...SEED_FOODS, ...SEED_RECIPES];
 
+// phase_type is what the diet-phase calendar keys on — presets without one
+// never show up in its "phase…" picker, so every seeded preset needs it.
+const SEED_PHASE_TYPES = {
+  "phase-minicut": "deficit",
+  "phase-cut": "deficit",
+  "phase-maintenance": "maintenance",
+  "phase-bulk": "surplus",
+  "phase-weekend": "deficit",
+};
 const SEED_PHASES = [
   ph("Mini-cut",       155, 42, 226, 1902, "phase-minicut"),
   ph("Cut",            155, 52, 316, 2352, "phase-cut"),
@@ -801,7 +810,7 @@ const SEED_PHASES = [
   ph("Weekend/Refeed", 126, 90, 422, 3002, "phase-weekend"),
 ];
 function ph(name, p, f, c, cal, stableId) {
-  return { id: stableId || uid(), name, target: { p, f, c, cal } };
+  return { id: stableId || uid(), name, phase_type: SEED_PHASE_TYPES[stableId], target: { p, f, c, cal } };
 }
 
 function uid() {
@@ -1159,7 +1168,10 @@ export default function App() {
           const idRemap = {};
           loadedPhases = loadedPhases.map((p) => {
             const stableId = nameToStableId[p.name];
-            if (stableId && p.id !== stableId) { idRemap[p.id] = stableId; return { ...p, id: stableId }; }
+            if (stableId && p.id !== stableId) { idRemap[p.id] = stableId; p = { ...p, id: stableId }; }
+            // Accounts seeded before presets carried a phase_type have none, so
+            // the diet-phase picker showed no options. Fill in the seed's type.
+            if (!p.phase_type && SEED_PHASE_TYPES[p.id]) p = { ...p, phase_type: SEED_PHASE_TYPES[p.id] };
             return p;
           });
 
