@@ -719,6 +719,172 @@ function monthlyWeightTrend(log, today) {
   return { ready: true, avg: now, perMonth, pctPerMonth: (perMonth / before) * 100 };
 }
 
+/* ---------- maintenance estimate + weekly check-in ----------
+   MacroFactor-style: estimate maintenance from logged intake and the
+   weight trend, then suggest calories that hit the phase's target rate.
+   All pure functions; the app supplies the data. */
+const KCAL_PER_LB = 3500;             // standard approximation for a pound of body-weight change
+const EST_WINDOW_DAYS = 21;           // data window behind each estimate
+const EST_MIN_INCLUDED = 10;          // complete days needed in the window
+const EST_MIN_WEIGHINS = 8;           // weigh-in days needed in the window
+const EST_STEP = 0.3;                 // each check-in moves 30% toward the new data…
+const EST_MAX_STEP = 150;             // …and never more than ±150 kcal
+const CHECKIN_MAX_CHANGE = 250;       // a check-in moves daily calories at most ±250
+const TREND_ALPHA = 0.1;              // smoothing for the trend-weight line
+const lbToKg = (lb) => lb / 2.2046;
+
+// A weight for every day from the first weigh-in to `to`: days between
+// weigh-ins are filled in linearly; past the last weigh-in it's held.
+function dailyWeights(log, to) {
+  const pts = (log || []).map((r) => ({ d: r.date, w: Number(r.weight) })).filter((p) => p.w > 0 && p.d <= to)
+    .sort((a, b) => (a.d < b.d ? -1 : 1));
+  const out = {};
+  if (!pts.length) return out;
+  let i = 0;
+  for (let d = pts[0].d; d <= to; d = addDaysISO(d, 1)) {
+    while (i + 1 < pts.length && pts[i + 1].d <= d) i++;
+    const a = pts[i], b = pts[i + 1];
+    out[d] = b ? a.w + (b.w - a.w) * (daysBetween(a.d, d) / daysBetween(a.d, b.d)) : a.w;
+  }
+  return out;
+}
+
+// Smoothed trend weight (shown to the user): an exponential moving average
+// (10% per day) over the daily weights, which takes out water-weight noise.
+function trendSeries(log, to) {
+  const daily = dailyWeights(log, to);
+  const out = {};
+  let trend = null;
+  for (const [d, w] of Object.entries(daily)) {
+    trend = trend == null ? w : trend + TREND_ALPHA * (w - trend);
+    out[d] = trend;
+  }
+  return out;
+}
+
+// Rate of weight change (lb/day) over a window: a least-squares straight
+// line through the daily weights. Robust to day-to-day noise, and unlike the
+// smoothed trend it doesn't lag behind a steady loss or gain.
+function slopePerDay(daily, start, end) {
+  const xs = [], ys = [];
+  for (let d = start, k = 0; d <= end; d = addDaysISO(d, 1), k++) if (daily[d] != null) { xs.push(k); ys.push(daily[d]); }
+  if (xs.length < 2) return null;
+  const mx = xs.reduce((a, b) => a + b, 0) / xs.length, my = ys.reduce((a, b) => a + b, 0) / ys.length;
+  let num = 0, den = 0;
+  xs.forEach((x, i) => { num += (x - mx) * (ys[i] - my); den += (x - mx) ** 2; });
+  return den ? num / den : null;
+}
+
+// Which days count: an explicit choice wins; otherwise a day counts if
+// anything was logged. intakeByDate: { iso: kcal }, statusByDate: { iso: bool }
+function dayIncluded(iso, intakeByDate, statusByDate) {
+  if (statusByDate && iso in statusByDate) return statusByDate[iso] && (intakeByDate[iso] || 0) > 0;
+  return (intakeByDate[iso] || 0) > 0;
+}
+
+// Unsmoothed estimate from the last 21 days (ending yesterday — today
+// isn't over): average intake on counted days, minus the energy of the
+// weight change (straight-line rate through the window's weights).
+// raw = null when there isn't enough data yet.
+function rawMaintenance({ log, intakeByDate, statusByDate, today }) {
+  const end = addDaysISO(today, -1);
+  const start = addDaysISO(end, -(EST_WINDOW_DAYS - 1));
+  const days = [];
+  for (let d = start; d <= end; d = addDaysISO(d, 1)) days.push(d);
+  const included = days.filter((d) => dayIncluded(d, intakeByDate, statusByDate));
+  const weighIns = new Set((log || []).filter((r) => r.date >= start && r.date <= end && Number(r.weight) > 0).map((r) => r.date)).size;
+  const daily = dailyWeights(log, end);
+  const covered = days.filter((d) => daily[d] != null).length;
+  const trend = trendSeries(log, end);
+  const base = { includedDays: included.length, weighInDays: weighIns, trendWeight: trend[end] ?? null };
+  const lbPerDay = covered >= 14 ? slopePerDay(daily, start, end) : null;
+  if (included.length < EST_MIN_INCLUDED || weighIns < EST_MIN_WEIGHINS || lbPerDay == null) return { ...base, raw: null };
+  const avgIntake = included.reduce((s, d) => s + intakeByDate[d], 0) / included.length;
+  return { ...base, raw: avgIntake - lbPerDay * KCAL_PER_LB, avgIntake, lbPerWeek: lbPerDay * 7 };
+}
+
+// This check-in's estimate: move part of the way from the last one (or the
+// starting guess) toward the new data, capped per week.
+function nextEstimate(prior, raw) {
+  if (raw == null) return prior;
+  const step = Math.max(-EST_MAX_STEP, Math.min(EST_MAX_STEP, EST_STEP * (raw - prior)));
+  return prior + step;
+}
+
+// Macro split for a calorie target (research basis in the plan):
+//  protein: never cut; raised to the phase floor if below it
+//           (cut ≥2 g/kg bodyweight — Helms 2014; otherwise ≥1.6 g/kg — Morton 2018)
+//  fat:     kept, but never under 20% of calories (Helms 2014: 15–30%)
+//  carbs:   take the rest
+function splitMacros({ cal, current, phaseType, weightLb }) {
+  const floorP = weightLb ? Math.round(lbToKg(weightLb) * (phaseType === "deficit" ? 2.0 : 1.6)) : 0;
+  const p = Math.max(Math.round(current.p), floorP);
+  const f = Math.max(Math.round(current.f), Math.round((0.2 * cal) / 9));
+  const c = Math.max(0, Math.round((cal - 4 * p - 9 * f) / 4));
+  return { p, f, c, cal: Math.round(cal), proteinRaised: p > Math.round(current.p), fatRaised: f > Math.round(current.f) };
+}
+
+// Suggested daily targets: estimate + the calories that produce the phase's
+// target rate, capped at ±250 from current; warns if it implies losing
+// faster than 1% of bodyweight a week (top of Helms 2014's range).
+function suggestTargets({ estimate, ratePctPerWeek, weightLb, current, phaseType }) {
+  const ideal = estimate + (weightLb ? ((ratePctPerWeek / 100) * weightLb * KCAL_PER_LB) / 7 : 0);
+  const cal = Math.max(current.cal - CHECKIN_MAX_CHANGE, Math.min(current.cal + CHECKIN_MAX_CHANGE, ideal));
+  const impliedPct = weightLb ? (((cal - estimate) * 7) / KCAL_PER_LB / weightLb) * 100 : 0;
+  return {
+    ...splitMacros({ cal, current, phaseType, weightLb }),
+    ideal: Math.round(ideal),
+    capped: Math.abs(cal - ideal) > 1,
+    tooFast: impliedPct < -1,
+    impliedPct,
+  };
+}
+
+async function sbLoadIntakeRange(session, from, to) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/intake_log?select=date,qty,cal&user_id=eq.${session.user.id}&date=gte.${from}&date=lte.${to}`,
+    { headers: sbHeaders(session) }
+  );
+  if (!res.ok) throw new Error("Failed to load food log: " + res.status);
+  return res.json();
+}
+
+async function sbLoadDayStatus(session, from) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/day_status?select=date,included&user_id=eq.${session.user.id}&date=gte.${from}`,
+    { headers: sbHeaders(session) }
+  );
+  if (!res.ok) throw new Error("Failed to load day status: " + res.status);
+  return res.json();
+}
+
+async function sbSetDayStatus(session, date, included) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/day_status?on_conflict=user_id,date`, {
+    method: "POST",
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify({ user_id: session.user.id, date, included }),
+  });
+  if (!res.ok) throw new Error("Failed to save day status: " + res.status);
+}
+
+async function sbLoadCheckins(session) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/checkins?select=week_start,estimate,estimate_raw,included_days,weigh_in_days,actual_rate_pct,target_rate_pct,preset_id,before,suggested,chosen,action,created_at&user_id=eq.${session.user.id}&order=week_start.asc`,
+    { headers: sbHeaders(session) }
+  );
+  if (!res.ok) throw new Error("Failed to load check-ins: " + res.status);
+  return res.json();
+}
+
+async function sbInsertCheckin(session, row) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/checkins`, {
+    method: "POST",
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+    body: JSON.stringify({ ...row, user_id: session.user.id }),
+  });
+  if (!res.ok) throw new Error("Failed to save check-in: " + res.status);
+}
+
 // log (or overwrite) today's bodyweight
 async function sbLogBodyweight(session, weight) {
   // on_conflict targets the (user_id, date) unique key — without it PostgREST
@@ -1269,9 +1435,15 @@ export default function App() {
 
   // Load target history once data is loaded; any preset with no history yet
   // gets a baseline row with its current values (tracking starts now).
+  // Once per signed-in user: a token refresh hands over a new session object
+  // and re-runs this effect, and two overlapping runs would both write the
+  // baseline.
+  const historyLoadForRef = useRef(null);
   useEffect(() => {
     if (!loaded || !session || !store) return;
-    let cancelled = false;
+    if (historyLoadForRef.current === session.user.id) return;
+    const uid = session.user.id;
+    historyLoadForRef.current = uid;
     (async () => {
       try {
         let rows = await sbLoadTargetHistory(session);
@@ -1281,12 +1453,14 @@ export default function App() {
           await sbUpsertTargetHistory(session, base);
           rows = [...base, ...rows];
         }
-        if (!cancelled) { historyRef.current = { loaded: true, rows }; setTargetHistory(rows); }
+        // not tied to this effect's cleanup: a token refresh re-runs the effect,
+        // and the guard above skips that re-run, so this result must land
+        if (historyLoadForRef.current === uid) { historyRef.current = { loaded: true, rows }; setTargetHistory(rows); }
       } catch (e) {
+        historyLoadForRef.current = null; // let a later run retry
         dbg("target history load FAILED: " + e.message); // past days fall back to current targets
       }
     })();
-    return () => { cancelled = true; };
   }, [loaded, session]);
 
   const signOut = async () => {
@@ -1321,6 +1495,10 @@ export default function App() {
     setIntakeError(null);
     setTargetHistory([]);
     historyRef.current = { loaded: false, rows: [] };
+    historyLoadForRef.current = null;
+    setRangeIntake({});
+    setDayStatus({});
+    setCheckins([]);
   };
 
   // retry a failed load without a full page reload
@@ -1608,6 +1786,115 @@ export default function App() {
 
   const retrySideLoad = () => { dailyCheckDayRef.current = null; setSideLoadError(null); setSideLoadNonce((n) => n + 1); };
 
+  /* ---------- weekly check-in data ----------
+     The last 5 weeks of logged calories (by date), which days count, and
+     past check-ins — loaded once signed in; the estimate and suggestion are
+     computed from them on every render, so they always match the log. */
+  const [rangeIntake, setRangeIntake] = useState({}); // { iso: kcal } from the server
+  const [dayStatus, setDayStatus] = useState({});     // { iso: included } — explicit choices only
+  const [checkins, setCheckins] = useState([]);
+  const [coachError, setCoachError] = useState(null);
+  useEffect(() => {
+    if (!loaded || !session) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const from = addDaysISO(todayISO(), -35);
+        const [rows, status, cks] = await Promise.all([
+          sbLoadIntakeRange(session, from, todayISO()),
+          sbLoadDayStatus(session, from),
+          sbLoadCheckins(session),
+        ]);
+        if (cancelled) return;
+        const byDate = {};
+        for (const r of rows) byDate[r.date] = (byDate[r.date] || 0) + Number(r.qty) * Number(r.cal);
+        setRangeIntake(byDate);
+        setDayStatus(Object.fromEntries(status.map((s) => [s.date, s.included])));
+        setCheckins(cks);
+        setCoachError(null);
+      } catch (e) {
+        dbg("check-in data load FAILED: " + e.message);
+        setCoachError(e.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [loaded, session]);
+
+  const coaching = useMemo(() => {
+    if (!store) return null;
+    const today = todayISO();
+    const weekStart = mondayOf(today);
+    // logged calories by date: what's on screen for dates already opened, else the range load
+    const intakeByDate = { ...rangeIntake };
+    for (const [d, rows] of Object.entries(intake)) intakeByDate[d] = intakeTotal(rows).cal;
+    const followed = dietPhase ? (store.phases || []).find((p) => p.id === dietPhase.phase_id) || null : null;
+    const maint = maintenancePreset(store.phases);
+    // a day logged at under half its target looks partial: left out unless you tick it
+    const statusByDate = { ...dayStatus };
+    const halfTarget = (followed?.target.cal || maint?.target.cal || 0) / 2;
+    for (const [d, kcal] of Object.entries(intakeByDate)) {
+      if (!(d in statusByDate) && kcal > 0 && kcal < halfTarget) statusByDate[d] = false;
+    }
+    const sorted = [...checkins].sort((a, b) => (a.week_start < b.week_start ? -1 : 1));
+    const thisWeek = sorted.find((c) => c.week_start === weekStart) || null;
+    const last = [...sorted].reverse().find((c) => c.week_start < weekStart) || null;
+    const startingGuess = Number(maint?.target.cal) || null;
+    const prior = last ? Number(last.estimate) : startingGuess;
+    const raw = rawMaintenance({ log: bwLog, intakeByDate, statusByDate, today });
+    const estimate = prior != null ? nextEstimate(prior, raw.raw) : null;
+    const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
+    const weightLb = raw.trendWeight ?? latest;
+    const wk = weightTrend(bwLog, today);
+    const ratePct = dietPhase ? phaseRatePct(dietPhase) : 0;
+    const suggestion = followed && estimate != null
+      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type })
+      : null;
+    // shown on the phase card: the latest check-in's estimate, else the starting guess
+    const shown = thisWeek || last;
+    return {
+      today, weekStart, intakeByDate, statusByDate, raw, estimate, prior, startingGuess, weightLb, ratePct,
+      actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
+      due: !!dietPhase && !!followed && !thisWeek,
+      card: shown ? { kcal: Number(shown.estimate), estimated: shown.estimate_raw != null || sorted.some((c) => c.estimate_raw != null) } : startingGuess ? { kcal: startingGuess, estimated: false } : null,
+    };
+  }, [store, rangeIntake, intake, dayStatus, checkins, bwLog, dietPhase]);
+
+  // tick / untick a day for the estimate (also used by the Plan day row)
+  const setDayIncluded = async (date, included) => {
+    setDayStatus((m) => ({ ...m, [date]: included }));
+    try { await sbSetDayStatus(session, date, included); }
+    catch (e) { dbg("day status FAILED: " + e.message); window.alert("Couldn't save that — " + e.message); }
+  };
+
+  // Record this week's check-in; Apply/Adjust also update the phase's targets
+  // (target history keeps the old values for past days).
+  const completeCheckin = async (action, chosen) => {
+    const c = coaching;
+    if (!c || !c.followed) return false;
+    const before = { ...c.followed.target };
+    try {
+      await sbInsertCheckin(session, {
+        week_start: c.weekStart, estimate: Math.round(c.estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw),
+        included_days: c.raw.includedDays, weigh_in_days: c.raw.weighInDays,
+        actual_rate_pct: c.actualPct == null ? null : roundRate(c.actualPct), target_rate_pct: roundRate(c.ratePct),
+        preset_id: c.followed.id, before,
+        suggested: c.suggestion ? { p: c.suggestion.p, f: c.suggestion.f, c: c.suggestion.c, cal: c.suggestion.cal } : null,
+        chosen: action === "keep" ? null : chosen, action,
+      });
+    } catch (e) {
+      dbg("check-in save FAILED: " + e.message);
+      window.alert("Couldn't save the check-in — " + e.message);
+      return false;
+    }
+    if (action !== "keep" && chosen) {
+      setPhases((prev) => prev.map((p) => (p.id === c.followed.id ? { ...p, target: { p: chosen.p, f: chosen.f, c: chosen.c, cal: chosen.cal } } : p)));
+    }
+    setCheckins((prev) => [...prev, {
+      week_start: c.weekStart, estimate: Math.round(c.estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw), action, chosen,
+    }]);
+    return true;
+  };
+
   // Food log for the date being viewed in Plan — only today and past dates
   // can be logged. Cached per date; every write re-reads that date so the
   // screen always shows what's actually stored.
@@ -1821,6 +2108,10 @@ export default function App() {
             intakeError={intakeError}
             onRetryIntake={() => reloadIntake(selectedDate)}
             intakeOps={intakeOps}
+            coaching={coaching}
+            coachError={coachError}
+            onSetDayIncluded={setDayIncluded}
+            onCompleteCheckin={completeCheckin}
             onOpenMonth={() => setShowMonth(true)}
           />
         )}
@@ -1858,7 +2149,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, onOpenMonth }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -1969,7 +2260,11 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
 
   return (
     <div>
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} />
+      {selectedDate === coaching?.today && coaching?.due && (
+        <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
+      )}
+      {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -2082,6 +2377,13 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
         </div>
       )}
 
+      {loggable && coaching && selectedDate < coaching.today && (coaching.intakeByDate[selectedDate] || 0) > 0 && (
+        <DayStatusRow
+          included={dayIncluded(selectedDate, coaching.intakeByDate, coaching.statusByDate)}
+          onChange={(v) => onSetDayIncluded(selectedDate, v)}
+        />
+      )}
+
       {picker && (
         <FoodPicker
           foods={foods}
@@ -2185,7 +2487,130 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
    over 2 weeks; bulks per month over 4 weeks, since a week of bulk gain
    is smaller than day-to-day noise.
    ============================================================ */
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
+/* ============================================================
+   DAY STATUS — on a past day with food logged: does it count toward the
+   maintenance estimate? A day you only partly logged would look like
+   eating less than you did, so you can leave it out.
+   ============================================================ */
+function DayStatusRow({ included, onChange }) {
+  return (
+    <div style={S.dsRow}>
+      <span>{included ? "✓ Counts toward your maintenance estimate" : "Left out of your estimate (partly logged)"}</span>
+      <button style={S.dsBtn} onClick={() => onChange(!included)}>{included ? "mark partial" : "count it"}</button>
+    </div>
+  );
+}
+
+/* ============================================================
+   WEEKLY CHECK-IN — shown on Plan (today) each Monday, or later that
+   week if missed, until done. 1) confirm which of last week's days
+   were fully logged; 2) see the maintenance estimate, your actual rate
+   vs the phase's target, and the suggested targets; 3) Apply, Adjust
+   (edit first) or Keep current. Every decision is saved.
+   ============================================================ */
+function CheckInCard({ c, onToggleDay, onComplete }) {
+  const [adjusting, setAdjusting] = useState(false);
+  const [edit, setEdit] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const s = c.suggestion;
+  const cur = c.followed.target;
+  const fmtDay = (iso) => parseISO(iso).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const days = Array.from({ length: 7 }, (_, i) => addDaysISO(c.today, -(i + 1)));
+  const needDays = Math.max(0, EST_MIN_INCLUDED - c.raw.includedDays);
+  const needWeigh = Math.max(0, EST_MIN_WEIGHINS - c.raw.weighInDays);
+  const signed = (n, d = 0) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(d);
+  const editCal = edit ? Math.round(4 * edit.p + 4 * edit.c + 9 * edit.f) : 0;
+
+  const finish = async (action, chosen) => {
+    setBusy(true);
+    await onComplete(action, chosen);
+    setBusy(false);
+  };
+
+  return (
+    <div style={S.ciCard}>
+      <div style={S.ciKicker}>WEEKLY CHECK-IN · {fmtDay(c.today).toUpperCase()}</div>
+
+      <div style={S.ciStep}>1 · Which days last week were fully logged?</div>
+      {days.map((d) => {
+        const kcal = c.intakeByDate[d] || 0;
+        const inc = dayIncluded(d, c.intakeByDate, c.statusByDate);
+        return (
+          <label key={d} style={{ ...S.ciDay, opacity: kcal ? 1 : 0.5 }}>
+            <input type="checkbox" disabled={!kcal} checked={inc} onChange={(e) => onToggleDay(d, e.target.checked)} />
+            <span style={{ flex: 1 }}>{fmtDay(d)}</span>
+            <span style={{ color: dim }}>{kcal ? `${Math.round(kcal).toLocaleString()} kcal` : "nothing logged — skipped"}</span>
+          </label>
+        );
+      })}
+
+      <div style={S.ciStep}>2 · This week</div>
+      <div style={S.ciLine}>
+        Maintenance ≈ <b>{Math.round(c.estimate).toLocaleString()} kcal</b>
+        <div style={S.ciSub}>
+          {c.raw.raw == null
+            ? `${c.last ? "Unchanged from last week" : "Starting guess (your Maintenance target)"} — needs ${[
+                needDays ? `${needDays} more fully logged day${needDays === 1 ? "" : "s"}` : null,
+                needWeigh ? `${needWeigh} more weigh-in${needWeigh === 1 ? "" : "s"}` : null,
+              ].filter(Boolean).join(" and ") || "a few more days of data"} in the last 3 weeks.`
+            : `Your last 3 weeks (${c.raw.includedDays} logged days, ${c.raw.weighInDays} weigh-ins) point to ${Math.round(c.raw.raw).toLocaleString()}; it moves part of the way each week (${signed(c.estimate - c.prior)} from ${Math.round(c.prior).toLocaleString()}).`}
+        </div>
+      </div>
+      <div style={S.ciLine}>
+        Weight trend: {c.actualPct == null ? <span style={{ color: dim }}>not ready yet</span> : <b>{signed(c.actualPct, 2)}%/wk</b>}
+        <span style={{ color: dim }}> · target {c.followed && c.ratePct === 0 ? "hold weight" : `${signed(c.ratePct, 2)}%/wk`}</span>
+      </div>
+
+      {s && (
+        <>
+          <div style={S.ciStep}>3 · Suggested daily targets ({c.followed.name})</div>
+          <div style={S.ciTable}>
+            {[["Calories", "cal"], ["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].map(([lab, k]) => (
+              <div key={k} style={S.ciCell}>
+                <div style={{ color: dim, fontSize: 11 }}>{lab}</div>
+                {adjusting && k !== "cal" ? (
+                  <input type="number" value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: Math.max(0, parseFloat(e.target.value) || 0) })} style={{ ...S.fInput, padding: "4px 6px" }} />
+                ) : (
+                  <div style={{ fontWeight: 700 }}>{(adjusting && k === "cal" ? editCal : s[k]).toLocaleString()}{k === "cal" ? "" : " g"}</div>
+                )}
+                <div style={{ color: dim, fontSize: 11 }}>now {Math.round(cur[k]).toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+          <div style={S.ciNotes}>
+            {s.capped && <div>• Capped at ±{CHECKIN_MAX_CHANGE} kcal this week (the data points to {s.ideal.toLocaleString()}).</div>}
+            {s.proteinRaised && <div>• Protein raised to the {c.followed.phase_type === "deficit" ? "cut minimum (~2 g/kg bodyweight)" : "minimum (~1.6 g/kg)"}.</div>}
+            {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
+            {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
+            {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
+            {c.raw.raw == null && <div>• Based on your starting guess, not your data yet — expect it to change.</div>}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            {!adjusting ? (
+              <>
+                <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={() => finish("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal })}>Apply</button>
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => { setEdit({ p: s.p, f: s.f, c: s.c }); setAdjusting(true); }}>Adjust</button>
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => finish("keep", null)}>Keep current</button>
+              </>
+            ) : (
+              <>
+                <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy} onClick={() => finish("adjust", { ...edit, cal: editCal })}>Apply these</button>
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => setAdjusting(false)}>back</button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+      {!s && (
+        <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} disabled={busy} onClick={() => finish("keep", null)}>
+          Done — no suggestion this week
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) {
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
 
@@ -2294,6 +2719,15 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
           )}
         </div>
       </div>
+
+      {estimate && (
+        <div style={S.pcEstimate}>
+          Maintenance ≈ <b>{Math.round(estimate.kcal).toLocaleString()} kcal</b>
+          <span style={{ color: dim }}>
+            {estimate.estimated ? " · estimated from your log and weight" : " · starting guess (your Maintenance target) until there's enough data"}
+          </span>
+        </div>
+      )}
 
       {/* target rate and pace (cuts/maintenance per week, bulks per month) */}
       <div style={S.pcTarget}>{targetText}</div>
@@ -4330,6 +4764,19 @@ const S = {
   viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeedCount: { color: text, fontSize: 12, fontWeight: 600, marginTop: 6 },
+  // weekly check-in + day status
+  ciCard: { background: panel, border: `1px solid ${accent}`, borderRadius: 12, padding: 14, marginBottom: 14 },
+  ciKicker: { fontSize: 11, letterSpacing: 1.5, color: accent, fontWeight: 700 },
+  ciStep: { fontSize: 12, fontWeight: 700, marginTop: 14, marginBottom: 6 },
+  ciDay: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, padding: "4px 0" },
+  ciLine: { fontSize: 13, margin: "4px 0" },
+  ciSub: { color: dim, fontSize: 12, marginTop: 2, lineHeight: 1.45 },
+  ciTable: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 },
+  ciCell: { background: panel2, borderRadius: 8, padding: 8, fontSize: 14 },
+  ciNotes: { color: dim, fontSize: 12, lineHeight: 1.5, marginTop: 8 },
+  dsRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, color: dim, padding: "8px 2px", marginBottom: 10 },
+  dsBtn: { background: "transparent", border: `1px solid ${line}`, color: text, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" },
+  pcEstimate: { fontSize: 12, marginTop: 10 },
   useRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: dim, margin: "8px 0" },
   tcBox: { color: dim, fontSize: 11, lineHeight: 1.5, margin: "8px 0 6px" },
   pcTarget: { color: text, fontSize: 12, marginTop: 10, opacity: 0.85 },
