@@ -1872,7 +1872,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
             <option value="">{followLabel}</option>
             {phases.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} · every {activeDay}
+                {p.name}
               </option>
             ))}
           </select>
@@ -2063,12 +2063,6 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
    over 2 weeks; bulks per month over 4 weeks, since a week of bulk gain
    is smaller than day-to-day noise.
    ============================================================ */
-const PHASE_BLURB = {
-  deficit: "Lower calories reduce recovery capacity, so RepReport trims your training volume ceilings as the cut goes on.",
-  surplus: "Extra calories improve recovery, so RepReport raises your training volume ceilings as the bulk goes on.",
-  maintenance: "Calories at maintenance. Training volume runs at your normal baseline.",
-};
-
 function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -2148,7 +2142,6 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
           {prog.overrun ? "past planned end" : "plan"} ›
         </button>
       </div>
-      <div style={S.pcBlurb}>{PHASE_BLURB[phase.phase_type] || PHASE_BLURB.maintenance}</div>
 
       <div style={S.pcStats}>
         <div>
@@ -4168,7 +4161,6 @@ const S = {
     background: panel, borderRadius: 8, padding: "10px 12px", marginBottom: 6,
   },
   pcKicker: { color: dim, fontSize: 10, letterSpacing: 1.2, marginBottom: 3 },
-  pcBlurb: { color: dim, fontSize: 12.5, lineHeight: 1.45, marginTop: 8, paddingBottom: 12, borderBottom: `1px solid ${panel2}` },
   viHead: { display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 13, fontWeight: 600, marginTop: 16 },
   viBar: {
     position: "relative", height: 8, borderRadius: 4, marginTop: 10,
@@ -4691,7 +4683,7 @@ function Style() {
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Spline+Sans:wght@400;500;600&display=swap');
       * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-      body { margin: 0; }
+      html, body { margin: 0; background: ${ink}; }
       input, select, button { outline: none; }
       input:focus, select:focus { border-color: ${accent} !important; }
       ::-webkit-scrollbar { width: 8px; height: 8px; }
