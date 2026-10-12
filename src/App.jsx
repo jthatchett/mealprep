@@ -56,6 +56,17 @@ function sbRefreshToken(refresh_token) {
   return sbAuthFetch("token?grant_type=refresh_token", { refresh_token });
 }
 
+// true if the access token has expired or will within `bufferSeconds`
+function tokenExpiringSoon(access_token, bufferSeconds = 300) {
+  try {
+    const b64 = access_token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const { exp } = JSON.parse(atob(b64 + "===".slice((b64.length + 3) % 4)));
+    return !exp || Date.now() / 1000 >= exp - bufferSeconds;
+  } catch {
+    return true; // can't read it — refreshing is the safe choice
+  }
+}
+
 // fetch the user's app_data row (updated_at is the version a save must match)
 async function sbLoadAppData(session) {
   const res = await fetch(
@@ -782,6 +793,15 @@ const SEED_RECIPES = [
 
 const SEED_ALL = [...SEED_FOODS, ...SEED_RECIPES];
 
+// phase_type is what the diet-phase calendar keys on — presets without one
+// never show up in its "phase…" picker, so every seeded preset needs it.
+const SEED_PHASE_TYPES = {
+  "phase-minicut": "deficit",
+  "phase-cut": "deficit",
+  "phase-maintenance": "maintenance",
+  "phase-bulk": "surplus",
+  "phase-weekend": "deficit",
+};
 const SEED_PHASES = [
   ph("Mini-cut",       155, 42, 226, 1902, "phase-minicut"),
   ph("Cut",            155, 52, 316, 2352, "phase-cut"),
@@ -790,7 +810,7 @@ const SEED_PHASES = [
   ph("Weekend/Refeed", 126, 90, 422, 3002, "phase-weekend"),
 ];
 function ph(name, p, f, c, cal, stableId) {
-  return { id: stableId || uid(), name, target: { p, f, c, cal } };
+  return { id: stableId || uid(), name, phase_type: SEED_PHASE_TYPES[stableId], target: { p, f, c, cal } };
 }
 
 function uid() {
@@ -1148,7 +1168,10 @@ export default function App() {
           const idRemap = {};
           loadedPhases = loadedPhases.map((p) => {
             const stableId = nameToStableId[p.name];
-            if (stableId && p.id !== stableId) { idRemap[p.id] = stableId; return { ...p, id: stableId }; }
+            if (stableId && p.id !== stableId) { idRemap[p.id] = stableId; p = { ...p, id: stableId }; }
+            // Accounts seeded before presets carried a phase_type have none, so
+            // the diet-phase picker showed no options. Fill in the seed's type.
+            if (!p.phase_type && SEED_PHASE_TYPES[p.id]) p = { ...p, phase_type: SEED_PHASE_TYPES[p.id] };
             return p;
           });
 
@@ -1188,7 +1211,76 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [session, reloadNonce]);
+  // Keyed on WHO is signed in, not the session object: a token refresh swaps
+  // the object every hour, and re-running the full load on each refresh could
+  // replace an edit that hasn't saved yet.
+  }, [session?.user?.id, reloadNonce]);
+
+  // Coming back to the app. A home-screen app on iOS isn't reloaded when it's
+  // reopened — it resumes, sometimes days later — so the launch-time token
+  // refresh and data load go stale: the token expires after ~1 hour (every
+  // save then fails) and edits made on another device never show up. On
+  // returning to the foreground, and every few minutes while open:
+  //   1. refresh the token if it's about to expire
+  //   2. if the saved data changed elsewhere, reload it — silently when
+  //      nothing here is unsaved, otherwise via the existing conflict banner
+  const latestRef = useRef({});
+  latestRef.current = { session, store, loaded, loadError, saveConflict };
+  const refreshingRef = useRef(null);
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    let cancelled = false;
+
+    const freshSession = async () => {
+      const current = latestRef.current.session;
+      if (!current || !tokenExpiringSoon(current.access_token)) return current;
+      if (!refreshingRef.current) {
+        // one refresh at a time — refresh tokens are single-use
+        refreshingRef.current = sbRefreshToken(current.refresh_token)
+          .then((r) => {
+            const next = { access_token: r.access_token, refresh_token: r.refresh_token, user: r.user || current.user };
+            try { localStorage.setItem(SESSION_KEY, JSON.stringify(next)); } catch { /* storage blocked */ }
+            if (!cancelled) setSession(next);
+            return next;
+          })
+          .catch((e) => { dbg("token refresh FAILED: " + e.message); return current; })
+          .finally(() => { refreshingRef.current = null; });
+      }
+      return refreshingRef.current;
+    };
+
+    const syncFromServer = async (sess) => {
+      const { store: st, loaded: ld, loadError: le, saveConflict: sc } = latestRef.current;
+      if (!ld || le || sc || !st) return;
+      let row;
+      try { row = await sbLoadAppData(sess); } catch { return; } // offline etc. — try again next time
+      if (cancelled || !row || row.updated_at === savedRef.current.updatedAt) return;
+      const unsaved = JSON.stringify(latestRef.current.store) !== savedRef.current.json;
+      dbg("data changed on another device — " + (unsaved ? "conflict" : "reloading"));
+      if (unsaved) setSaveConflict(true);
+      else {
+        setIntake({}); // re-read the food log too
+        setReloadNonce((n) => n + 1);
+      }
+    };
+
+    const onForeground = async () => {
+      if (document.visibilityState !== "visible") return;
+      const sess = await freshSession();
+      if (!cancelled && sess) await syncFromServer(sess);
+    };
+
+    document.addEventListener("visibilitychange", onForeground);
+    window.addEventListener("pageshow", onForeground);
+    const timer = setInterval(() => { freshSession(); }, 4 * 60 * 1000);
+    freshSession();
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onForeground);
+      window.removeEventListener("pageshow", onForeground);
+      clearInterval(timer);
+    };
+  }, [session?.user?.id]);
 
   // save — to Supabase, triggered by store changes (debounced)
   // Paused while a conflict is unresolved, so this device can't keep writing
@@ -1667,7 +1759,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
             <option value="">{followLabel}</option>
             {phases.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} · every {activeDay}
+                {p.name}
               </option>
             ))}
           </select>
@@ -1858,12 +1950,6 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
    over 2 weeks; bulks per month over 4 weeks, since a week of bulk gain
    is smaller than day-to-day noise.
    ============================================================ */
-const PHASE_BLURB = {
-  deficit: "Lower calories reduce recovery capacity, so RepReport trims your training volume ceilings as the cut goes on.",
-  surplus: "Extra calories improve recovery, so RepReport raises your training volume ceilings as the bulk goes on.",
-  maintenance: "Calories at maintenance. Training volume runs at your normal baseline.",
-};
-
 function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -1943,7 +2029,6 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week }) {
           {prog.overrun ? "past planned end" : "plan"} ›
         </button>
       </div>
-      <div style={S.pcBlurb}>{PHASE_BLURB[phase.phase_type] || PHASE_BLURB.maintenance}</div>
 
       <div style={S.pcStats}>
         <div>
@@ -3955,7 +4040,6 @@ const S = {
     background: panel, borderRadius: 8, padding: "10px 12px", marginBottom: 6,
   },
   pcKicker: { color: dim, fontSize: 10, letterSpacing: 1.2, marginBottom: 3 },
-  pcBlurb: { color: dim, fontSize: 12.5, lineHeight: 1.45, marginTop: 8, paddingBottom: 12, borderBottom: `1px solid ${panel2}` },
   viHead: { display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 13, fontWeight: 600, marginTop: 16 },
   viBar: {
     position: "relative", height: 8, borderRadius: 4, marginTop: 10,
@@ -4478,7 +4562,7 @@ function Style() {
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Spline+Sans:wght@400;500;600&display=swap');
       * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-      body { margin: 0; }
+      html, body { margin: 0; background: ${ink}; }
       input, select, button { outline: none; }
       input:focus, select:focus { border-color: ${accent} !important; }
       ::-webkit-scrollbar { width: 8px; height: 8px; }
