@@ -879,13 +879,22 @@ const SEED_ALL = [...SEED_FOODS, ...SEED_RECIPES];
 
 // phase_type is what the diet-phase calendar keys on — presets without one
 // never show up in its "phase…" picker, so every seeded preset needs it.
+// "day" = day targets only (e.g. a refeed): offered in a day's TARGETS menu
+// but never as a diet phase, so RepReport can't mistake a refeed for a cut.
 const SEED_PHASE_TYPES = {
   "phase-minicut": "deficit",
   "phase-cut": "deficit",
   "phase-maintenance": "maintenance",
   "phase-bulk": "surplus",
-  "phase-weekend": "deficit",
+  "phase-weekend": "day",
 };
+const isPhaseType = (t) => t === "deficit" || t === "maintenance" || t === "surplus";
+const PRESET_USES = [
+  ["deficit", "Cut phase"],
+  ["maintenance", "Maintenance phase"],
+  ["surplus", "Bulk phase"],
+  ["day", "Day override only (e.g. refeed)"],
+];
 const SEED_PHASES = [
   ph("Mini-cut",       155, 42, 226, 1902, "phase-minicut"),
   ph("Cut",            155, 52, 316, 2352, "phase-cut"),
@@ -1384,6 +1393,9 @@ export default function App() {
             // Accounts seeded before presets carried a phase_type have none, so
             // the diet-phase picker showed no options. Fill in the seed's type.
             if (!p.phase_type && SEED_PHASE_TYPES[p.id]) p = { ...p, phase_type: SEED_PHASE_TYPES[p.id] };
+            // The refeed preset was seeded as a deficit, so it could be picked as a
+            // diet phase and read as a cut. It's a day override; saved with the next edit.
+            if (p.id === "phase-weekend" && p.phase_type === "deficit") p = { ...p, phase_type: "day" };
             return p;
           });
 
@@ -2512,7 +2524,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   const blank = { presetId: "", start: day, weeks: "", openEnded: false, rate: "" }; // rate "" = default
   const [form, setForm] = useState(blank);
   const [saving, setSaving] = useState(false);
-  const typedPresets = presets.filter((p) => p.phase_type);
+  const typedPresets = presets.filter((p) => isPhaseType(p.phase_type));
 
   const startForm = (row) => {
     if (row) {
@@ -3988,7 +4000,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
             >
               <option value="" disabled>switch phase…</option>
               {phases
-                .filter((p) => p.id !== dietPhase.phase_id)
+                .filter((p) => p.id !== dietPhase.phase_id && isPhaseType(p.phase_type))
                 .map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
@@ -4009,6 +4021,19 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
             onChange={(e) => set(p.id, "name", false, e.target.value)}
             style={S.phaseName}
           />
+          {/* what this preset can be used as — only the three phase types can
+              become a diet phase; "day" only shows in a day's TARGETS menu */}
+          <label style={S.useRow}>
+            <span>Used as</span>
+            <select
+              value={p.phase_type || ""}
+              onChange={(e) => set(p.id, "phase_type", false, e.target.value)}
+              style={{ ...S.fInput, flex: 1 }}
+            >
+              {!p.phase_type && <option value="" disabled>choose…</option>}
+              {PRESET_USES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+          </label>
           <div style={S.macroGrid}>
             {[
               ["Protein", "p"],
@@ -4041,7 +4066,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
       <button
         style={S.addSlot}
         onClick={() =>
-          setPhases((prev) => [...prev, ph("New phase", 180, 50, 250, 2500)])
+          setPhases((prev) => [...prev, { ...ph("New phase", 180, 50, 250, 2500), phase_type: "maintenance" }])
         }
       >
         + add phase
@@ -4305,6 +4330,7 @@ const S = {
   viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeedCount: { color: text, fontSize: 12, fontWeight: 600, marginTop: 6 },
+  useRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: dim, margin: "8px 0" },
   tcBox: { color: dim, fontSize: 11, lineHeight: 1.5, margin: "8px 0 6px" },
   pcTarget: { color: text, fontSize: 12, marginTop: 10, opacity: 0.85 },
   pcPace: { fontSize: 12, fontWeight: 700, marginTop: 8 },
