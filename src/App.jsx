@@ -107,6 +107,26 @@ async function sbRecordConsent(session) {
   return { ...sess, user: data };
 }
 
+// Account export / deletion, shared with RepReport: the `account` Edge
+// Function resolves the user from their own token and only acts on them.
+// "export" returns everything in both apps; "delete" (confirm: "DELETE")
+// removes photos, every row, and the login. Retries once on an expired token.
+async function sbAccountAction(session, action, extra = {}) {
+  const call = (s) => fetch(`${SUPABASE_URL}/functions/v1/account`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${s.access_token}` },
+    body: JSON.stringify({ action, ...extra }),
+  });
+  let res = await call(session);
+  if (res.status === 401) {
+    const r = await sbRefreshToken(session.refresh_token);
+    res = await call({ access_token: r.access_token });
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `request failed (${res.status})`);
+  return data;
+}
+
 // fetch the user's app_data row (updated_at is the version a save must match)
 async function sbLoadAppData(session) {
   const res = await fetch(
@@ -1416,8 +1436,12 @@ export default function App() {
   // Queue a save of `data` behind any save already running. Skips it if it
   // matches what the server already has; otherwise saves over the last-seen
   // version and advances the baseline. Rejects with the error (conflict or not).
+  // Set the moment account deletion starts, so no save (including one
+  // already debounced) can recreate the deleted rows.
+  const accountGoneRef = useRef(false);
   const queueSave = (data) => {
     const run = saveChainRef.current.then(async () => {
+      if (accountGoneRef.current) return; // account deleted — never write it back
       const json = JSON.stringify(data);
       if (json === savedRef.current.json) return;
       const updatedAt = await sbSaveAppData(session, data, savedRef.current.updatedAt);
@@ -1508,6 +1532,11 @@ export default function App() {
       if (!proceed) return; // abort sign-out so the user can stay and retry
     }
     if (saveConflict && !window.confirm("Changes here weren't saved (data changed on another device). Sign out anyway and lose them?")) return;
+    clearSignedInState();
+  };
+
+  // Drop the session and every piece of loaded state, without saving.
+  const clearSignedInState = () => {
     localStorage.removeItem(SESSION_KEY);
     setSession(null);
     setStore(null);
@@ -1527,6 +1556,11 @@ export default function App() {
     setRangeIntake({});
     setDayStatus({});
     setCheckins([]);
+  };
+
+  const handleAccountDeleted = () => {
+    clearSignedInState();
+    window.alert("Your account and all of its data have been deleted.");
   };
 
   // retry a failed load without a full page reload
@@ -2167,6 +2201,10 @@ export default function App() {
             setPhases={setPhases}
             setWeek={setWeek}
             debugLog={debugLog}
+            session={session}
+            onDeleteStart={() => { accountGoneRef.current = true; }}
+            onDeleteFailed={() => { accountGoneRef.current = false; }}
+            onAccountDeleted={handleAccountDeleted}
           />
         )}
       </main>
@@ -4553,7 +4591,46 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
 /* ============================================================
    DATA (export / import / reset)
    ============================================================ */
-function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog }) {
+function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, session, onDeleteStart, onDeleteFailed, onAccountDeleted }) {
+  const [acctMsg, setAcctMsg] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTyped, setDeleteTyped] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
+  // everything in both apps, from the server
+  const exportAll = async () => {
+    try {
+      setAcctMsg("preparing your data…");
+      const data = await sbAccountAction(session, "export");
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `repreport-mealprep-account-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setAcctMsg("download started · check your Files / Downloads");
+    } catch (e) {
+      setAcctMsg("couldn't export — " + e.message);
+    }
+  };
+
+  const deleteAccount = async () => {
+    setDeleting(true);
+    setAcctMsg("");
+    onDeleteStart();
+    try {
+      await sbAccountAction(session, "delete", { confirm: "DELETE" });
+      onAccountDeleted();
+    } catch (e) {
+      onDeleteFailed();
+      setDeleting(false);
+      setAcctMsg("couldn't delete — " + e.message);
+    }
+  };
+
   const [msg, setMsg] = useState("");
   const [showExport, setShowExport] = useState(false);
   const exportText = JSON.stringify({ foods, phases, week }, null, 2);
@@ -4631,6 +4708,34 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog }) {
         <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>privacy policy</a>
         <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>terms of use</a>
       </div>
+
+      <p style={{...S.note, marginTop: 8, marginBottom: 8}}>
+        Your account (covers Meal Prep and RepReport).
+      </p>
+      <div style={S.dataRow}>
+        <button style={S.ghostBtn} onClick={exportAll}>⬇ download all my data</button>
+        <button style={{ ...S.ghostBtn, color: "#ff5d7a" }} onClick={() => setDeleteOpen((o) => !o)}>delete account</button>
+      </div>
+      {deleteOpen && (
+        <div style={{ ...S.phaseCard, marginBottom: 12 }}>
+          <p style={{ ...S.note, marginBottom: 10 }}>
+            This permanently deletes your login and everything in <strong style={{ color: "#e8efe9" }}>both Meal Prep and RepReport</strong>:
+            food log, weigh-ins, diet phases, training history, and photos. It can't be undone. Download your data first if you want a copy.
+          </p>
+          <label htmlFor="mp-delete-confirm" style={S.fLabel}>type DELETE to confirm</label>
+          <input id="mp-delete-confirm" value={deleteTyped} onChange={(e) => setDeleteTyped(e.target.value)}
+            autoCapitalize="characters" autoComplete="off" disabled={deleting}
+            style={{ ...S.fInput, marginBottom: 10, letterSpacing: 2 }} />
+          <div style={S.dataRow}>
+            <button style={S.ghostBtn} onClick={() => { setDeleteOpen(false); setDeleteTyped(""); }} disabled={deleting}>cancel</button>
+            <button style={{ ...S.primaryBtn, background: "#ff5d7a", borderColor: "#ff5d7a" }}
+              onClick={deleteAccount} disabled={deleteTyped.trim() !== "DELETE" || deleting}>
+              {deleting ? "deleting…" : "delete everything"}
+            </button>
+          </div>
+        </div>
+      )}
+      {acctMsg && <div style={S.verifyBanner}>{acctMsg}</div>}
 
       {showExport && (
         <div style={{marginTop:12}}>
