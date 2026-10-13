@@ -247,6 +247,34 @@ function defaultRatePct(phaseType, name) {
   if (phaseType === "surplus") return 0.75 / WEEKS_PER_MONTH;
   return 0;
 }
+// Limits on a phase's target rate (owner-approved, Oct 2026). The warning
+// is a note the user can save past; the limit refuses to save.
+//   cut       warn past -1.0 %/wk (top of Helms et al. 2014's 0.5–1.0 %/wk
+//             range for keeping muscle); limit -1.5 %/wk (~Garthe et al.
+//             2011's "fast" 1.4 %/wk group, the fastest rate studied)
+//   mini-cut  warn past -1.25 %/wk, limit -1.5 %/wk (coaching practice;
+//             no controlled studies)
+//   bulk      warn past 2 %/month (top of Iraki et al. 2019's
+//             0.25–0.5 %/wk), limit 4 %/month (catches typos)
+// Returns { level: "ok" | "warn" | "block", message }.
+const EPS = 1e-6;
+function checkPhaseRate(phaseType, name, weeklyPct) {
+  if (weeklyPct == null || phaseType === "maintenance") return { level: "ok", message: "" };
+  if (phaseType === "deficit") {
+    const loss = -weeklyPct;
+    const mini = isMiniCut(phaseType, name);
+    if (loss > 1.5 + EPS) return { level: "block", message: `a ${mini ? "mini-cut" : "cut"} can be at most −1.5 %/week` };
+    if (mini && loss > 1.25 + EPS) return { level: "warn", message: "faster than the ~1.25 %/week mini-cuts usually run at. You can still save it." };
+    if (!mini && loss > 1.0 + EPS) return { level: "warn", message: "faster than the 0.5–1.0 %/week range research supports for keeping muscle. You can still save it." };
+    return { level: "ok", message: "" };
+  }
+  if (phaseType === "surplus") {
+    const monthly = weeklyPct * WEEKS_PER_MONTH;
+    if (monthly > 4 + EPS) return { level: "block", message: "a bulk can be at most 4 %/month" };
+    if (monthly > 2 + EPS) return { level: "warn", message: "faster than the ~1–2 %/month research suggests for lean gains. You can still save it." };
+  }
+  return { level: "ok", message: "" };
+}
 function phaseRatePct(row) {
   return row.target_rate_pct != null ? Number(row.target_rate_pct) : defaultRatePct(row.phase_type, row.phase_name);
 }
@@ -3007,12 +3035,15 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
     return isNaN(n) ? null : roundRate(monthly ? n / WEEKS_PER_MONTH : n);
   };
 
+  const rateCheck = preset ? checkPhaseRate(preset.phase_type, preset.name, rateWeekly()) : { level: "ok", message: "" };
+
   const save = async () => {
     if (!preset) return window.alert("pick a phase first");
     const target_rate_pct = rateWeekly();
-    if (target_rate_pct == null || Math.abs(target_rate_pct) > 2) return window.alert("enter a target rate between −2 and 2 %/week");
+    if (target_rate_pct == null) return window.alert("enter a target rate as a number");
     if (preset.phase_type === "deficit" && target_rate_pct > 0) return window.alert("a cut's target rate should be negative (a loss)");
     if (preset.phase_type === "surplus" && target_rate_pct < 0) return window.alert("a bulk's target rate should be positive (a gain)");
+    if (rateCheck.level === "block") return window.alert(rateCheck.message);
     setSaving(true);
     const ok = await onEdit(async (session) => {
       const fields = { phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type, start_date: form.start, planned_end_date: plannedEnd };
@@ -3142,9 +3173,14 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
             />
             <span style={{ fontSize: 12, color: dim, width: 64 }}>{rateUnit}</span>
           </div>
-          <div style={{ fontSize: 11, color: dim, marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: dim, marginBottom: rateCheck.level === "ok" ? 10 : 4 }}>
             {form.rate === "" ? `default ${defaultShown.toFixed(2)} ${rateUnit} · ` : ""}{rateHint}
           </div>
+          {rateCheck.level !== "ok" && (
+            <div style={{ fontSize: 12, color: rateCheck.level === "block" ? "#ff5d7a" : PHASE_COLORS.deficit, marginBottom: 10 }}>
+              {rateCheck.level === "block" ? `⚠ ${rateCheck.message} — lower it to save` : `⚠ ${rateCheck.message}`}
+            </div>
+          )}
         </>
       )}
       <div style={{ display: "flex", gap: 8 }}>
