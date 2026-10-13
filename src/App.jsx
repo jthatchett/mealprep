@@ -3023,10 +3023,15 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   const monthly = preset ? rateIsMonthly(preset.phase_type) : false;
   const rateUnit = monthly ? "%/month" : "%/week";
   const defaultShown = preset ? defaultRatePct(preset.phase_type, preset.name) * (monthly ? WEEKS_PER_MONTH : 1) : 0;
+  // Cuts: Helms et al. 2014. Bulks: Iraki et al. 2019 (0.25–0.5 %/week for
+  // novice/intermediate, slower for advanced; no figure given for advanced).
+  // Mini-cut rates are coaching practice, not research — labeled as such.
   const rateHint = !preset ? "" : preset.phase_type === "deficit"
-    ? "evidence range −0.5 to −1.0 %/week (mini-cuts up to ~−1.25)"
+    ? (isMiniCut(preset.phase_type, preset.name)
+      ? "mini-cuts usually run ~−1.0 to −1.25 %/week (coaching practice, not studied)"
+      : "research range −0.5 to −1.0 %/week")
     : preset.phase_type === "surplus"
-      ? "by training age: ~1–1.5 beginner · 0.5–1 intermediate · ≤0.5 advanced (%/month)"
+      ? "research range ~1–2 %/month (0.25–0.5 %/week) for novice–intermediate · slower if advanced"
       : "";
   const rateWeekly = () => {
     if (!preset || preset.phase_type === "maintenance") return 0;
