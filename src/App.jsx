@@ -244,7 +244,7 @@ const WEEKS_PER_MONTH = 30.44 / 7;
 const WEIGHT_UNIT = "lb";
 function defaultRatePct(phaseType, name) {
   if (phaseType === "deficit") return /mini/i.test(name || "") ? -1.0 : -0.7;
-  if (phaseType === "surplus") return 0.75 / WEEKS_PER_MONTH;
+  if (phaseType === "surplus") return 1.0 / WEEKS_PER_MONTH; // bottom of Iraki et al. 2019's ~1–2 %/month
   return 0;
 }
 // Limits on a phase's target rate (owner-approved, Oct 2026). The warning
