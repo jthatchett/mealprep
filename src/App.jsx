@@ -1089,6 +1089,8 @@ const SEED_RECIPES = [
   ]),
 ];
 
+// Not seeded any more: new accounts start with no foods (owner decision, Oct 2026).
+// Kept in case it comes back as an optional "add starter foods" action.
 const SEED_ALL = [...SEED_FOODS, ...SEED_RECIPES];
 
 // phase_type is what the diet-phase calendar keys on — presets without one
@@ -1591,7 +1593,7 @@ export default function App() {
   };
 
   // convenience destructure — safe because render is gated on loaded+store
-  const foods  = store ? store.foods  : SEED_ALL;
+  const foods  = store ? store.foods  : [];
   const phases = store ? store.phases : SEED_PHASES;
   const week   = store ? store.week   : null;
 
@@ -1622,7 +1624,8 @@ export default function App() {
         if (cancelled) return;
         dbg("supabase load: " + (row ? "found row" : "no row yet — new user"));
         if (row && row.foods) {
-          const loadedFoods = (row.foods && row.foods.length) ? row.foods : SEED_ALL;
+          // an account's own list, even an empty one — new accounts start with no foods
+          const loadedFoods = Array.isArray(row.foods) ? row.foods : [];
 
           // migrate phase ids to stable
           let loadedPhases = (row.phases && row.phases.length) ? row.phases : SEED_PHASES;
@@ -1660,7 +1663,8 @@ export default function App() {
         } else {
           // new user (query SUCCEEDED, returned no row) — seed defaults, saved on first change.
           // A row with no foods still exists, so its updated_at is the base to save over.
-          const seeded = { foods: SEED_ALL, phases: SEED_PHASES, week: seedWeek() };
+          // New accounts start with an empty food list (starter foods were burying people's own).
+          const seeded = { foods: [], phases: SEED_PHASES, week: seedWeek() };
           savedRef.current = { updatedAt: row ? row.updated_at : null, json: JSON.stringify(seeded) };
           setStore(seeded);
         }
@@ -3617,11 +3621,11 @@ function FoodPicker({ foods, onPick, onClose, onCreateFood }) {
             ))}
             {list.length === 0 && (
               <div style={S.empty}>
-                no match
+                {foods.length === 0 ? "no foods yet" : "no match"}
                 {onCreateFood && (
                   <div style={{ marginTop: 10 }}>
                     <button style={S.quickAddRow} onClick={startAdd}>
-                      + add it as a new food
+                      {foods.length === 0 ? "+ add your first food" : "+ add it as a new food"}
                     </button>
                   </div>
                 )}
@@ -4086,6 +4090,12 @@ function Foods({ foods, setFoods }) {
         </div>
       )}
 
+      {foods.length === 0 && (
+        <div style={S.empty}>
+          no foods yet — add your first with <strong>+ component</strong> (a single food) or{" "}
+          <strong>+ recipe</strong> (a combination), or scan a barcode from the Plan tab.
+        </div>
+      )}
       <div style={S.foodGrid}>
         {list.map((food) => {
           const m = foodMacros(food, foods);
