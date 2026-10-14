@@ -2639,7 +2639,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
               <div key={k} style={S.ciCell}>
                 <div style={{ color: dim, fontSize: 11 }}>{lab}</div>
                 {adjusting && k !== "cal" ? (
-                  <input type="number" value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: Math.max(0, parseFloat(e.target.value) || 0) })} style={{ ...S.fInput, padding: "4px 6px" }} />
+                  <NumInput type="number" value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: Math.max(0, parseFloat(e.target.value) || 0) })} style={{ ...S.fInput, padding: "4px 6px" }} />
                 ) : (
                   <div style={{ fontWeight: 700 }}>{(adjusting && k === "cal" ? editCal : s[k]).toLocaleString()}{k === "cal" ? "" : " g"}</div>
                 )}
@@ -3406,7 +3406,7 @@ function Slot({
         const m = scale(foodMacros(food, foods), e.qty);
         return (
           <div key={ei} style={S.entry}>
-            <input
+            <NumInput
               type="number"
               step="0.25"
               value={e.qty}
@@ -3446,6 +3446,36 @@ function Slot({
 
 // one food-log row: the amount saves when the field loses focus (or Enter),
 // not on every keystroke, so typing "1.5" isn't three writes
+// A number box you can clear while typing. The parent's handlers turn an
+// empty box into 0 (or 1) right away, which made a 0 impossible to delete;
+// this shows what you type until you leave the box, and selects its
+// contents on tap so typing replaces the old number.
+function NumInput({ value, onChange, onFocus, onBlur, ...rest }) {
+  const [text, setText] = useState(null); // null = not editing: show value
+  const justFocused = useRef(false);
+  const selectAll = (el) => { try { el.select(); } catch { /* not selectable */ } };
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      {...rest}
+      value={text ?? value ?? ""}
+      onFocus={(e) => {
+        setText(String(value ?? ""));
+        justFocused.current = true;
+        const el = e.target;
+        selectAll(el);
+        setTimeout(() => selectAll(el), 0);
+        onFocus?.(e);
+      }}
+      // the tap's release would drop the cursor at the end, undoing the select
+      onMouseUp={(e) => { if (justFocused.current) { e.preventDefault(); selectAll(e.target); } justFocused.current = false; }}
+      onChange={(e) => { setText(e.target.value); onChange(e); }}
+      onBlur={(e) => { setText(null); onBlur?.(e); }}
+    />
+  );
+}
+
 function LogEntry({ row, onQty, onRemove }) {
   const [qty, setQty] = useState(String(row.qty));
   useEffect(() => setQty(String(row.qty)), [row.qty]);
@@ -3666,7 +3696,7 @@ function FoodPicker({ foods, onPick, onClose, onCreateFood }) {
               ].map(([lab, k]) => (
                 <div key={k}>
                   <span style={S.macroMini}>{lab}</span>
-                  <input
+                  <NumInput
                     type="number"
                     step="0.1"
                     value={draft.macros[k]}
@@ -3975,7 +4005,7 @@ function ScanConfirm({ barcode, foods, onClose, onConfirm }) {
                 ].map(([lab, k]) => (
                   <div key={k}>
                     <span style={S.macroMini}>{lab}</span>
-                    <input
+                    <NumInput
                       type="number"
                       step="0.1"
                       value={draft.macros[k]}
@@ -3986,7 +4016,7 @@ function ScanConfirm({ barcode, foods, onClose, onConfirm }) {
                 ))}
               </div>
               <label style={S.fLabel}>Qty ({draft.unit})</label>
-              <input
+              <NumInput
                 type="number"
                 step="0.25"
                 value={qty}
@@ -4194,7 +4224,7 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
             {isRecipe && (
               <div style={{ width: 110 }}>
                 <label style={S.fLabel}>Servings</label>
-                <input
+                <NumInput
                   type="number"
                   value={draft.servings}
                   onChange={(e) =>
@@ -4244,7 +4274,7 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
                 const base = foods.find((x) => x.id === ing.foodId);
                 return (
                   <div key={i} style={S.ingRow}>
-                    <input
+                    <NumInput
                       type="number"
                       step="0.25"
                       value={ing.qty}
@@ -4567,7 +4597,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
             ].map(([lab, k]) => (
               <div key={k}>
                 <span style={S.macroMini}>{lab}</span>
-                <input
+                <NumInput
                   type="number"
                   value={p.target[k]}
                   onChange={(e) => set(p.id, k, true, e.target.value)}
