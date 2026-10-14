@@ -2775,6 +2775,8 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   const cur = c.followed.target;
   const fmtDay = (iso) => parseISO(iso).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
   const days = Array.from({ length: 7 }, (_, i) => addDaysISO(c.today, -(i + 1)));
+  const logged = days.filter((d) => (c.intakeByDate[d] || 0) > 0);
+  const empty = days.length - logged.length;
   const needDays = Math.max(0, EST_MIN_INCLUDED - c.raw.includedDays);
   const needWeigh = Math.max(0, EST_MIN_WEIGHINS - c.raw.weighInDays);
   const signed = (n, d = 0) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(d);
@@ -2790,29 +2792,30 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
     <div style={S.ciCard}>
       <div style={S.ciKicker}>WEEKLY CHECK-IN · {fmtDay(c.today).toUpperCase()}</div>
 
-      <div style={S.ciStep}>1 · Which days last week were fully logged?</div>
-      {days.map((d) => {
-        const kcal = c.intakeByDate[d] || 0;
-        const inc = dayIncluded(d, c.intakeByDate, c.statusByDate);
-        return (
-          <label key={d} style={{ ...S.ciDay, opacity: kcal ? 1 : 0.5 }}>
-            <input type="checkbox" disabled={!kcal} checked={inc} onChange={(e) => onToggleDay(d, e.target.checked)} />
-            <span style={{ flex: 1 }}>{fmtDay(d)}</span>
-            <span style={{ color: dim }}>{kcal ? `${Math.round(kcal).toLocaleString()} kcal` : "nothing logged — skipped"}</span>
-          </label>
-        );
-      })}
+      {logged.length > 0 && (
+        <>
+          <div style={S.ciStep}>Which days last week were fully logged?</div>
+          {logged.map((d) => (
+            <label key={d} style={S.ciDay}>
+              <input type="checkbox" checked={dayIncluded(d, c.intakeByDate, c.statusByDate)} onChange={(e) => onToggleDay(d, e.target.checked)} />
+              <span style={{ flex: 1 }}>{fmtDay(d)}</span>
+              <span style={{ color: dim }}>{Math.round(c.intakeByDate[d]).toLocaleString()} kcal</span>
+            </label>
+          ))}
+        </>
+      )}
+      {empty > 0 && <div style={{ ...S.ciSub, marginTop: logged.length ? 4 : 0 }}>{empty === 7 ? "Nothing logged last week" : `${empty} day${empty === 1 ? "" : "s"} with nothing logged (skipped)`}</div>}
 
-      <div style={S.ciStep}>2 · This week</div>
+      <div style={S.ciStep}>This week</div>
       <div style={S.ciLine}>
         Maintenance ≈ <b>{Math.round(c.estimate).toLocaleString()} kcal</b>
         <div style={S.ciSub}>
           {c.raw.raw == null
-            ? `${c.last ? "Unchanged from last week" : "Starting guess (your Maintenance target)"} — needs ${[
+            ? `${c.last ? "Unchanged from last week" : "Starting guess"}. Needs ${[
                 needDays ? `${needDays} more fully logged day${needDays === 1 ? "" : "s"}` : null,
                 needWeigh ? `${needWeigh} more weigh-in${needWeigh === 1 ? "" : "s"}` : null,
-              ].filter(Boolean).join(" and ") || "a few more days of data"} in the last 3 weeks.`
-            : `Your last 3 weeks (${c.raw.includedDays} logged days, ${c.raw.weighInDays} weigh-ins) point to ${Math.round(c.raw.raw).toLocaleString()}; it moves part of the way each week (${signed(c.estimate - c.prior)} from ${Math.round(c.prior).toLocaleString()}).`}
+              ].filter(Boolean).join(" and ") || "a few more days of data"}.`
+            : `Your data says ${Math.round(c.raw.raw).toLocaleString()}; it moves part way each week (${signed(c.estimate - c.prior)}).`}
         </div>
       </div>
       <div style={S.ciLine}>
@@ -2822,7 +2825,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
 
       {s && (
         <>
-          <div style={S.ciStep}>3 · Suggested daily targets ({c.followed.name})</div>
+          <div style={S.ciStep}>Suggested daily targets ({c.followed.name})</div>
           <div style={S.ciTable}>
             {[["Calories", "cal"], ["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].map(([lab, k]) => (
               <div key={k} style={S.ciCell}>
@@ -2861,9 +2864,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
       )}
       {!s && (
         <>
-          {c.raw.raw == null && (
-            <div style={S.ciNotes}>No new targets until the estimate comes from your own log and weigh-ins. Keep logging; nothing to change yet.</div>
-          )}
+          {c.raw.raw == null && <div style={S.ciNotes}>Nothing to change yet. New targets come once the estimate is from your own data.</div>}
           <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} disabled={busy} onClick={() => finish("keep", null)}>
             {c.raw.raw == null ? "Got it" : "Done — no suggestion this week"}
           </button>
@@ -2905,11 +2906,15 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
   const trend = monthly ? monthlyWeightTrend(bwLog, today) : weightTrend(bwLog, today);
   const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
   const refWeight = trend.ready ? trend.avg : latest;
+  // weekly phases keep the last trend through a gap in weigh-ins, as the
+  // volume note does, so the two never disagree
+  const last = !monthly && !trend.ready ? latestTrendRate(bwLog, today) : null;
+  const actual = trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
+  const actualAge = trend.ready ? 0 : last?.age ?? null;
 
   // pace: actual vs target, in display units
   let pace = null;
-  if (trend.ready) {
-    const actual = monthly ? trend.pctPerMonth : trend.pctPerWeek;
+  if (actual != null) {
     if (phase.phase_type === "maintenance") {
       pace = Math.abs(actual) <= 0.25 ? { ok: true, text: "Holding steady" }
         : { ok: false, text: actual > 0 ? "Drifting up" : "Drifting down" };
@@ -2934,10 +2939,19 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
     }
   }
 
-  const targetText = phase.phase_type === "maintenance"
-    ? "Target: hold weight (±0.25%/wk)"
-    : `Target: ${sign(targetPct, 2)}%/${per}` +
-      (refWeight ? ` (${sign((refWeight * targetPct) / 100, monthly ? 1 : 2)} ${WEIGHT_UNIT}/${per})` : "");
+  const targetShort = phase.phase_type === "maintenance" ? "hold ±0.25%" : `${sign(targetPct, 2)}%`;
+  // what's still needed before there's a pace to show
+  let weighPrompt = null;
+  if (actual == null) {
+    const now = Math.min(trend.recentCount, TREND_MIN_WEIGHINS);
+    const before = Math.min(monthly ? trend.oldCount : trend.priorCount, TREND_MIN_WEIGHINS);
+    const more = TREND_MIN_WEIGHINS - now;
+    weighPrompt = before >= TREND_MIN_WEIGHINS && more > 0
+      ? `Weigh in ${more} more time${more === 1 ? "" : "s"} this week to see your pace.`
+      : `Your pace shows once you have ${monthly ? "4+ weigh-ins this week and 4 weeks ago" : "2 weeks with 4+ weigh-ins each"} (${now}/${TREND_MIN_WEIGHINS} this week).`;
+  }
+  // % vs maintenance only against an estimate from your own data
+  const vsMaint = estimate?.estimated && cals ? ((cals.avg - estimate.kcal) / estimate.kcal) * 100 : null;
 
   return (
     <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
@@ -2957,17 +2971,15 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
         <div>
           <div style={S.pcStatL}>Calories</div>
           <div style={S.pcStatN}>{cals ? Math.round(cals.avg).toLocaleString() : "—"}</div>
-          <div style={{ ...S.pcStatSub, color: cals?.pct ? color : dim }}>
-            {cals?.pct == null ? "no maintenance target" : cals.isMaintenance || Math.abs(cals.pct) < 0.5 ? "maintenance" : `${sign(cals.pct, 0)}%`}
-          </div>
+          {vsMaint != null && (
+            <div style={{ ...S.pcStatSub, color }}>{Math.abs(vsMaint) < 0.5 ? "maintenance" : `${sign(vsMaint, 0)}% vs maint.`}</div>
+          )}
         </div>
         <div>
-          <div style={S.pcStatL}>Body weight</div>
-          <div style={S.pcStatN}>{trend.ready ? trend.avg.toFixed(1) : "—"}</div>
-          <div style={{ ...S.pcStatSub, color: trend.ready ? color : dim }}>
-            {trend.ready
-              ? monthly ? `${sign(trend.perMonth, 1)} / mo` : `${sign(trend.perWeek, 1)} / wk`
-              : "trend not ready"}
+          <div style={S.pcStatL}>Pace /{per}</div>
+          <div style={S.pcStatN}>{actual != null ? `${sign(actual, 1)}%` : "—"}</div>
+          <div style={{ ...S.pcStatSub, color: dim }}>
+            target {targetShort}{actualAge > 0 ? ` · ${actualAge}d ago` : ""}
           </div>
         </div>
         <div>
@@ -2983,37 +2995,16 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
         </div>
       </div>
 
-      {estimate && (
-        <div style={S.pcEstimate}>
-          Maintenance ≈ <b>{Math.round(estimate.kcal).toLocaleString()} kcal</b>
-          <span style={{ color: dim }}>
-            {estimate.estimated ? " · estimated from your log and weight" : " · starting guess (your Maintenance target) until there's enough data"}
-          </span>
+      {pace && (
+        <div style={{ ...S.pcPace, color: pace.ok ? accent : "#ffb454" }}>
+          {pace.ok ? "●" : "▲"} {pace.text}
         </div>
       )}
-
-      {/* target rate and pace (cuts/maintenance per week, bulks per month) */}
-      <div style={S.pcTarget}>{targetText}</div>
-      {trend.ready ? (
-        pace && (
-          <div style={{ ...S.pcPace, color: pace.ok ? accent : "#ffb454" }}>
-            {pace.ok ? "●" : "▲"} {pace.text}
-            <span style={{ color: dim, fontWeight: 500 }}>
-              {" "}· actual {sign(monthly ? trend.pctPerMonth : trend.pctPerWeek, 2)}%/{per}
-            </span>
-          </div>
-        )
-      ) : (
-        <div style={S.pcNeed}>
-          A single weigh-in can swing 1–2 lb on water, salt or a big dinner, so it only
-          trusts an average once a 7-day window has at least {TREND_MIN_WEIGHINS} weigh-ins.
-          {monthly && " A bulk is judged over 4 weeks."}
-          <div style={S.pcNeedCount}>
-            This week {Math.min(trend.recentCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS} ·{" "}
-            {monthly
-              ? <>4 weeks ago {Math.min(trend.oldCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS}</>
-              : <>last week {Math.min(trend.priorCount, TREND_MIN_WEIGHINS)}/{TREND_MIN_WEIGHINS}</>}
-          </div>
+      {weighPrompt && <div style={S.pcNeed}>{weighPrompt}</div>}
+      {estimate?.estimated && (
+        <div style={S.pcEstimate}>
+          Maintenance ≈ <b>{Math.round(estimate.kcal).toLocaleString()} kcal</b>
+          <span style={{ color: dim }}> · from your log and weigh-ins</span>
         </div>
       )}
       {projection && <div style={S.pcProj}>{projection}</div>}
@@ -3027,11 +3018,8 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
       <div style={S.viBar}>
         <div style={{ ...S.viMarker, left: `calc(${markerPct}% - 7px)` }} />
       </div>
-      <div style={S.viScale}>
-        <span>−{VOLUME_SCALE}% deficit</span><span>baseline</span><span>+{VOLUME_SCALE}% surplus</span>
-      </div>
       <div style={S.viNote}>
-        {volumeImpactNote(ctx, impactR, "RepReport applies this to your mesos automatically.")}
+        {volumeImpactNote(ctx, impactR, "").replace(/\s+/g, " ").trim()}
         {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
       </div>
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
@@ -5315,10 +5303,8 @@ const S = {
     position: "absolute", top: -3, width: 14, height: 14, borderRadius: 7,
     background: "#fff", boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
   },
-  viScale: { display: "flex", justifyContent: "space-between", color: dim, fontSize: 10.5, marginTop: 6 },
   viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
-  pcNeedCount: { color: text, fontSize: 12, fontWeight: 600, marginTop: 6 },
   // weekly check-in + day status
   ciCard: { background: panel, border: `1px solid ${accent}`, borderRadius: 12, padding: 14, marginBottom: 14 },
   ciKicker: { fontSize: 11, letterSpacing: 1.5, color: accent, fontWeight: 700 },
@@ -5340,7 +5326,6 @@ const S = {
   linkBtn: { background: "none", border: "none", padding: 0, color: accent, textDecoration: "underline", cursor: "pointer", font: "inherit" },
   useRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: dim, margin: "8px 0" },
   tcBox: { color: dim, fontSize: 11, lineHeight: 1.5, margin: "8px 0 6px" },
-  pcTarget: { color: text, fontSize: 12, marginTop: 10, opacity: 0.85 },
   pcPace: { fontSize: 12, fontWeight: 700, marginTop: 8 },
   pcProj: { color: dim, fontSize: 12, marginTop: 6 },
   phaseChip: {
