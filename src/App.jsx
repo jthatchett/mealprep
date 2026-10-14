@@ -413,9 +413,14 @@ function volumeImpactNote(ctx, impactR, applied) {
       ? `${level}: your weight isn't ${losing ? "dropping" : "rising"} (${shown}), so the ${word} isn't affecting recovery yet.`
       : `${level}. ${applied}`;
   }
-  const based = `based on ${verb} ${Math.abs(r).toFixed(1)}%/week`;
-  if (impactR !== 0) return `${level}, ${based}. ${applied}`;
-  return ctx.kind === "minicut" ? `${level}, ${based}.` : `${level}, ${based}. The adjustment builds as the ${word} goes on.`;
+  // a gap in weigh-ins: still your last real trend, with how old it is
+  const stale = ctx.rateAge > 0;
+  const based = stale
+    ? `based on your last trend (${verb} ${Math.abs(r).toFixed(1)}%/week, ${ctx.rateAge} day${ctx.rateAge === 1 ? "" : "s"} ago)`
+    : `based on ${verb} ${Math.abs(r).toFixed(1)}%/week`;
+  const update = stale ? " Weigh in to update it." : "";
+  if (impactR !== 0) return `${level}, ${based}. ${applied}${update}`;
+  return ctx.kind === "minicut" ? `${level}, ${based}.${update}` : `${level}, ${based}. The adjustment builds as the ${word} goes on.${update}`;
 }
 
 // A block's weeks from its start to `iso` (inclusive)
@@ -425,16 +430,34 @@ const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
 // (progress through the block × strength from the weight trend), plus
 // whatever an earlier cut or bulk still leaves behind. deficit / surplus
 // are the combined levels (0–1) the MRV shift uses.
+// The trend to use on a day: that day's if ready, else the most recent one
+// from the last VOLUME_TREND_MAX_AGE_DAYS (a missed week of weigh-ins keeps
+// your real pace instead of the assumed one); older than that, null.
+// RepReport's latestWeeklyWeightRate does the same; keep the two in step.
+const VOLUME_TREND_MAX_AGE_DAYS = 21;
+function latestTrendRate(bwLog, day) {
+  const now = weightTrend(bwLog, day);
+  if (now.ready) return { rate: now.pctPerWeek / 100, age: 0 };
+  // in a gap, read the trend as of your last weigh-in: a week cut short by
+  // the gap would understate the pace
+  const last = (bwLog || []).filter((r) => r.date <= day).map((r) => r.date).sort().pop();
+  if (!last) return { rate: null, age: null };
+  for (let age = daysBetween(last, day); age <= VOLUME_TREND_MAX_AGE_DAYS; age++) {
+    const trend = weightTrend(bwLog, addDaysISO(day, -age));
+    if (trend.ready) return { rate: trend.pctPerWeek / 100, age };
+  }
+  return { rate: null, age: null };
+}
+
 function dietPhaseContext(rows, iso, bwLog) {
   const phase = phaseOnDate(rows, iso);
   if (!phase) return null;
   const strengthOn = (type, day, kind) => {
-    const trend = weightTrend(bwLog, day);
-    const rate = trend.ready ? trend.pctPerWeek / 100 : null;
-    if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate };
-    if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate };
-    if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate };
-    return { s: 0, estimated: rate === null, rate };
+    const { rate, age } = latestTrendRate(bwLog, day);
+    if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    return { s: 0, estimated: rate === null, rate, rateAge: age };
   };
   // the block's own effect on a day inside it
   const own = (b, day) => {
@@ -443,8 +466,8 @@ function dietPhaseContext(rows, iso, bwLog) {
     const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
     const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
     const progress = b.kind === "minicut" ? 1 : Math.min(1, weeksIn / plannedWeeks);
-    const { s, estimated, rate } = strengthOn(b.type, day, b.kind);
-    return { progress, strength: s, estimated, rate, level: progress * s };
+    const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind);
+    return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
   };
   const KINDS = ["deficit", "surplus", "minicut"];
   const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name }
@@ -467,7 +490,7 @@ function dietPhaseContext(rows, iso, bwLog) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, typed, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, ...levels, fading };
     }
     if (!typed) continue;
     const prev = carry[b.kind];
