@@ -385,6 +385,44 @@ function phaseBlocks(rows) {
   return blocks;
 }
 
+// The plain-language note under "Training volume impact": where the
+// ceilings sit and what that's based on: the weigh-in trend, or an assumed
+// pace until 2 weeks of weigh-ins exist. RepReport's dashboard says the
+// same (dietImpactNote there); keep the two in step.
+function volumeImpactNote(ctx, impactR, applied) {
+  const level = impactR === 0
+    ? "Volume ceilings are at your normal baseline"
+    : `Volume ceilings are ~${Math.abs(impactR)}% ${impactR < 0 ? "below" : "above"} baseline`;
+  if (!ctx?.typed) return impactR === 0 ? `${level}.` : `${level}. ${applied}`;
+  const losing = ctx.type === "deficit";
+  const verb = losing ? "losing" : "gaining";
+  const word = ctx.kind === "minicut" ? "mini-cut" : losing ? "cut" : "bulk";
+  const need = `2 weeks of weigh-ins (${TREND_MIN_WEIGHINS}+ each week)`;
+  if (ctx.estimated) {
+    const assumed = ctx.kind === "minicut" ? VOLUME_DEFICIT_FULL_RATE : (losing ? VOLUME_DEFICIT_FULL_RATE : VOLUME_SURPLUS_FULL_RATE) * VOLUME_DEFAULT_STRENGTH;
+    const pace = `you're ${verb} ${+(assumed * 100).toFixed(2)}%/week${ctx.kind === "minicut" ? " (the usual mini-cut pace)" : ""}`;
+    return impactR === 0
+      ? `${level}. Until you have ${need}, it assumes ${pace}.`
+      : `${level}, assuming ${pace}. After ${need}, your actual trend sets it. ${applied}`;
+  }
+  const r = ctx.rate * 100;
+  const shown = `${r >= 0 ? "+" : "−"}${Math.abs(r).toFixed(1)}%/week`;
+  if (losing ? r >= 0 : r <= 0) {
+    // the trend contradicts the phase: anything left is an earlier phase fading
+    return impactR === 0
+      ? `${level}: your weight isn't ${losing ? "dropping" : "rising"} (${shown}), so the ${word} isn't affecting recovery yet.`
+      : `${level}. ${applied}`;
+  }
+  // a gap in weigh-ins: still your last real trend, with how old it is
+  const stale = ctx.rateAge > 0;
+  const based = stale
+    ? `based on your last trend (${verb} ${Math.abs(r).toFixed(1)}%/week, ${ctx.rateAge} day${ctx.rateAge === 1 ? "" : "s"} ago)`
+    : `based on ${verb} ${Math.abs(r).toFixed(1)}%/week`;
+  const update = stale ? " Weigh in to update it." : "";
+  if (impactR !== 0) return `${level}, ${based}. ${applied}${update}`;
+  return ctx.kind === "minicut" ? `${level}, ${based}.${update}` : `${level}, ${based}. The adjustment builds as the ${word} goes on.${update}`;
+}
+
 // A block's weeks from its start to `iso` (inclusive)
 const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
 
@@ -392,16 +430,34 @@ const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
 // (progress through the block × strength from the weight trend), plus
 // whatever an earlier cut or bulk still leaves behind. deficit / surplus
 // are the combined levels (0–1) the MRV shift uses.
+// The trend to use on a day: that day's if ready, else the most recent one
+// from the last VOLUME_TREND_MAX_AGE_DAYS (a missed week of weigh-ins keeps
+// your real pace instead of the assumed one); older than that, null.
+// RepReport's latestWeeklyWeightRate does the same; keep the two in step.
+const VOLUME_TREND_MAX_AGE_DAYS = 21;
+function latestTrendRate(bwLog, day) {
+  const now = weightTrend(bwLog, day);
+  if (now.ready) return { rate: now.pctPerWeek / 100, age: 0 };
+  // in a gap, read the trend as of your last weigh-in: a week cut short by
+  // the gap would understate the pace
+  const last = (bwLog || []).filter((r) => r.date <= day).map((r) => r.date).sort().pop();
+  if (!last) return { rate: null, age: null };
+  for (let age = daysBetween(last, day); age <= VOLUME_TREND_MAX_AGE_DAYS; age++) {
+    const trend = weightTrend(bwLog, addDaysISO(day, -age));
+    if (trend.ready) return { rate: trend.pctPerWeek / 100, age };
+  }
+  return { rate: null, age: null };
+}
+
 function dietPhaseContext(rows, iso, bwLog) {
   const phase = phaseOnDate(rows, iso);
   if (!phase) return null;
   const strengthOn = (type, day, kind) => {
-    const trend = weightTrend(bwLog, day);
-    const rate = trend.ready ? trend.pctPerWeek / 100 : null;
-    if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null };
-    if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null };
-    if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null };
-    return { s: 0, estimated: rate === null };
+    const { rate, age } = latestTrendRate(bwLog, day);
+    if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    return { s: 0, estimated: rate === null, rate, rateAge: age };
   };
   // the block's own effect on a day inside it
   const own = (b, day) => {
@@ -410,8 +466,8 @@ function dietPhaseContext(rows, iso, bwLog) {
     const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
     const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
     const progress = b.kind === "minicut" ? 1 : Math.min(1, weeksIn / plannedWeeks);
-    const { s, estimated } = strengthOn(b.type, day, b.kind);
-    return { progress, strength: s, estimated, level: progress * s };
+    const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind);
+    return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
   };
   const KINDS = ["deficit", "surplus", "minicut"];
   const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name }
@@ -423,7 +479,7 @@ function dietPhaseContext(rows, iso, bwLog) {
     if (b.start > iso) break;
     const typed = KINDS.includes(b.kind);
     if (b.end === null || b.end >= iso) {
-      const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, level: 0 };
+      const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, rate: null, level: 0 };
       const levels = Object.fromEntries(KINDS.map((k) => [k, residual(carry[k], iso)]));
       if (typed) levels[b.kind] = held(b, o.level);
       // the earlier phase still fading (the larger, if both are)
@@ -434,7 +490,7 @@ function dietPhaseContext(rows, iso, bwLog) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, ...levels, fading };
     }
     if (!typed) continue;
     const prev = carry[b.kind];
@@ -2639,7 +2695,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
               <div key={k} style={S.ciCell}>
                 <div style={{ color: dim, fontSize: 11 }}>{lab}</div>
                 {adjusting && k !== "cal" ? (
-                  <input type="number" value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: Math.max(0, parseFloat(e.target.value) || 0) })} style={{ ...S.fInput, padding: "4px 6px" }} />
+                  <NumInput type="number" value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: Math.max(0, parseFloat(e.target.value) || 0) })} style={{ ...S.fInput, padding: "4px 6px" }} />
                 ) : (
                   <div style={{ fontWeight: 700 }}>{(adjusting && k === "cal" ? editCal : s[k]).toLocaleString()}{k === "cal" ? "" : " g"}</div>
                 )}
@@ -2838,10 +2894,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
         <span>−{VOLUME_SCALE}% deficit</span><span>baseline</span><span>+{VOLUME_SCALE}% surplus</span>
       </div>
       <div style={S.viNote}>
-        {impactR === 0
-          ? "Volume ceilings are at your normal baseline."
-          : `Recovery ceilings are ~${Math.abs(impactR)}% ${impactR < 0 ? "below" : "above"} baseline right now. RepReport applies this to your mesos automatically.`}
-        {ctx?.estimated && ctx.strength > 0 ? (ctx.kind === "minicut" ? " Assumed at full strength until the weight trend is ready." : " Estimated at half strength until the weight trend is ready.") : ""}
+        {volumeImpactNote(ctx, impactR, "RepReport applies this to your mesos automatically.")}
         {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
       </div>
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
@@ -3406,7 +3459,7 @@ function Slot({
         const m = scale(foodMacros(food, foods), e.qty);
         return (
           <div key={ei} style={S.entry}>
-            <input
+            <NumInput
               type="number"
               step="0.25"
               value={e.qty}
@@ -3446,6 +3499,36 @@ function Slot({
 
 // one food-log row: the amount saves when the field loses focus (or Enter),
 // not on every keystroke, so typing "1.5" isn't three writes
+// A number box you can clear while typing. The parent's handlers turn an
+// empty box into 0 (or 1) right away, which made a 0 impossible to delete;
+// this shows what you type until you leave the box, and selects its
+// contents on tap so typing replaces the old number.
+function NumInput({ value, onChange, onFocus, onBlur, ...rest }) {
+  const [text, setText] = useState(null); // null = not editing: show value
+  const justFocused = useRef(false);
+  const selectAll = (el) => { try { el.select(); } catch { /* not selectable */ } };
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      {...rest}
+      value={text ?? value ?? ""}
+      onFocus={(e) => {
+        setText(String(value ?? ""));
+        justFocused.current = true;
+        const el = e.target;
+        selectAll(el);
+        setTimeout(() => selectAll(el), 0);
+        onFocus?.(e);
+      }}
+      // the tap's release would drop the cursor at the end, undoing the select
+      onMouseUp={(e) => { if (justFocused.current) { e.preventDefault(); selectAll(e.target); } justFocused.current = false; }}
+      onChange={(e) => { setText(e.target.value); onChange(e); }}
+      onBlur={(e) => { setText(null); onBlur?.(e); }}
+    />
+  );
+}
+
 function LogEntry({ row, onQty, onRemove }) {
   const [qty, setQty] = useState(String(row.qty));
   useEffect(() => setQty(String(row.qty)), [row.qty]);
@@ -3666,7 +3749,7 @@ function FoodPicker({ foods, onPick, onClose, onCreateFood }) {
               ].map(([lab, k]) => (
                 <div key={k}>
                   <span style={S.macroMini}>{lab}</span>
-                  <input
+                  <NumInput
                     type="number"
                     step="0.1"
                     value={draft.macros[k]}
@@ -3975,7 +4058,7 @@ function ScanConfirm({ barcode, foods, onClose, onConfirm }) {
                 ].map(([lab, k]) => (
                   <div key={k}>
                     <span style={S.macroMini}>{lab}</span>
-                    <input
+                    <NumInput
                       type="number"
                       step="0.1"
                       value={draft.macros[k]}
@@ -3986,7 +4069,7 @@ function ScanConfirm({ barcode, foods, onClose, onConfirm }) {
                 ))}
               </div>
               <label style={S.fLabel}>Qty ({draft.unit})</label>
-              <input
+              <NumInput
                 type="number"
                 step="0.25"
                 value={qty}
@@ -4194,7 +4277,7 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
             {isRecipe && (
               <div style={{ width: 110 }}>
                 <label style={S.fLabel}>Servings</label>
-                <input
+                <NumInput
                   type="number"
                   value={draft.servings}
                   onChange={(e) =>
@@ -4244,7 +4327,7 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
                 const base = foods.find((x) => x.id === ing.foodId);
                 return (
                   <div key={i} style={S.ingRow}>
-                    <input
+                    <NumInput
                       type="number"
                       step="0.25"
                       value={ing.qty}
@@ -4567,7 +4650,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
             ].map(([lab, k]) => (
               <div key={k}>
                 <span style={S.macroMini}>{lab}</span>
-                <input
+                <NumInput
                   type="number"
                   value={p.target[k]}
                   onChange={(e) => set(p.id, k, true, e.target.value)}
