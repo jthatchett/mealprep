@@ -3034,7 +3034,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
     if (row) {
       const prog = phaseProgress(row, row.start_date);
       const m = rateIsMonthly(row.phase_type);
-      const rate = row.target_rate_pct == null ? "" : String(roundRate(Number(row.target_rate_pct) * (m ? WEEKS_PER_MONTH : 1)).toFixed(2));
+      const rate = row.target_rate_pct == null ? "" : String(Math.abs(roundRate(Number(row.target_rate_pct) * (m ? WEEKS_PER_MONTH : 1))).toFixed(2));
       setForm({ presetId: row.phase_id, start: row.start_date, weeks: prog.plannedWeeks || "", openEnded: !row.planned_end_date, rate });
       setMode("edit");
     } else {
@@ -3061,24 +3061,27 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
         .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0] || null
     : null;
 
-  // target rate, entered per week (cuts) or per month (bulks); stored per week
+  // target rate, entered per week (cuts) or per month (bulks); stored per week.
+  // Only the size is typed — phone number pads have no minus key — and the
+  // phase type gives the sign (cuts lose, bulks gain).
   const monthly = preset ? rateIsMonthly(preset.phase_type) : false;
-  const rateUnit = monthly ? "%/month" : "%/week";
-  const defaultShown = preset ? defaultRatePct(preset.phase_type, preset.name) * (monthly ? WEEKS_PER_MONTH : 1) : 0;
+  const rateSign = preset?.phase_type === "deficit" ? -1 : 1;
+  const rateUnit = preset?.phase_type === "deficit" ? "% loss/week" : monthly ? "% gain/month" : "%/week";
+  const defaultShown = preset ? Math.abs(defaultRatePct(preset.phase_type, preset.name) * (monthly ? WEEKS_PER_MONTH : 1)) : 0;
   // Cuts: Helms et al. 2014. Bulks: Iraki et al. 2019 (0.25–0.5 %/week for
   // novice/intermediate, slower for advanced; no figure given for advanced).
   // Mini-cut rates are coaching practice, not research — labeled as such.
   const rateHint = !preset ? "" : preset.phase_type === "deficit"
     ? (isMiniCut(preset.phase_type, preset.name)
-      ? "mini-cuts usually run ~−1.0 to −1.25 %/week (coaching practice, not studied)"
-      : "research range −0.5 to −1.0 %/week")
+      ? "mini-cuts usually lose ~1.0–1.25 %/week (coaching practice, not studied)"
+      : "research range 0.5–1.0 % loss/week")
     : preset.phase_type === "surplus"
       ? "research range ~1–2 %/month (0.25–0.5 %/week) for novice–intermediate · slower if advanced"
       : "";
   const rateWeekly = () => {
     if (!preset || preset.phase_type === "maintenance") return 0;
     if (form.rate === "") return roundRate(defaultRatePct(preset.phase_type, preset.name));
-    const n = parseFloat(form.rate);
+    const n = Math.abs(parseFloat(form.rate)) * rateSign;
     return isNaN(n) ? null : roundRate(monthly ? n / WEEKS_PER_MONTH : n);
   };
 
@@ -3088,8 +3091,6 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
     if (!preset) return window.alert("pick a phase first");
     const target_rate_pct = rateWeekly();
     if (target_rate_pct == null) return window.alert("enter a target rate as a number");
-    if (preset.phase_type === "deficit" && target_rate_pct > 0) return window.alert("a cut's target rate should be negative (a loss)");
-    if (preset.phase_type === "surplus" && target_rate_pct < 0) return window.alert("a bulk's target rate should be positive (a gain)");
     if (rateCheck.level === "block") return window.alert(rateCheck.message);
     setSaving(true);
     const ok = await onEdit(async (session) => {
@@ -3212,13 +3213,13 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
             <label style={{ fontSize: 12, color: dim, width: 64 }}>target</label>
             <input
-              type="number" step="0.05" inputMode="decimal"
+              type="number" step="0.05" min="0" inputMode="decimal"
               placeholder={defaultShown.toFixed(2)}
               value={form.rate}
               onChange={(e) => setForm({ ...form, rate: e.target.value })}
               style={{ ...S.fInput, flex: 1 }}
             />
-            <span style={{ fontSize: 12, color: dim, width: 64 }}>{rateUnit}</span>
+            <span style={{ fontSize: 12, color: dim, width: 84 }}>{rateUnit}</span>
           </div>
           <div style={{ fontSize: 11, color: dim, marginBottom: rateCheck.level === "ok" ? 10 : 4 }}>
             {form.rate === "" ? `default ${defaultShown.toFixed(2)} ${rateUnit} · ` : ""}{rateHint}
