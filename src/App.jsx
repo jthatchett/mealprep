@@ -551,7 +551,7 @@ function phaseCalories(phaseRow, presets, week) {
     ? days.map((d) => (d.targetId ? presets.find((p) => p.id === d.targetId)?.target.cal : null) ?? followed.target.cal)
     : [followed.target.cal];
   const avg = cals.reduce((a, b) => a + b, 0) / cals.length;
-  const pct = maint?.target.cal ? ((avg - maint.target.cal) / maint.target.cal) * 100 : null;
+  const pct = maint?.target.cal && !maint.example ? ((avg - maint.target.cal) / maint.target.cal) * 100 : null;
   return { avg, pct, baseOnly: followed.target.cal, isMaintenance: followed === maint };
 }
 
@@ -1174,8 +1174,12 @@ const SEED_PHASES = [
   ph("Bulk",           133, 78, 392, 2802, "phase-bulk"),
   ph("Weekend/Refeed", 126, 90, 422, 3002, "phase-weekend"),
 ];
+// New accounts start with these as examples: `example` marks targets the
+// person hasn't set themselves, so nothing treats them as their real
+// maintenance (the estimate's starting guess, the % vs maintenance).
+// Editing a preset's numbers clears it.
 function ph(name, p, f, c, cal, stableId) {
-  return { id: stableId || uid(), name, phase_type: SEED_PHASE_TYPES[stableId], target: { p, f, c, cal } };
+  return { id: stableId || uid(), name, phase_type: SEED_PHASE_TYPES[stableId], target: { p, f, c, cal }, example: true };
 }
 
 function uid() {
@@ -1960,15 +1964,19 @@ export default function App() {
     const sorted = [...checkins].sort((a, b) => (a.week_start < b.week_start ? -1 : 1));
     const thisWeek = sorted.find((c) => c.week_start === weekStart) || null;
     const last = [...sorted].reverse().find((c) => c.week_start < weekStart) || null;
-    const startingGuess = Number(maint?.target.cal) || null;
+    const startingGuess = maint && !maint.example ? Number(maint.target.cal) || null : null;
     const prior = last ? Number(last.estimate) : startingGuess;
     const raw = rawMaintenance({ log: bwLog, intakeByDate, statusByDate, today });
-    const estimate = prior != null ? nextEstimate(prior, raw.raw) : null;
+    // no starting guess (example targets): the first real estimate stands as is
+    const estimate = prior != null ? nextEstimate(prior, raw.raw) : raw.raw;
     const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
     const weightLb = raw.trendWeight ?? latest;
     const wk = weightTrend(bwLog, today);
     const ratePct = dietPhase ? phaseRatePct(dietPhase) : 0;
-    const suggestion = followed && estimate != null
+    // suggest new targets only once the estimate rests on your own log and
+    // weigh-ins (this week's, or an earlier check-in's), never on a guess
+    const grounded = raw.raw != null || sorted.some((c) => c.estimate_raw != null);
+    const suggestion = followed && estimate != null && grounded
       ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type })
       : null;
     // shown on the phase card: the latest check-in's estimate, else the starting guess
@@ -1976,7 +1984,8 @@ export default function App() {
     return {
       today, weekStart, intakeByDate, statusByDate, raw, estimate, prior, startingGuess, weightLb, ratePct,
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
-      due: !!dietPhase && !!followed && !thisWeek,
+      // nothing to check in on until there's an estimate (example targets, no data yet)
+      due: !!dietPhase && !!followed && !thisWeek && estimate != null,
       card: shown ? { kcal: Number(shown.estimate), estimated: shown.estimate_raw != null || sorted.some((c) => c.estimate_raw != null) } : startingGuess ? { kcal: startingGuess, estimated: false } : null,
     };
   }, [store, rangeIntake, intake, dayStatus, checkins, bwLog, dietPhase]);
@@ -2709,7 +2718,6 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
             {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
             {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
-            {c.raw.raw == null && <div>• Based on your starting guess, not your data yet — expect it to change.</div>}
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             {!adjusting ? (
@@ -2728,9 +2736,14 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
         </>
       )}
       {!s && (
-        <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} disabled={busy} onClick={() => finish("keep", null)}>
-          Done — no suggestion this week
-        </button>
+        <>
+          {c.raw.raw == null && (
+            <div style={S.ciNotes}>No new targets until the estimate comes from your own log and weigh-ins. Keep logging; nothing to change yet.</div>
+          )}
+          <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} disabled={busy} onClick={() => finish("keep", null)}>
+            {c.raw.raw == null ? "Got it" : "Done — no suggestion this week"}
+          </button>
+        </>
       )}
     </div>
   );
@@ -3505,7 +3518,7 @@ function Slot({
 // contents on tap so typing replaces the old number.
 function NumInput({ value, onChange, onFocus, onBlur, ...rest }) {
   const [text, setText] = useState(null); // null = not editing: show value
-  const justFocused = useRef(false);
+  const justFocused = useRef(false); // the value at focus, until the tap is released
   const selectAll = (el) => { try { el.select(); } catch { /* not selectable */ } };
   return (
     <input
@@ -3514,15 +3527,21 @@ function NumInput({ value, onChange, onFocus, onBlur, ...rest }) {
       {...rest}
       value={text ?? value ?? ""}
       onFocus={(e) => {
-        setText(String(value ?? ""));
-        justFocused.current = true;
+        const start = String(value ?? "");
+        setText(start);
+        justFocused.current = start;
         const el = e.target;
         selectAll(el);
-        setTimeout(() => selectAll(el), 0);
+        // re-select once the tap settles, unless typing has already begun
+        // (a late select would grab the first digit and the next would replace it)
+        setTimeout(() => { if (el.value === start) selectAll(el); }, 0);
         onFocus?.(e);
       }}
       // the tap's release would drop the cursor at the end, undoing the select
-      onMouseUp={(e) => { if (justFocused.current) { e.preventDefault(); selectAll(e.target); } justFocused.current = false; }}
+      onMouseUp={(e) => {
+        if (justFocused.current !== false && e.target.value === justFocused.current) { e.preventDefault(); selectAll(e.target); }
+        justFocused.current = false;
+      }}
       onChange={(e) => { setText(e.target.value); onChange(e); }}
       onBlur={(e) => { setText(null); onBlur?.(e); }}
     />
@@ -4576,7 +4595,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
       prev.map((p) =>
         p.id === id
           ? sub
-            ? { ...p, target: { ...p.target, [key]: parseFloat(val) || 0 } }
+            ? { ...p, target: { ...p.target, [key]: parseFloat(val) || 0 }, example: false }
             : { ...p, [key]: val }
           : p
       )
@@ -4659,6 +4678,13 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
               </div>
             ))}
           </div>
+          {p.example && (
+            <div style={S.exampleNote}>
+              Example numbers. Change them to yours
+              {p.phase_type === "maintenance" ? "; your maintenance calories are where the calorie coaching starts" : ""}.{" "}
+              <button style={S.linkBtn} onClick={() => set(p.id, "example", false, false)}>these are mine</button>
+            </div>
+          )}
           <TargetChanges rows={(targetHistory || []).filter((h) => h.preset_id === p.id)} />
           <button
             style={S.xBtnSm}
@@ -5017,6 +5043,8 @@ const S = {
   dsRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, color: dim, padding: "8px 2px", marginBottom: 10 },
   dsBtn: { background: "transparent", border: `1px solid ${line}`, color: text, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" },
   pcEstimate: { fontSize: 12, marginTop: 10 },
+  exampleNote: { fontSize: 12, color: "#ffb454", marginTop: 8, lineHeight: 1.4 },
+  linkBtn: { background: "none", border: "none", padding: 0, color: accent, textDecoration: "underline", cursor: "pointer", font: "inherit" },
   useRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: dim, margin: "8px 0" },
   tcBox: { color: dim, fontSize: 11, lineHeight: 1.5, margin: "8px 0 6px" },
   pcTarget: { color: text, fontSize: 12, marginTop: 10, opacity: 0.85 },
