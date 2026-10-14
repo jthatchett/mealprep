@@ -84,6 +84,10 @@ function hasConsent(user) {
 // PUT /auth/v1/user merges `data` into user_metadata and returns the updated
 // user. Retries once with a refreshed token. Resolves to the new session.
 async function sbRecordConsent(session) {
+  return sbUpdateUserMeta(session, { age_confirmed_at: new Date().toISOString(), terms_version: TERMS_VERSION }, "couldn't save your confirmation");
+}
+
+async function sbUpdateUserMeta(session, fields, failMsg = "couldn't save") {
   const put = (s) => fetch(`${SUPABASE_URL}/auth/v1/user`, {
     method: "PUT",
     headers: {
@@ -91,9 +95,7 @@ async function sbRecordConsent(session) {
       apikey: SUPABASE_ANON_KEY,
       Authorization: `Bearer ${s.access_token}`,
     },
-    body: JSON.stringify({
-      data: { age_confirmed_at: new Date().toISOString(), terms_version: TERMS_VERSION },
-    }),
+    body: JSON.stringify({ data: fields }),
   });
   let sess = session;
   let res = await put(sess);
@@ -103,7 +105,7 @@ async function sbRecordConsent(session) {
     res = await put(sess);
   }
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.msg || "couldn't save your confirmation");
+  if (!res.ok) throw new Error(data.error_description || data.msg || failMsg);
   return { ...sess, user: data };
 }
 
@@ -960,6 +962,54 @@ function suggestTargets({ estimate, ratePctPerWeek, weightLb, current, phaseType
   };
 }
 
+/* ---------- starting targets calculator ----------
+   A first estimate of maintenance from a short profile, used to fill the
+   presets so a new account starts from its own numbers. The weekly
+   check-in corrects it once there are a few weeks of log and weigh-ins.
+   - Calories at rest: Mifflin-St Jeor (best-validated for the general
+     population, ~±10% for most non-obese adults: Frankenfield 2005). With
+     a body-fat %, Tinsley 2019's lean-mass equation (25.9 × FFM + 284):
+     weight-only equations underestimate muscular people.
+   - Daily movement outside the gym (and digesting food): × 1.3 / 1.45 /
+     1.6 / 1.75 — standard activity-factor conventions, not measurements.
+   - Lifting, added on top: ~1 hour at ~5 METs (Compendium of Physical
+     Activities, resistance training), net of resting: 4 kcal/kg/session,
+     averaged over the week. */
+const MOVEMENT_LEVELS = [
+  { id: "sitting", factor: 1.3, label: "Mostly sitting", desc: "desk job, studying, driving. Under ~5,000 steps." },
+  { id: "walking", factor: 1.45, label: "Some walking", desc: "up and about part of the day, e.g. teaching, errands, a walk most days. ~5,000–10,000 steps." },
+  { id: "feet", factor: 1.6, label: "On your feet most of the day", desc: "retail, nursing, serving, warehouse. ~10,000–15,000 steps." },
+  { id: "physical", factor: 1.75, label: "Physical work", desc: "construction, landscaping, moving heavy things. 15,000+ steps." },
+];
+const LIFT_KCAL_PER_KG = 4;
+const inToCm = (i) => i * 2.54;
+
+function estimateMaintenance({ sex, age, heightIn, weightLb, bodyFatPct, movement, liftDays }) {
+  const kg = lbToKg(weightLb);
+  const lean = bodyFatPct > 0 && bodyFatPct < 70;
+  const rest = lean
+    ? 25.9 * kg * (1 - bodyFatPct / 100) + 284
+    : 10 * kg + 6.25 * inToCm(heightIn) - 5 * age + (sex === "female" ? -161 : 5);
+  const level = MOVEMENT_LEVELS.find((m) => m.id === movement) || MOVEMENT_LEVELS[0];
+  const lifting = ((liftDays || 0) / 7) * LIFT_KCAL_PER_KG * kg;
+  const total = Math.round((rest * level.factor + lifting) / 10) * 10;
+  return { rest: Math.round(rest), method: lean ? "lean mass" : "Mifflin-St Jeor", daily: Math.round(rest * level.factor), lifting: Math.round(lifting), total };
+}
+
+// Every phase-type preset's targets from a maintenance number: calories
+// for its default rate (or maintenance, for maintenance and day presets),
+// protein at the phase floor, fat 20% on a cut / 25% otherwise (Helms
+// 2014: 15–30%), carbs the rest.
+function targetsFromMaintenance(preset, maintenance, weightLb) {
+  const type = preset.phase_type;
+  const rate = type === "deficit" || type === "surplus" ? defaultRatePct(type, preset.name) : 0;
+  const cal = Math.round((maintenance + (rate / 100) * weightLb * KCAL_PER_LB / 7) / 10) * 10;
+  const fatShare = type === "deficit" || type === "day" ? 0.2 : 0.25; // refeeds: carbs, not fat
+  const { p, f, c } = splitMacros({ cal, current: { p: 0, f: Math.round((fatShare * cal) / 9) }, phaseType: type, weightLb });
+  return { p, f, c, cal };
+}
+
+
 async function sbLoadIntakeRange(session, from, to) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/intake_log?select=date,qty,cal&user_id=eq.${session.user.id}&date=gte.${from}&date=lte.${to}`,
@@ -985,6 +1035,20 @@ async function sbSetDayStatus(session, date, included) {
     body: JSON.stringify({ user_id: session.user.id, date, included }),
   });
   if (!res.ok) throw new Error("Failed to save day status: " + res.status);
+}
+
+// Lifting days per week from RepReport (same Supabase project and user):
+// the current training block's days per week, else the last archived one.
+// null when there's no RepReport data.
+async function sbLoadLiftDays(session) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/training_data?select=cur:data->meso->data->weeks->0->days,arch:data->archive->data->0->weeks->0->days&user_id=eq.${session.user.id}`,
+    { headers: sbHeaders(session) }
+  );
+  if (!res.ok) return null;
+  const [row] = await res.json();
+  const days = Array.isArray(row?.cur) ? row.cur : Array.isArray(row?.arch) ? row.arch : null;
+  return days && days.length ? Math.min(7, days.length) : null;
 }
 
 async function sbLoadCheckins(session) {
@@ -1451,6 +1515,26 @@ export default function App() {
   const setActiveDay = (dayKey) =>
     setSelectedDate(addDaysISO(mondayOf(selectedDate), DAYS.indexOf(dayKey)));
   const [showMonth, setShowMonth] = useState(false);
+  // starting-targets calculator: open state, and RepReport's lifting days (null = none)
+  const [calc, setCalc] = useState(null);
+  const [savedProfile, setSavedProfile] = useState(null); // this session's save; else user_metadata
+  const [calcLater, setCalcLater] = useState(() => { try { return localStorage.getItem("mealprep:calc-later") === "1"; } catch { return false; } });
+  const openCalc = async () => {
+    let liftDays = null;
+    try { liftDays = await sbLoadLiftDays(session); } catch { /* no RepReport data */ }
+    setCalc({ liftDays });
+  };
+  const applyCalc = async (targets, profile) => {
+    setPhases((prev) => prev.map((p) => (targets[p.id] ? { ...p, target: targets[p.id], example: false } : p)));
+    setCalc(null);
+    setSavedProfile(profile);
+    // kept on the account for next time; not via setSession, which would re-run the data loads
+    try {
+      const next = await sbUpdateUserMeta(session, { profile });
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ access_token: next.access_token, refresh_token: next.refresh_token, user: next.user }));
+    } catch { /* the targets are saved either way */ }
+  };
+  const laterCalc = () => { setCalcLater(true); try { localStorage.setItem("mealprep:calc-later", "1"); } catch { /* private mode */ } };
   const [debugLog, setDebugLog] = useState([]);
   const [session, setSession] = useState(null);     // null = not yet checked
   const [sessionChecked, setSessionChecked] = useState(false);
@@ -2176,6 +2260,16 @@ export default function App() {
     <div style={S.app}>
       <Style />
       {showBwModal && <BodyweightModal onSave={saveBodyweight} onSkip={skipBodyweight} />}
+      {calc && (
+        <TargetsCalculator
+          presets={phases}
+          bwLog={bwLog}
+          profile={savedProfile || session?.user?.user_metadata?.profile}
+          liftDaysFromRR={calc.liftDays}
+          onApply={applyCalc}
+          onClose={() => setCalc(null)}
+        />
+      )}
       {showMonth && (
         <MonthSheet
           selectedDate={selectedDate}
@@ -2260,6 +2354,9 @@ export default function App() {
             onSetDayIncluded={setDayIncluded}
             onCompleteCheckin={completeCheckin}
             onOpenMonth={() => setShowMonth(true)}
+            showCalcPrompt={!calcLater && phases.some((p) => p.example)}
+            onOpenCalc={openCalc}
+            onCalcLater={laterCalc}
           />
         )}
         {tab === "foods" && (
@@ -2275,6 +2372,7 @@ export default function App() {
             targetHistory={targetHistory}
             onSwitchPhase={switchPhase}
             onOpenCalendar={() => { setTab("plan"); setShowMonth(true); }}
+            onOpenCalc={openCalc}
           />
         )}
         {tab === "data" && (
@@ -2300,7 +2398,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -2411,6 +2509,16 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
 
   return (
     <div>
+      {showCalcPrompt && (
+        <div style={S.calcPrompt}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Set your starting targets</div>
+          <div style={{ fontSize: 13, color: dim, marginBottom: 10 }}>Your targets are example numbers. Answer a few questions (about a minute) to get your own.</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={{ ...S.primaryBtn, flex: 2 }} onClick={onOpenCalc}>Calculate my targets</button>
+            <button style={{ ...S.ghostBtn, flex: 1 }} onClick={onCalcLater}>later</button>
+          </div>
+        </div>
+      )}
       {selectedDate === coaching?.today && coaching?.due && (
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
@@ -4604,7 +4712,126 @@ function TargetChanges({ rows }) {
   );
 }
 
-function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, onSwitchPhase, onOpenCalendar }) {
+// "Calculate my targets": a short profile -> a starting maintenance -> every
+// phase preset's targets, shown for review before anything is saved.
+function TargetsCalculator({ presets, bwLog, profile, liftDaysFromRR, onApply, onClose }) {
+  const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
+  const pr = profile || {};
+  const [f, setF] = useState({
+    sex: pr.sex || "", age: pr.age ?? "", ft: pr.height_in ? Math.floor(pr.height_in / 12) : "", inch: pr.height_in ? pr.height_in % 12 : "",
+    weight: latest ?? pr.weight_lb ?? "", bf: pr.body_fat_pct ?? "", movement: pr.movement || "",
+    lift: pr.lift_days ?? liftDaysFromRR ?? "",
+  });
+  const [step, setStep] = useState("form");
+  const [chosen, setChosen] = useState(() => new Set(presets.filter((p) => isPhaseType(p.phase_type) || p.phase_type === "day").map((p) => p.id)));
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => { setF((x) => ({ ...x, [k]: v })); setErr(""); };
+  const num = (v) => (v === "" || v == null ? NaN : Number(v));
+  const heightIn = num(f.ft) * 12 + (num(f.inch) || 0);
+  const liftFromRR = liftDaysFromRR != null && String(f.lift) === String(liftDaysFromRR) && pr.lift_days == null;
+
+  const est = (() => {
+    if (!f.sex || !f.movement || f.lift === "" || !(num(f.age) >= 14) || !(heightIn > 36) || !(num(f.weight) > 60)) return null;
+    return estimateMaintenance({ sex: f.sex, age: num(f.age), heightIn, weightLb: num(f.weight), bodyFatPct: num(f.bf) || 0, movement: f.movement, liftDays: num(f.lift) });
+  })();
+  const usable = presets.filter((p) => isPhaseType(p.phase_type) || p.phase_type === "day");
+  const proposed = est ? Object.fromEntries(usable.map((p) => [p.id, targetsFromMaintenance(p, est.total, num(f.weight))])) : {};
+
+  const next = () => {
+    if (!est) return setErr("Fill in sex, age, height, weight, how much you move, and lifting days.");
+    setStep("review");
+  };
+  const apply = async () => {
+    setBusy(true);
+    await onApply(
+      Object.fromEntries([...chosen].filter((id) => proposed[id]).map((id) => [id, proposed[id]])),
+      { sex: f.sex, age: num(f.age), height_in: heightIn, weight_lb: num(f.weight), body_fat_pct: num(f.bf) || null, movement: f.movement, lift_days: num(f.lift) }
+    );
+    setBusy(false);
+  };
+  const opt = (on) => ({ ...S.ghostBtn, flex: 1, ...(on ? { color: accent, borderColor: accent } : {}) });
+
+  return (
+    <div style={S.modalWrap} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
+        <div style={S.modalHead}>
+          <strong style={{ fontSize: 13, letterSpacing: 1 }}>{step === "form" ? "CALCULATE MY TARGETS" : "YOUR STARTING TARGETS"}</strong>
+          <button style={S.xBtn} onClick={onClose}>✕</button>
+        </div>
+        {step === "form" ? (
+          <div style={S.editorBody}>
+            <label style={S.fLabel}>Sex</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={opt(f.sex === "male")} onClick={() => set("sex", "male")}>Male</button>
+              <button style={opt(f.sex === "female")} onClick={() => set("sex", "female")}>Female</button>
+            </div>
+            <div style={S.fRow}>
+              <div style={{ flex: 1 }}><label style={S.fLabel}>Age</label><NumInput value={f.age} onChange={(e) => set("age", e.target.value)} inputMode="numeric" style={S.fInput} /></div>
+              <div style={{ flex: 1 }}><label style={S.fLabel}>Height (ft)</label><NumInput value={f.ft} onChange={(e) => set("ft", e.target.value)} inputMode="numeric" style={S.fInput} /></div>
+              <div style={{ flex: 1 }}><label style={S.fLabel}>(in)</label><NumInput value={f.inch} onChange={(e) => set("inch", e.target.value)} inputMode="numeric" style={S.fInput} /></div>
+            </div>
+            <div style={S.fRow}>
+              <div style={{ flex: 1 }}>
+                <label style={S.fLabel}>Weight ({WEIGHT_UNIT})</label>
+                <NumInput value={f.weight} onChange={(e) => set("weight", e.target.value)} style={S.fInput} />
+                {latest != null && String(f.weight) === String(latest) && <div style={S.calcHint}>from your last weigh-in</div>}
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={S.fLabel}>Body fat % (optional)</label>
+                <NumInput value={f.bf} onChange={(e) => set("bf", e.target.value)} style={S.fInput} placeholder="if you know it" />
+              </div>
+            </div>
+            <label style={S.fLabel}>Outside the gym, how much do you move on a typical day?</label>
+            {MOVEMENT_LEVELS.map((m) => (
+              <button key={m.id} style={{ ...S.calcOption, ...(f.movement === m.id ? { borderColor: accent } : {}) }} onClick={() => set("movement", m.id)}>
+                <b style={{ color: f.movement === m.id ? accent : text }}>{m.label}</b>: {m.desc}
+              </button>
+            ))}
+            <label style={S.fLabel}>Lifting days per week</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[0, 1, 2, 3, 4, 5, 6, 7].map((d) => (
+                <button key={d} style={{ ...opt(String(f.lift) === String(d)), padding: "8px 0" }} onClick={() => set("lift", d)}>{d}</button>
+              ))}
+            </div>
+            {liftFromRR && <div style={S.calcHint}>from your current RepReport block</div>}
+            {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 8 }}>{err}</div>}
+            <button style={{ ...S.primaryBtn, width: "100%", marginTop: 14 }} onClick={next}>See my targets</button>
+          </div>
+        ) : (
+          <div style={S.editorBody}>
+            <div style={{ fontSize: 15 }}>Maintenance ≈ <b>{est.total.toLocaleString()} kcal</b></div>
+            <div style={S.calcHint}>
+              {est.rest.toLocaleString()} at rest ({est.method}) × your daily movement = {est.daily.toLocaleString()}
+              {est.lifting ? `, + ${est.lifting} for lifting` : ""}. A starting estimate: your weekly check-ins correct it after 2–3 weeks of logging.
+            </div>
+            {usable.map((p) => {
+              const t = proposed[p.id];
+              const on = chosen.has(p.id);
+              return (
+                <label key={p.id} style={{ ...S.calcRow, opacity: on ? 1 : 0.5 }}>
+                  <input type="checkbox" checked={on} onChange={() => setChosen((c) => { const n = new Set(c); n.has(p.id) ? n.delete(p.id) : n.add(p.id); return n; })} />
+                  <span style={{ flex: 1 }}>
+                    <b>{p.name}</b>
+                    <span style={{ color: dim }}> · now {Math.round(p.target.cal).toLocaleString()}{p.example ? " (example)" : ""}</span>
+                  </span>
+                  <span>{t.cal.toLocaleString()} kcal · {t.p}P {t.f}F {t.c}C</span>
+                </label>
+              );
+            })}
+            <div style={S.calcHint}>Protein ~2 g/kg on a cut, 1.6 g/kg otherwise; fat 20–25% of calories; carbs the rest. Untick any you want to keep as they are.</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy || !chosen.size} onClick={apply}>Save these targets</button>
+              <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => setStep("form")}>back</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, onSwitchPhase, onOpenCalendar, onOpenCalc }) {
   const prog = phaseProgress(dietPhase, todayISO());
   const set = (id, key, sub, val) =>
     setPhases((prev) =>
@@ -4656,6 +4883,9 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
         </button>
       </div>
       <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} targetHistory={targetHistory} />
+      <button style={{ ...S.ghostBtn, width: "100%", marginBottom: 14, color: accent, borderColor: accent }} onClick={onOpenCalc}>
+        Calculate my targets
+      </button>
       {phases.map((p) => (
         <div key={p.id} style={S.phaseCard}>
           <input
@@ -5103,6 +5333,10 @@ const S = {
   dsBtn: { background: "transparent", border: `1px solid ${line}`, color: text, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" },
   pcEstimate: { fontSize: 12, marginTop: 10 },
   exampleNote: { fontSize: 12, color: "#ffb454", marginTop: 8, lineHeight: 1.4 },
+  calcHint: { fontSize: 11, color: dim, marginTop: 4, lineHeight: 1.4 },
+  calcOption: { display: "block", width: "100%", textAlign: "left", background: panel2, border: `1px solid ${line}`, borderRadius: 8, padding: "9px 10px", marginBottom: 6, color: dim, fontSize: 13, lineHeight: 1.4, cursor: "pointer", fontFamily: "inherit" },
+  calcRow: { display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: `1px solid ${line}`, fontSize: 13 },
+  calcPrompt: { border: `1px solid ${accent}`, borderRadius: 12, padding: 14, marginBottom: 12, background: panel2 },
   linkBtn: { background: "none", border: "none", padding: 0, color: accent, textDecoration: "underline", cursor: "pointer", font: "inherit" },
   useRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: dim, margin: "8px 0" },
   tcBox: { color: dim, fontSize: 11, lineHeight: 1.5, margin: "8px 0 6px" },
