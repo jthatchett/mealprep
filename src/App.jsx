@@ -127,6 +127,22 @@ async function sbAccountAction(session, action, extra = {}) {
   return data;
 }
 
+// Feedback to the developer: shared feedback table with RepReport
+// (insert-only for users via RLS). Retries once on an expired token.
+async function sbSendFeedback(session, message) {
+  const post = (s) => fetch(`${SUPABASE_URL}/rest/v1/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${s.access_token}`, Prefer: "return=minimal" },
+    body: JSON.stringify({ app: "Meal Prep", message, screen: "data", app_version: "v0.1", user_agent: navigator.userAgent.slice(0, 300) }),
+  });
+  let res = await post(session);
+  if (res.status === 401) {
+    const r = await sbRefreshToken(session.refresh_token);
+    res = await post({ access_token: r.access_token });
+  }
+  if (!res.ok) throw new Error(`couldn't send feedback (${res.status})`);
+}
+
 // fetch the user's app_data row (updated_at is the version a save must match)
 async function sbLoadAppData(session) {
   const res = await fetch(
@@ -4606,6 +4622,21 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, ses
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteTyped, setDeleteTyped] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [feedbackState, setFeedbackState] = useState("idle"); // idle | sending | sent | error
+
+  const sendFeedback = async () => {
+    setFeedbackState("sending");
+    try {
+      await sbSendFeedback(session, feedbackText.trim());
+      setFeedbackState("sent");
+      setFeedbackText("");
+    } catch (e) {
+      setFeedbackState("error");
+      setAcctMsg(e.message);
+    }
+  };
 
   // everything in both apps, from the server
   const exportAll = async () => {
@@ -4718,6 +4749,34 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, ses
         <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>privacy policy</a>
         <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>terms of use</a>
       </div>
+
+      <p style={{...S.note, marginTop: 8, marginBottom: 8}}>
+        Feedback · bugs, confusing screens, ideas. Goes straight to the developer.
+      </p>
+      <div style={S.dataRow}>
+        <button style={S.ghostBtn} onClick={() => { setFeedbackOpen((o) => !o); setFeedbackState("idle"); }}>send feedback</button>
+      </div>
+      {feedbackOpen && (
+        <div style={{ ...S.phaseCard, marginBottom: 12 }}>
+          {feedbackState === "sent" ? (
+            <p style={{ ...S.note, marginBottom: 0 }}>Thanks, it's sent. Every message gets read.</p>
+          ) : (
+            <>
+              <label htmlFor="mp-feedback" style={S.fLabel}>what happened, what confused you, or what you'd change</label>
+              <textarea id="mp-feedback" value={feedbackText} rows={5} disabled={feedbackState === "sending"}
+                onChange={(e) => setFeedbackText(e.target.value.slice(0, 4000))}
+                placeholder="e.g. the barcode scanner didn't find my protein bar…"
+                style={{ ...S.fInput, marginBottom: 10, resize: "none", fontFamily: "inherit" }} />
+              <div style={S.dataRow}>
+                <button style={S.ghostBtn} onClick={() => setFeedbackOpen(false)} disabled={feedbackState === "sending"}>cancel</button>
+                <button style={S.primaryBtn} onClick={sendFeedback} disabled={!feedbackText.trim() || feedbackState === "sending"}>
+                  {feedbackState === "sending" ? "sending…" : "send"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <p style={{...S.note, marginTop: 8, marginBottom: 8}}>
         Your account (covers Meal Prep and RepReport).
