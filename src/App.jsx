@@ -385,6 +385,39 @@ function phaseBlocks(rows) {
   return blocks;
 }
 
+// The plain-language note under "Training volume impact": where the
+// ceilings sit and what that's based on: the weigh-in trend, or an assumed
+// pace until 2 weeks of weigh-ins exist. RepReport's dashboard says the
+// same (dietImpactNote there); keep the two in step.
+function volumeImpactNote(ctx, impactR, applied) {
+  const level = impactR === 0
+    ? "Volume ceilings are at your normal baseline"
+    : `Volume ceilings are ~${Math.abs(impactR)}% ${impactR < 0 ? "below" : "above"} baseline`;
+  if (!ctx?.typed) return impactR === 0 ? `${level}.` : `${level}. ${applied}`;
+  const losing = ctx.type === "deficit";
+  const verb = losing ? "losing" : "gaining";
+  const word = ctx.kind === "minicut" ? "mini-cut" : losing ? "cut" : "bulk";
+  const need = `2 weeks of weigh-ins (${TREND_MIN_WEIGHINS}+ each week)`;
+  if (ctx.estimated) {
+    const assumed = ctx.kind === "minicut" ? VOLUME_DEFICIT_FULL_RATE : (losing ? VOLUME_DEFICIT_FULL_RATE : VOLUME_SURPLUS_FULL_RATE) * VOLUME_DEFAULT_STRENGTH;
+    const pace = `you're ${verb} ${+(assumed * 100).toFixed(2)}%/week${ctx.kind === "minicut" ? " (the usual mini-cut pace)" : ""}`;
+    return impactR === 0
+      ? `${level}. Until you have ${need}, it assumes ${pace}.`
+      : `${level}, assuming ${pace}. After ${need}, your actual trend sets it. ${applied}`;
+  }
+  const r = ctx.rate * 100;
+  const shown = `${r >= 0 ? "+" : "−"}${Math.abs(r).toFixed(1)}%/week`;
+  if (losing ? r >= 0 : r <= 0) {
+    // the trend contradicts the phase: anything left is an earlier phase fading
+    return impactR === 0
+      ? `${level}: your weight isn't ${losing ? "dropping" : "rising"} (${shown}), so the ${word} isn't affecting recovery yet.`
+      : `${level}. ${applied}`;
+  }
+  const based = `based on ${verb} ${Math.abs(r).toFixed(1)}%/week`;
+  if (impactR !== 0) return `${level}, ${based}. ${applied}`;
+  return ctx.kind === "minicut" ? `${level}, ${based}.` : `${level}, ${based}. The adjustment builds as the ${word} goes on.`;
+}
+
 // A block's weeks from its start to `iso` (inclusive)
 const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
 
@@ -398,10 +431,10 @@ function dietPhaseContext(rows, iso, bwLog) {
   const strengthOn = (type, day, kind) => {
     const trend = weightTrend(bwLog, day);
     const rate = trend.ready ? trend.pctPerWeek / 100 : null;
-    if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null };
-    if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null };
-    if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null };
-    return { s: 0, estimated: rate === null };
+    if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate };
+    if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate };
+    if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate };
+    return { s: 0, estimated: rate === null, rate };
   };
   // the block's own effect on a day inside it
   const own = (b, day) => {
@@ -410,8 +443,8 @@ function dietPhaseContext(rows, iso, bwLog) {
     const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
     const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
     const progress = b.kind === "minicut" ? 1 : Math.min(1, weeksIn / plannedWeeks);
-    const { s, estimated } = strengthOn(b.type, day, b.kind);
-    return { progress, strength: s, estimated, level: progress * s };
+    const { s, estimated, rate } = strengthOn(b.type, day, b.kind);
+    return { progress, strength: s, estimated, rate, level: progress * s };
   };
   const KINDS = ["deficit", "surplus", "minicut"];
   const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name }
@@ -423,7 +456,7 @@ function dietPhaseContext(rows, iso, bwLog) {
     if (b.start > iso) break;
     const typed = KINDS.includes(b.kind);
     if (b.end === null || b.end >= iso) {
-      const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, level: 0 };
+      const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, rate: null, level: 0 };
       const levels = Object.fromEntries(KINDS.map((k) => [k, residual(carry[k], iso)]));
       if (typed) levels[b.kind] = held(b, o.level);
       // the earlier phase still fading (the larger, if both are)
@@ -434,7 +467,7 @@ function dietPhaseContext(rows, iso, bwLog) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, typed, ...levels, fading };
     }
     if (!typed) continue;
     const prev = carry[b.kind];
@@ -2838,10 +2871,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
         <span>−{VOLUME_SCALE}% deficit</span><span>baseline</span><span>+{VOLUME_SCALE}% surplus</span>
       </div>
       <div style={S.viNote}>
-        {impactR === 0
-          ? "Volume ceilings are at your normal baseline."
-          : `Recovery ceilings are ~${Math.abs(impactR)}% ${impactR < 0 ? "below" : "above"} baseline right now. RepReport applies this to your mesos automatically.`}
-        {ctx?.estimated && ctx.strength > 0 ? (ctx.kind === "minicut" ? " Assumed at full strength until the weight trend is ready." : " Estimated at half strength until the weight trend is ready.") : ""}
+        {volumeImpactNote(ctx, impactR, "RepReport applies this to your mesos automatically.")}
         {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
       </div>
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
