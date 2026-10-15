@@ -807,11 +807,25 @@ function intakeTotal(rows) {
 }
 
 /* ---------- weight trend ----------
-   Same rule RepReport uses (computeWeeklyWeightRate): the average of the
-   7 days ending today against the 7 days before, and only when each week
-   has at least 4 weigh-ins — single weigh-ins swing 1–2% on water alone.
-   Keep the two in step. */
+   Same rule RepReport uses (computeWeeklyWeightRate): ready only when the
+   7 days ending today and the 7 days before each have at least 4
+   weigh-ins (single weigh-ins swing 1–2% on water alone). The rate is
+   the slope of a straight line fitted through every weigh-in in those 2
+   weeks, each on its own date: comparing the two weeks' averages
+   understates it when weigh-ins bunch up (Mon–Thu one week, Fri–Sun the
+   next puts the averages ~4 days apart, not 7). Keep the two in step. */
 const TREND_MIN_WEIGHINS = 4;
+// least-squares slope (lb per day) and mean weight of the weigh-ins in [from, to]
+function weighInFit(log, from, to) {
+  const pts = (log || [])
+    .filter((r) => r.date >= from && r.date <= to && Number(r.weight) > 0)
+    .map((r) => [daysBetween(from, r.date), Number(r.weight)]);
+  const n = pts.length;
+  const mx = pts.reduce((a, [x]) => a + x, 0) / n, my = pts.reduce((a, [, y]) => a + y, 0) / n;
+  const sxx = pts.reduce((a, [x]) => a + (x - mx) ** 2, 0);
+  const sxy = pts.reduce((a, [x, y]) => a + (x - mx) * (y - my), 0);
+  return { slope: sxx ? sxy / sxx : 0, mean: my };
+}
 function weightTrend(log, today) {
   const week = (from, to) =>
     (log || []).filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)).filter((w) => w > 0);
@@ -821,12 +835,14 @@ function weightTrend(log, today) {
   if (recent.length < TREND_MIN_WEIGHINS || prior.length < TREND_MIN_WEIGHINS) {
     return { ready: false, recentCount: recent.length, priorCount: prior.length };
   }
-  const now = avg(recent), before = avg(prior);
-  return { ready: true, avg: now, perWeek: now - before, pctPerWeek: ((now - before) / before) * 100 };
+  const fit = weighInFit(log, addDaysISO(today, -13), today);
+  const perWeek = fit.slope * 7;
+  return { ready: true, avg: avg(recent), perWeek, pctPerWeek: (perWeek / fit.mean) * 100 };
 }
 
-// Four-week version for bulks: the last 7 days against days 22–28 ago
-// (window centres 21 days apart), scaled to a month. Same 4-weigh-in rule.
+// Four-week version for bulks: ready when the last 7 days and days 22–28
+// ago each have 4+ weigh-ins; the rate is the fitted slope over all 4
+// weeks, scaled to a month.
 function monthlyWeightTrend(log, today) {
   const week = (from, to) =>
     (log || []).filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)).filter((w) => w > 0);
@@ -836,9 +852,9 @@ function monthlyWeightTrend(log, today) {
   if (recent.length < TREND_MIN_WEIGHINS || old.length < TREND_MIN_WEIGHINS) {
     return { ready: false, recentCount: recent.length, oldCount: old.length };
   }
-  const now = avg(recent), before = avg(old);
-  const perMonth = ((now - before) / 21) * 30.44;
-  return { ready: true, avg: now, perMonth, pctPerMonth: (perMonth / before) * 100 };
+  const fit = weighInFit(log, addDaysISO(today, -27), today);
+  const perMonth = fit.slope * 30.44;
+  return { ready: true, avg: avg(recent), perMonth, pctPerMonth: (perMonth / fit.mean) * 100 };
 }
 
 /* ---------- maintenance estimate + weekly check-in ----------
