@@ -1053,18 +1053,34 @@ async function sbSetDayStatus(session, date, included) {
   if (!res.ok) throw new Error("Failed to save day status: " + res.status);
 }
 
-// Lifting days per week from RepReport (same Supabase project and user):
-// the current training block's days per week, else the last archived one.
-// null when there's no RepReport data.
-async function sbLoadLiftDays(session) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/training_data?select=cur:data->meso->data->weeks->0->days,arch:data->archive->data->0->weeks->0->days&user_id=eq.${session.user.id}`,
-    { headers: sbHeaders(session) }
-  );
+// Whether a RepReport training block is running (same Supabase project and
+// user): { active, daysPerWeek, lastDaysPerWeek, deload }, or null with no
+// RepReport data. deload: the block's current week is its deload week. RepReport saves this as `status` (its buildTrainingStatus): a block
+// that's finished but not yet archived or replaced isn't active. Rows saved
+// before that existed fall back to the block's own days — a live meso counts
+// as active there, since telling finished from running would mean
+// downloading every week.
+async function sbLoadTrainingStatus(session) {
+  const url = (select) => `${SUPABASE_URL}/rest/v1/training_data?select=${select}&user_id=eq.${session.user.id}`;
+  const res = await fetch(url("status:data->status->data"), { headers: sbHeaders(session) });
   if (!res.ok) return null;
   const [row] = await res.json();
-  const days = Array.isArray(row?.cur) ? row.cur : Array.isArray(row?.arch) ? row.arch : null;
-  return days && days.length ? Math.min(7, days.length) : null;
+  if (!row) return null;
+  const capDays = (n) => (n ? Math.min(7, n) : null);
+  if (row.status && typeof row.status.active === "boolean") {
+    return {
+      active: row.status.active,
+      daysPerWeek: capDays(row.status.daysPerWeek),
+      lastDaysPerWeek: capDays(row.status.lastDaysPerWeek),
+      deload: !!row.status.deload,
+    };
+  }
+  const legacy = await fetch(url("cur:data->meso->data->weeks->0->days,arch:data->archive->data->0->weeks->0->days"), { headers: sbHeaders(session) });
+  if (!legacy.ok) return null;
+  const [old] = await legacy.json();
+  const cur = Array.isArray(old?.cur) && old.cur.length ? old.cur.length : null;
+  const arch = Array.isArray(old?.arch) && old.arch.length ? old.arch.length : null;
+  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false };
 }
 
 async function sbLoadCheckins(session) {
@@ -1531,14 +1547,15 @@ export default function App() {
   const setActiveDay = (dayKey) =>
     setSelectedDate(addDaysISO(mondayOf(selectedDate), DAYS.indexOf(dayKey)));
   const [showMonth, setShowMonth] = useState(false);
-  // starting-targets calculator: open state, and RepReport's lifting days (null = none)
+  // starting-targets calculator: open state, and RepReport's block status (null = none)
   const [calc, setCalc] = useState(null);
   const [savedProfile, setSavedProfile] = useState(null); // this session's save; else user_metadata
   const [calcLater, setCalcLater] = useState(() => { try { return localStorage.getItem("mealprep:calc-later") === "1"; } catch { return false; } });
   const openCalc = async () => {
-    let liftDays = null;
-    try { liftDays = await sbLoadLiftDays(session); } catch { /* no RepReport data */ }
-    setCalc({ liftDays });
+    let status = null;
+    try { status = await sbLoadTrainingStatus(session); } catch { /* no RepReport data */ }
+    if (status) setTraining(status);
+    setCalc({ training: status });
   };
   const applyCalc = async (targets, profile) => {
     setPhases((prev) => prev.map((p) => (targets[p.id] ? { ...p, target: targets[p.id], example: false } : p)));
@@ -1568,6 +1585,7 @@ export default function App() {
   const [dietPhases, setDietPhases] = useState([]);  // every diet_phases row (history + planned)
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwLog, setBwLog] = useState([]);             // last 14 days of weigh-ins, oldest first
+  const [training, setTraining] = useState(null);     // RepReport block status (sbLoadTrainingStatus); null = unknown/none
   const [intake, setIntake] = useState({});           // food log rows by date (loaded on demand)
   const [targetHistory, setTargetHistory] = useState([]); // target_history rows, oldest first
   // latest history for the save path (its closure can be a render behind), and
@@ -1956,11 +1974,15 @@ export default function App() {
     const runDailyCheck = async () => {
       const day = todayISO();
       if (dailyCheckDayRef.current === day) return;
-      const [phases, weights] = await Promise.allSettled([
+      const [phases, weights, trainingStatus] = await Promise.allSettled([
         sbLoadDietPhases(session),
         sbLoadRecentBodyweight(session),
+        sbLoadTrainingStatus(session),
       ]);
       if (cancelled) return;
+      // optional context, so a failure only goes to the debug log
+      if (trainingStatus.status === "fulfilled") setTraining(trainingStatus.value);
+      else dbg("training status load FAILED: " + trainingStatus.reason?.message);
       const failed = [];
       if (phases.status === "fulfilled") setDietPhases(phases.value);
       else { failed.push("diet phases"); dbg("diet phase load FAILED: " + phases.reason?.message); }
@@ -2281,7 +2303,7 @@ export default function App() {
           presets={phases}
           bwLog={bwLog}
           profile={savedProfile || session?.user?.user_metadata?.profile}
-          liftDaysFromRR={calc.liftDays}
+          training={calc.training}
           onApply={applyCalc}
           onClose={() => setCalc(null)}
         />
@@ -2358,6 +2380,7 @@ export default function App() {
             selectedDate={selectedDate}
             setSelectedDate={setSelectedDate}
             dietPhases={dietPhases}
+            training={training}
             bwLog={bwLog}
             targetHistory={targetHistory}
             loggable={loggable}
@@ -2414,7 +2437,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -2539,7 +2562,16 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} />
+      {training?.active && training.deload && (
+        // Deload week in RepReport: calories stay as planned. The lighter
+        // week saves only ~70-140 kcal/day of training, and it exists for
+        // recovery, which eating less would work against.
+        <div style={{ ...S.pcCard, padding: "10px 14px", fontSize: 13, lineHeight: 1.45 }}>
+          <b style={{ color: PHASE_COLORS.maintenance }}>Deload week</b> in RepReport — keep calories as planned.
+          Training is lighter so you can recover, and eating less would work against that.
+        </div>
+      )}
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} trainingActive={training?.active} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -2890,7 +2922,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   );
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) {
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive }) {
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
 
@@ -3039,6 +3071,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate }) 
         {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
       </div>
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
+      {trainingActive === false && (
+        <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>
+      )}
     </div>
   );
 }
@@ -4718,7 +4753,10 @@ function TargetChanges({ rows }) {
 
 // "Calculate my targets": a short profile -> a starting maintenance -> every
 // phase preset's targets, shown for review before anything is saved.
-function TargetsCalculator({ presets, bwLog, profile, liftDaysFromRR, onApply, onClose }) {
+function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose }) {
+  // Prefilled only from a block that's running: with none, lifting days are
+  // left for you to enter rather than assumed from the last block.
+  const liftDaysFromRR = training?.active ? training.daysPerWeek : null;
   const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
   const pr = profile || {};
   const [f, setF] = useState({
@@ -4799,6 +4837,12 @@ function TargetsCalculator({ presets, bwLog, profile, liftDaysFromRR, onApply, o
               ))}
             </div>
             {liftFromRR && <div style={S.calcHint}>from your current RepReport block</div>}
+            {training && !training.active && pr.lift_days == null && (
+              <div style={S.calcHint}>
+                No active RepReport block — enter how often you lift right now
+                {training.lastDaysPerWeek ? ` (your last block was ${training.lastDaysPerWeek} days/week)` : ""}.
+              </div>
+            )}
             {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 8 }}>{err}</div>}
             <button style={{ ...S.primaryBtn, width: "100%", marginTop: 14 }} onClick={next}>See my targets</button>
           </div>
