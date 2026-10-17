@@ -3055,24 +3055,31 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
       )}
       {projection && <div style={S.pcProj}>{projection}</div>}
 
+      {/* In a deload week the deload is what's happening to training, so it
+          takes the place of the diet's percentage and explanation. */}
       <div style={S.viHead}>
         <span>Training volume impact</span>
-        <span style={{ color: impactColor, fontWeight: 700 }}>
-          {impactR === 0 ? "baseline" : `${sign(impactR, 0)}%`}
-        </span>
+        {!deload && (
+          <span style={{ color: impactColor, fontWeight: 700 }}>
+            {impactR === 0 ? "baseline" : `${sign(impactR, 0)}%`}
+          </span>
+        )}
       </div>
       <div style={S.viBar}>
         <div style={{ ...S.viMarker, left: `calc(${markerPct}% - 7px)` }} />
       </div>
-      <div style={S.viNote}>
-        {volumeImpactNote(ctx, impactR, "").replace(/\s+/g, " ").trim()}
-        {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
-      </div>
+      {deload ? (
+        <div style={{ ...S.viNote, color: PHASE_COLORS.maintenance }}>{DELOAD_NOTE}</div>
+      ) : (
+        <div style={S.viNote}>
+          {volumeImpactNote(ctx, impactR, "").replace(/\s+/g, " ").trim()}
+          {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
+        </div>
+      )}
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
       {trainingActive === false && (
         <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>
       )}
-      {deload && <div style={{ ...S.viNote, color: PHASE_COLORS.maintenance }}>{DELOAD_NOTE}</div>}
     </div>
   );
 }
