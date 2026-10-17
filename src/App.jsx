@@ -1054,8 +1054,8 @@ async function sbSetDayStatus(session, date, included) {
 }
 
 // Whether a RepReport training block is running (same Supabase project and
-// user): { active, daysPerWeek, lastDaysPerWeek }, or null with no RepReport
-// data. RepReport saves this as `status` (its buildTrainingStatus): a block
+// user): { active, daysPerWeek, lastDaysPerWeek, deload }, or null with no
+// RepReport data. deload: the block's current week is its deload week. RepReport saves this as `status` (its buildTrainingStatus): a block
 // that's finished but not yet archived or replaced isn't active. Rows saved
 // before that existed fall back to the block's own days — a live meso counts
 // as active there, since telling finished from running would mean
@@ -1072,6 +1072,7 @@ async function sbLoadTrainingStatus(session) {
       active: row.status.active,
       daysPerWeek: capDays(row.status.daysPerWeek),
       lastDaysPerWeek: capDays(row.status.lastDaysPerWeek),
+      deload: !!row.status.deload,
     };
   }
   const legacy = await fetch(url("cur:data->meso->data->weeks->0->days,arch:data->archive->data->0->weeks->0->days"), { headers: sbHeaders(session) });
@@ -1079,7 +1080,7 @@ async function sbLoadTrainingStatus(session) {
   const [old] = await legacy.json();
   const cur = Array.isArray(old?.cur) && old.cur.length ? old.cur.length : null;
   const arch = Array.isArray(old?.arch) && old.arch.length ? old.arch.length : null;
-  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch) };
+  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false };
 }
 
 async function sbLoadCheckins(session) {
@@ -2561,6 +2562,15 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
+      {training?.active && training.deload && (
+        // Deload week in RepReport: calories stay as planned. The lighter
+        // week saves only ~70-140 kcal/day of training, and it exists for
+        // recovery, which eating less would work against.
+        <div style={{ ...S.pcCard, padding: "10px 14px", fontSize: 13, lineHeight: 1.45 }}>
+          <b style={{ color: PHASE_COLORS.maintenance }}>Deload week</b> in RepReport — keep calories as planned.
+          Training is lighter so you can recover, and eating less would work against that.
+        </div>
+      )}
       <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} trainingActive={training?.active} />
 
       <DateStrip
