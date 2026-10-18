@@ -365,8 +365,8 @@ const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "")
    Coaching guidance for mini-cuts puts training at ~⅔–¾ of usual volume;
    30% is the middle of that — a starting point to refine. Full strength
    until the weight trend's 2 weeks of weigh-ins all fall inside the
-   mini-cut (a mini-cut's target pace, 1–1.5%/wk, is at or past the
-   full-effect rate), then scaled by that trend like any phase. */
+   mini-cut (the default mini-cut pace, 1%/wk, is the full-effect rate),
+   then scaled by that trend like any phase. */
 const MINICUT_VOLUME_CUT = 0.3;
 /* The weight trend reads the 14 days ending on a date (weightTrend): a
    reading counts for a mini-cut only when its first day is on or after the
@@ -468,13 +468,31 @@ function latestTrendRate(bwLog, day) {
   return { rate: null, age: null };
 }
 
+// The most recent ready reading (up to VOLUME_TREND_MAX_AGE_DAYS old) whose
+// 14 days all fall on or after `start`. For a weigh-in gap inside a
+// mini-cut: latestTrendRate reads the trend as of your last weigh-in, which
+// can reach back before the mini-cut even when a later reading, all
+// mini-cut weigh-ins, was ready (and used) the day before. RepReport's
+// latestWeeklyWeightRateSince does the same; keep the two in step.
+function latestTrendInside(bwLog, day, start) {
+  const maxAge = Math.min(VOLUME_TREND_MAX_AGE_DAYS, daysBetween(start, day) - (MINICUT_TREND_DAYS - 1));
+  for (let age = 0; age <= maxAge; age++) {
+    const trend = weightTrend(bwLog, addDaysISO(day, -age));
+    if (trend.ready) return { rate: trend.pctPerWeek / 100, age };
+  }
+  return { rate: null, age: null };
+}
+
 function dietPhaseContext(rows, iso, bwLog) {
   const phase = phaseOnDate(rows, iso);
   if (!phase) return null;
   const strengthOn = (type, day, kind, start) => {
     let { rate, age } = latestTrendRate(bwLog, day);
-    // a mini-cut ignores a trend that reaches back before it (MINICUT_TREND_DAYS)
-    if (kind === "minicut" && rate !== null && addDaysISO(day, -(age + MINICUT_TREND_DAYS - 1)) < start) { rate = null; age = null; }
+    // a mini-cut ignores a trend that reaches back before it (MINICUT_TREND_DAYS),
+    // using its latest reading of mini-cut weigh-ins only, else none (full strength)
+    if (kind === "minicut" && rate !== null && addDaysISO(day, -(age + MINICUT_TREND_DAYS - 1)) < start) {
+      ({ rate, age } = latestTrendInside(bwLog, day, start));
+    }
     if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };

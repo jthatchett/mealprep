@@ -165,7 +165,7 @@ RepReport saves a small status with your training data:
 
 **Training volume impact** is a copy of RepReport's diet-phase math:
 - A cut lowers every muscle's recovery ceiling (MRV) by up to **20%**, and a bulk raises it by up to **10%**. The shift builds over the phase and scales with how fast your weight is actually moving: full effect at 1% a week lost or 0.5% gained.
-- A mini-cut takes 30% off from day 1. The weight trend only counts once its 2 weeks of weigh-ins all fall inside the mini-cut, because before that it still reads the phase before (a bulk's gain would hold the cut back). After that it follows the scale: the full 30% at 1% a week lost or faster (every mini-cut pace here), 15% at 0.5% a week.
+- A mini-cut takes 30% off from day 1. The weight trend only counts once its 2 weeks of weigh-ins all fall inside the mini-cut, because before that it still reads the phase before (a bulk's gain would hold the cut back). After that it follows the scale (during a gap in weigh-ins, the latest trend made only of mini-cut weigh-ins): the full 30% at the default mini-cut pace of 1% a week or faster, about 22% at 0.75% a week, 15% at 0.5% a week.
 - Effects fade after the phase ends.
 
 *Example:* halfway through a 12-week cut losing 1% a week, the bar reads −10% and chest MRV in RepReport goes from 20 to 18 sets. At the end of that cut it reads −20% (chest 16). At the end of a bulk gaining 0.5% a week it reads +10% (chest 22).
