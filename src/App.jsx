@@ -323,25 +323,18 @@ const roundRate = (n) => Math.round(n * 1e4) / 1e4;
 const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46e6a0" };
 
 /* ---------- training volume impact (mirrors RepReport) ----------
-   How much the diet phase is moving RepReport's recovery ceilings (MRV):
-   the average change across muscles, as a % of each muscle's baseline.
-   This is a straight port of RepReport's resolveDietPhaseContext +
-   applyDietPhaseShift (src/App.jsx there) — keep the two in step. In
-   short: a cut lowers each MRV toward the low end of RP's published range
-   and a bulk raises it toward the high end; the shift builds with how far
+   How much the diet phase is moving RepReport's recovery ceilings (MRV),
+   as a % of baseline. This is a straight port of RepReport's
+   resolveDietPhaseContext + dietVolumeImpactPct (src/App.jsx there) — keep
+   the two in step. In short: every muscle's MRV moves by one flat share,
+   -20% at a cut's full effect and +10% at a bulk's (a surplus helps
+   recovery less than a deficit hurts it); the shift builds with how far
    through the phase you are (planned length, else 12 weeks) and scales
    with how fast weight is actually moving (1%/wk loss or 0.5%/wk gain =
    full effect; half until a weight trend exists). Maintenance phases
-   don't shift anything. Bounded by RP's ranges, so it tops out near ±17% —
-   except a mini-cut, which takes ~30% off (see MINICUT_VOLUME_CUT). */
-const VOLUME_MRV = {
-  // muscle: [baseline MRV, RP low, RP high]
-  chest: [20, 16, 24], horizontalBack: [23, 20, 26], verticalBack: [23, 20, 26],
-  biceps: [23, 20, 26], triceps: [18, 16, 20], frontDelts: [10, 8, 12],
-  sideDelts: [27, 24, 30], rearDelts: [16, 12, 20], traps: [16, 12, 20],
-  forearms: [27, 24, 30], quads: [16, 14, 18], hamstrings: [11, 8, 14],
-  glutes: [27, 24, 30], calves: [20, 16, 24], abs: [16, 12, 20],
-};
+   don't shift anything. A mini-cut takes ~30% off (see MINICUT_VOLUME_CUT). */
+const VOLUME_CUT_SHIFT = 0.2;  // MRV -20% at a cut's full effect
+const VOLUME_BULK_SHIFT = 0.1; // MRV +10% at a bulk's full effect
 const VOLUME_FULL_EFFECT_WEEKS = 12;
 const VOLUME_DEFICIT_FULL_RATE = 0.01;
 const VOLUME_SURPLUS_FULL_RATE = 0.005;
@@ -366,8 +359,8 @@ const CUT_MAINTENANCE_FRACTION = 2 / 3;
 const bulkMaintenanceWeeks = (bulkWeeks) => (bulkWeeks <= 8 ? 2 : bulkWeeks <= 16 ? 3 : 4);
 const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "");
 
-/* Mini-cuts cut volume harder than the landmark ranges allow a regular
-   cut to: ~30% off MRV and the volume target, from week 1 rather than
+/* Mini-cuts cut volume harder than a regular cut does (-20% at most):
+   ~30% off MRV and the volume target, from week 1 rather than
    building across the phase (a 2–6 wk crash phase has no time to build).
    Coaching guidance for mini-cuts puts training at ~⅔–¾ of usual volume;
    30% is the middle of that — a starting point to refine. Scaled by the
@@ -488,11 +481,18 @@ function dietPhaseContext(rows, iso, bwLog) {
     return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
   };
   const KINDS = ["deficit", "surplus", "minicut"];
-  const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name }
+  const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name, chainStart }
   const residual = (c, day) => (c ? c.v * Math.max(0, 1 - daysBetween(c.end, day) / c.fadeDays) : 0);
   // a block of the same type as one still fading picks up where that one
   // stood when it started (held, not decaying) until its own effect passes it
   const held = (b, level) => Math.min(1, Math.max(residual(carry[b.kind], b.start), level));
+  // A block of the same type that starts inside the last one's fade window
+  // continues it: chainStart is where that run of blocks began (a cut after
+  // a short diet break is the same cut; RepReport's strength check compares
+  // against the first one). Time only, not what's left of the effect: a cut
+  // that stalled on the scale at the end is still the same cut.
+  const inChain = (b) => !!carry[b.kind] && daysBetween(carry[b.kind].end, b.start) < carry[b.kind].fadeDays;
+  const chainStartOf = (b) => (inChain(b) ? carry[b.kind].chainStart : b.start);
   for (const b of phaseBlocks(rows)) {
     if (b.start > iso) break;
     const typed = KINDS.includes(b.kind);
@@ -508,26 +508,24 @@ function dietPhaseContext(rows, iso, bwLog) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, ...levels, fading };
     }
     if (!typed) continue;
     const prev = carry[b.kind];
     const level = held(b, own(b, b.end).level);
-    const weeks = blockWeeksTo(b, b.end) + (residual(prev, b.start) > 0 ? prev.weeks : 0);
+    const weeks = blockWeeksTo(b, b.end) + (inChain(b) ? prev.weeks : 0);
     const fadeWeeks = b.kind === "surplus" ? bulkMaintenanceWeeks(weeks) : weeks * CUT_MAINTENANCE_FRACTION;
-    carry[b.kind] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name };
+    carry[b.kind] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name, chainStart: chainStartOf(b) };
   }
   return null;
 }
 
-// Average MRV change across muscles, in % (negative = less volume).
+// The change to every muscle's MRV, in % (negative = less volume).
 function volumeImpactPct(ctx) {
   if (!ctx || (!ctx.deficit && !ctx.surplus && !ctx.minicut)) return 0;
   // a cut still fading under a mini-cut doesn't stack on it: the larger
   // of the two reductions applies
-  const shifts = Object.values(VOLUME_MRV).map(([base, lo, hi]) =>
-    (-Math.max((base - lo) * ctx.deficit, base * MINICUT_VOLUME_CUT * ctx.minicut) + (hi - base) * ctx.surplus) / base);
-  return (shifts.reduce((a, b) => a + b, 0) / shifts.length) * 100;
+  return (-Math.max(VOLUME_CUT_SHIFT * ctx.deficit, MINICUT_VOLUME_CUT * ctx.minicut) + VOLUME_BULK_SHIFT * ctx.surplus) * 100;
 }
 
 // The block that ended the day before `iso` (a cut/bulk the phase starting
@@ -3010,8 +3008,10 @@ function formatLift(s, units) {
 
 // What the phase card says about strength, or null when there's nothing to
 // show (not a cut, no RepReport reading, or one for a different cut).
-function strengthView({ strength, phase, blockStart, choice, today, ratePct, weightLb, actualPct, canSlow = true }) {
-  if (!strength || phase?.phase_type !== "deficit" || !blockStart || strength.cutStart !== blockStart) return null;
+// cutStart is the start of the cut's chain (dietPhaseContext's chainStart):
+// a cut after a short diet break continues the one before it.
+function strengthView({ strength, phase, cutStart, choice, today, ratePct, weightLb, actualPct, canSlow = true }) {
+  if (!strength || phase?.phase_type !== "deficit" || !cutStart || strength.cutStart !== cutStart) return null;
   const age = strength.asOf ? daysBetween(strength.asOf, today) : null;
   const asOf = age != null && age > 7 ? ` (as of ${shortDate(strength.asOf)})` : "";
   const r = strength.changePct == null ? null : Math.round(strength.changePct);
@@ -3088,7 +3088,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const last = !monthly && !trend.ready ? latestTrendRate(bwLog, today) : null;
   const actual = trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
   const actualAge = trend.ready ? 0 : last?.age ?? null;
-  const sv = strengthView({ strength, phase, blockStart: ctx?.blockStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
+  const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   // pace: actual vs target, in display units
   let pace = null;

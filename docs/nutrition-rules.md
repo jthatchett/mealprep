@@ -81,7 +81,7 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
 
   *(Coaching practice: RP Diet 2.0, Israetel, McDonald; no trial behind the exact lengths)*
 - **Moving or skipping maintenance is your call.** Starting a cut or bulk without the suggested maintenance shows a one-line note, but never blocks you.
-- **Back-to-back blocks of the same type chain together** for the training-volume effect ([section 7](#7-how-meal-prep-uses-repreport)). A short maintenance between two cuts works as a diet break: the effect pauses rather than resetting.
+- **Back-to-back blocks of the same type chain together** for the training-volume effect and RepReport's strength check ([section 7](#7-how-meal-prep-uses-repreport)). A short maintenance between two cuts works as a diet break: the effect pauses rather than resetting. The second cut chains when it starts before the first one's fade runs out (2/3 of its length, so about 6½ weeks after a 10-week cut), even if the scale stalled at the end of the first.
 
 ---
 
@@ -164,11 +164,13 @@ RepReport saves a small status with your training data:
 | **Phase card: training volume impact** | Shows how your diet phase is moving your volume ceilings | Still shows it, plus "No active RepReport block — this applies when you start one." |
 
 **Training volume impact** is a copy of RepReport's diet-phase math:
-- A cut lowers your recovery ceilings (MRV) and a bulk raises them, building over the phase and scaled by how fast your weight is actually moving.
-- A mini-cut takes about 30% off.
+- A cut lowers every muscle's recovery ceiling (MRV) by up to **20%**, and a bulk raises it by up to **10%**. The shift builds over the phase and scales with how fast your weight is actually moving: full effect at 1% a week lost or 0.5% gained.
+- A mini-cut takes up to 30% off from week 1.
 - Effects fade after the phase ends.
 
-The bar shows the average change across muscles, from −30% to +30%. RepReport's progression guide explains the details. *(Research-backed that energy balance affects recovery; every number is the app's choice)*
+*Example:* halfway through a 12-week cut losing 1% a week, the bar reads −10% and chest MRV in RepReport goes from 20 to 18 sets. At the end of that cut it reads −20% (chest 16). At the end of a bulk gaining 0.5% a week it reads +10% (chest 22).
+
+The bar runs from −30% to +30%. RepReport's progression guide explains the details. *(Research-backed that energy balance affects recovery. The −20% and +10% are the owner's coaching choices, Oct 2026; the other numbers are the app's choice)*
 
 **During the deload week**, the training volume impact drops the percentage and its explanation, and shows:
 
@@ -198,13 +200,15 @@ Either answer quiets the suggestion for 2 weeks, unless lifts drop another 2 poi
 
 *Why the full change at once:* the check-in's ±250 kcal weekly limit is there so one noisy week can't swing your targets. Slowing the cut is your decision, not a correction from noisy data. *(Owner's choice, Oct 2026)*
 
-The section is hidden when RepReport's reading is for a different cut than the one on your calendar (a maintenance diet break starts a new one), and the heads-up and suggestion are hidden when the reading is more than 3 weeks old. A malformed reading is ignored rather than shown.
+**A diet break doesn't start the check over.** A cut that chains onto the one before it ([section 3](#3-diet-phases)) is the same cut to the strength check, so "since the cut began" still means the first cut's start. *Example:* a 10-week cut, a 2-week break, then 6 more weeks: in the second cut's week 3, the card still compares with the first cut's week 1.
+
+The section is hidden when RepReport's reading is for a different cut than the one on your calendar (for example, one that ended before a longer maintenance), and the heads-up and suggestion are hidden when the reading is more than 3 weeks old. A malformed reading is ignored rather than shown.
 
 ### Logic shared with RepReport: keep in step
 These live in both apps. A change to one must be made in the other:
 - the diet-phase resolution rule ([section 3](#3-diet-phases))
 - the weight-trend rule ([section 4](#4-weigh-ins-and-your-weight-trend))
-- the diet-phase effect on volume ceilings, including the MRV ranges table and the mini-cut cut
+- the diet-phase effect on volume ceilings: the −20% cut and +10% bulk shares, the mini-cut cut, and how blocks chain
 - the 18+ and terms consent, and account export and deletion
 - the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match
 
