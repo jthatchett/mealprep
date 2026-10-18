@@ -157,6 +157,7 @@ RepReport saves a small status with your training data:
 - the last block's days per week
 - whether this is the **deload week**
 - during a cut, **whether your lifts are holding up** (see [Strength during a cut](#strength-during-a-cut))
+- while a block is running, **its goal**: what it's for, which muscles you're pushing, its main lifts and its dates (see [Your training goal](#your-training-goal-from-repreport))
 
 **A block counts as active** while it has sessions left. A finished block that hasn't been archived or replaced yet doesn't count.
 
@@ -180,6 +181,15 @@ The bar runs from −30% to +30%. RepReport's progression guide explains the det
 > Deload week in RepReport: sets are cut about in half and loads lightened so you can recover. Keep calories as planned — eating less would work against that.
 
 Calorie targets don't change. The lighter week saves only about 70–140 kcal a day of training, and eating less would work against the recovery the deload is for. *(Coaching practice)*
+
+### Your training goal (from RepReport)
+While a RepReport block is running, the phase card shows one line on what the block and your phase are doing together, with the pace you planned here: "Building chest and upper back on a bulk (+1%/month).", "Holding muscle on a mini-cut (−1%/week).", "Building muscle at maintenance: expect slow, steady gains." RepReport shows the same line in its diet box. Words like "lean" or "aggressive" wait until their limits are agreed.
+
+A warning appears under it when the two pull apart:
+- **A bulk while no muscle is above Maintain** in the block: "Your block holds every muscle at maintenance volume, so a bulk mostly adds fat. Change the block's goal in RepReport, or switch to maintenance calories in Meal Prep." Chest on Maintain gets 3–4 sets a week, below the 5 where growth starts. A Strength block isn't flagged; a surplus suits it.
+- **A strength or powerbuilding block on a cut faster than 0.7% a week:** "On a cut this fast, holding your main lifts is the win, and RepReport won't add sets to them. PRs are unlikely until you're back at maintenance. If PRs matter more right now, slow the cut to 0.7% a week or less in Meal Prep." Below 0.7% a week strength can still climb (Garthe et al. 2011: athletes losing 0.7% a week improved every lift tested, those losing 1.4% only squat). The pace is the cut's held pace, as RepReport reads it.
+
+*(Cutoffs are the owner's choices, Oct 2026)*
 
 ### Strength during a cut
 During a cut or mini-cut, the phase card shows a **Strength (from RepReport)** section. RepReport works out whether your lifts are holding up since the cut began: a line through every week of the cut for each exercise, comparing week 1s with week 1s and week 2s with week 2s, and counting the reps in reserve you logged. Its guide has the details. Losing strength steadily on a cut is the clearest sign you may be losing muscle.
@@ -214,6 +224,7 @@ These live in both apps. A change to one must be made in the other:
 - the diet-phase effect on volume ceilings: the −20% cut and +10% bulk shares, the mini-cut cut, and how blocks chain
 - the 18+ and terms consent, and account export and deletion
 - the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match
+- the goal check (`goalCheck`, `goalPhaseOf`), wording included: RepReport writes the goal (`buildGoalStatus`), both apps run the same check on it
 
 ---
 

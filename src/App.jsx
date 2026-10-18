@@ -1186,6 +1186,21 @@ function validStrength(st) {
     level: changePct == null || musclesScored < 3 ? "none" : st.level, example: ex };
 }
 
+// RepReport's half of the goal check (its buildGoalStatus), or null when
+// it's missing or malformed. Labels are plain words RepReport chose.
+function validGoal(g) {
+  if (!g || typeof g !== "object" || typeof g.primaryGoal !== "string") return null;
+  const words = (a) => (Array.isArray(a) ? a.filter((x) => typeof x === "string" && x) : []);
+  const f = g.focus && typeof g.focus === "object" ? g.focus : {};
+  const iso = (x) => typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x);
+  const b = g.block && typeof g.block === "object" && iso(g.block.start) && iso(g.block.end)
+    ? { start: g.block.start, end: g.block.end, weeks: Number.isFinite(g.block.weeks) ? g.block.weeks : null, deloadStart: iso(g.block.deloadStart) ? g.block.deloadStart : null }
+    : null;
+  const focus = { emphasize: words(f.emphasize), primary: words(f.primary), maintain: words(f.maintain) };
+  if (!focus.emphasize.length && !focus.primary.length && !focus.maintain.length) return null; // nothing to judge by
+  return { primaryGoal: g.primaryGoal, focus, mainLifts: words(g.mainLifts), block: b };
+}
+
 async function sbLoadTrainingStatus(session) {
   const url = (select) => `${SUPABASE_URL}/rest/v1/training_data?select=${select}&user_id=eq.${session.user.id}`;
   const res = await fetch(url("status:data->status->data"), { headers: sbHeaders(session) });
@@ -1203,6 +1218,8 @@ async function sbLoadTrainingStatus(session) {
       // RepReport's cut strength check (its computeCutStrength); null
       // outside a cut and on status saved before it existed
       strength: st,
+      // the running block's goal (its buildGoalStatus); null without one
+      goal: row.status.active ? validGoal(row.status.goal) : null,
     };
   }
   const legacy = await fetch(url("cur:data->meso->data->weeks->0->days,arch:data->archive->data->0->weeks->0->days"), { headers: sbHeaders(session) });
@@ -1210,7 +1227,7 @@ async function sbLoadTrainingStatus(session) {
   const [old] = await legacy.json();
   const cur = Array.isArray(old?.cur) && old.cur.length ? old.cur.length : null;
   const arch = Array.isArray(old?.arch) && old.arch.length ? old.arch.length : null;
-  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false, strength: null };
+  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false, strength: null, goal: null };
 }
 
 async function sbLoadCheckins(session) {
@@ -2740,7 +2757,8 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
       <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)}
-        strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength} />
+        strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
+        trainingGoal={training?.active ? training.goal || null : null} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -3161,7 +3179,60 @@ function strengthView({ strength, phase, cutStart, choice, today, ratePct, weigh
   };
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength }) {
+/* ---------- goal check (mirrors RepReport) ----------
+   One line on what RepReport's block and the diet phase are doing together,
+   and a warning when they pull apart, naming the app to change. A straight
+   port of RepReport's goalCheck (wording included); keep the two in step.
+   Cutoffs are the owner's (Oct 2026): a bulk with no muscle above Maintain
+   (not a strength block, which holds every muscle at maintain by design);
+   a strength or powerbuilding block on a cut faster than 0.7%/week (the
+   cut's held pace, as RepReport's own fast-cut rules read it). */
+const GOAL_FAST_CUT_PCT = 0.7; // %/week
+const goalList = (xs) => (xs.length <= 1 ? xs[0] || ""
+  : xs.length <= 4 ? `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`
+  : `${xs.slice(0, 3).join(", ")} and ${xs.length - 3} more`);
+const goalPct = (x) => `${x > 0 ? "+" : x < 0 ? "−" : ""}${+Math.abs(x).toFixed(2)}%`;
+const isStrengthGoal = (g) => g === "strength" || g === "powerbuilding";
+// goal: training status goal. phase: { type, kind, targetPct (planned
+// %/week or null), pacePct (a cut's held %/week loss) } or null.
+function goalCheck(goal, phase) {
+  if (!goal) return null;
+  const g = goal.primaryGoal;
+  const emph = goal.focus?.emphasize || [];
+  const growing = emph.length > 0 || (goal.focus?.primary || []).length > 0;
+  const lifts = goal.mainLifts?.length ? ` on ${goalList(goal.mainLifts)}` : "";
+  // On a cut, emphasized muscles are "prioritized" and the rest held; on a
+  // cut fast enough for the strength warning, strength is "held" too.
+  const cut = phase?.type === "deficit";
+  const fastCut = cut && (phase.pacePct ?? 0) > GOAL_FAST_CUT_PCT + 1e-9;
+  const build = emph.length ? `${cut ? "prioritizing" : "building"} ${goalList(emph)}` : growing && !cut ? "building muscle" : "holding muscle";
+  const strong = `${fastCut ? "Holding strength" : "Getting stronger"}${lifts}`;
+  const what = g === "strength" ? strong
+    : g === "powerbuilding" ? `${strong} and ${build}`
+    : build.charAt(0).toUpperCase() + build.slice(1);
+  let where = "";
+  if (phase?.type === "deficit") where = ` on a ${phase.kind === "minicut" ? "mini-cut" : "cut"}${phase.targetPct != null ? ` (${goalPct(phase.targetPct)}/week)` : ""}`;
+  else if (phase?.type === "surplus") where = ` on a bulk${phase.targetPct != null ? ` (${goalPct(phase.targetPct * WEEKS_PER_MONTH)}/month)` : ""}`;
+  else if (phase?.type === "maintenance") where = " at maintenance";
+  const recomp = phase?.type === "maintenance" && g !== "strength" && growing;
+  const summary = `${what}${where}${recomp ? ": expect slow, steady gains" : ""}.`;
+  const conflicts = [];
+  if (phase?.type === "surplus" && g !== "strength" && !growing) {
+    conflicts.push({ id: "bulk-no-growth", text: "Your block holds every muscle at maintenance volume, so a bulk mostly adds fat. Change the block's goal in RepReport, or switch to maintenance calories in Meal Prep." });
+  }
+  if (fastCut && isStrengthGoal(g)) {
+    conflicts.push({ id: "strength-fast-cut", text: "On a cut this fast, holding your main lifts is the win, and RepReport won't add sets to them. PRs are unlikely until you're back at maintenance. If PRs matter more right now, slow the cut to 0.7% a week or less in Meal Prep." });
+  }
+  return { summary, conflicts };
+}
+// The diet phase as goalCheck reads it, from a dietPhaseContext result.
+const goalPhaseOf = (ctx) => (ctx ? {
+  type: ctx.type, kind: ctx.kind,
+  targetPct: ctx.phase?.target_rate_pct != null && Number.isFinite(Number(ctx.phase.target_rate_pct)) ? Number(ctx.phase.target_rate_pct) : null,
+  pacePct: ctx.type === "deficit" ? (ctx.heldStrength ?? ctx.strength ?? 0) * VOLUME_DEFICIT_FULL_RATE * 100 : null,
+} : null);
+
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -3181,6 +3252,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const sign = (n, digits) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(digits);
   const cals = phaseCalories(phase, presets || [], week);
   const ctx = dietPhaseContext(dietPhases, today, bwLog);
+  const goal = goalCheck(trainingGoal, goalPhaseOf(ctx));
   const impact = volumeImpactPct(ctx);
   // only while the last phase is still fading — after that it's history
   const note = ctx?.fading ? transitionNote(dietPhases, phase.start_date, phase.phase_type, prog.plannedWeeks, [phase.id]) : null;
@@ -3256,6 +3328,14 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
           {prog.overrun ? "past planned end" : "plan"} ›
         </button>
       </div>
+      {goal && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ ...S.viNote, color: text, marginTop: 0 }}>{goal.summary} <span style={{ color: dim }}>(your RepReport block)</span></div>
+          {goal.conflicts.map((c) => (
+            <div key={c.id} style={{ ...S.viNote, color: "#ffb454" }}>▲ {c.text}</div>
+          ))}
+        </div>
+      )}
 
       <div style={S.pcStats}>
         <div>
