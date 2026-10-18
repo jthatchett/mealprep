@@ -154,6 +154,7 @@ RepReport saves a small status with your training data:
 - its days per week
 - the last block's days per week
 - whether this is the **deload week**
+- during a cut, **whether your lifts are holding up** (see [Strength during a cut](#strength-during-a-cut))
 
 **A block counts as active** while it has sessions left. A finished block that hasn't been archived or replaced yet doesn't count.
 
@@ -175,12 +176,37 @@ The bar shows the average change across muscles, from −30% to +30%. RepReport'
 
 Calorie targets don't change. The lighter week saves only about 70–140 kcal a day of training, and eating less would work against the recovery the deload is for. *(Coaching practice)*
 
+### Strength during a cut
+During a cut or mini-cut, the phase card shows a **Strength (from RepReport)** section. RepReport works out whether your lifts are holding up since the cut began: a line through every week of the cut for each exercise, comparing week 1s with week 1s and week 2s with week 2s, and counting the reps in reserve you logged. Its guide has the details. Losing strength steadily on a cut is the clearest sign you may be losing muscle.
+
+| What RepReport sees | What the phase card shows |
+|---|---|
+| Fewer than 3 muscles with a score yet | "Strength since the cut began: not enough sessions yet to compare." |
+| Before the trend line exists (in practice until part of a second block), no crash | "checking. The full comparison starts once you've repeated weeks of an earlier block in this cut." |
+| Lifts holding | "Strength since the cut began: holding (−1%)" |
+| Lifts down, but no heads-up yet | "Strength since the cut began: down about 4%" |
+| Most muscles more than 3% down, two readings in a row | **Heads-up**, e.g. "your lifts are down about 3% across 5 of 7 muscles since the cut began (Bench Press: 225×7 (2 left) → 225×6 (2 left)). Nothing to change yet. Worth watching." |
+| Most muscles more than 5% down (more than 8% before the trend line exists) | **Suggestion**: the same line plus "Losing 1.1% a week may be costing muscle." and two buttons |
+
+A reading more than a week old gets "(as of Oct 10)" added.
+
+The suggestion's buttons:
+- **Slow to 0.5%/week (+430 kcal/day)**: sets the cut's target pace to −0.5%/week (today's phase and any later planned rows of the same cut) and raises the cut target's calories by about 2.5 kcal a day per pound of bodyweight for each 0.5% a week, in one step. Carbs take the change; protein and fat floors apply as usual. It only appears when the cut is faster than 0.5%/week and the phase has targets to raise; otherwise the card suggests a 1–2 week diet break at maintenance on the calendar.
+- **Keep current**: changes nothing.
+
+Either answer quiets the suggestion for 2 weeks, unless lifts drop another 2 points. The card says the day it comes back. The answer is saved on your account, so it holds on every device, and signing out clears it from the app.
+
+*Why the full change at once:* the check-in's ±250 kcal weekly limit is there so one noisy week can't swing your targets. Slowing the cut is your decision, not a correction from noisy data. *(Owner's choice, Oct 2026)*
+
+The section is hidden when RepReport's reading is for a different cut than the one on your calendar (a maintenance diet break starts a new one), and the heads-up and suggestion are hidden when the reading is more than 3 weeks old. A malformed reading is ignored rather than shown.
+
 ### Logic shared with RepReport: keep in step
 These live in both apps. A change to one must be made in the other:
 - the diet-phase resolution rule ([section 3](#3-diet-phases))
 - the weight-trend rule ([section 4](#4-weigh-ins-and-your-weight-trend))
 - the diet-phase effect on volume ceilings, including the MRV ranges table and the mini-cut cut
 - the 18+ and terms consent, and account export and deletion
+- the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match
 
 ---
 

@@ -1061,6 +1061,21 @@ async function sbSetDayStatus(session, date, included) {
 // before that existed fall back to the block's own days — a live meso counts
 // as active there, since telling finished from running would mean
 // downloading every week.
+// RepReport's status.strength, or null when it isn't usable: a malformed one
+// (a corrupt row, or a RepReport change without the matching one here) must
+// not break the phase card.
+function validStrength(st) {
+  if (!st || typeof st !== "object" || typeof st.level !== "string" || typeof st.cutStart !== "string") return null;
+  const num = (n) => (typeof n === "number" && Number.isFinite(n) ? n : null);
+  const lift = (x) => (x && typeof x === "object" && num(x.weight) != null && num(x.reps) != null && num(x.rir) != null ? x : null);
+  const ex = st.example && typeof st.example === "object" && lift(st.example.before) && lift(st.example.after) ? st.example : null;
+  const changePct = num(st.changePct);
+  const musclesScored = num(st.musclesScored) ?? 0;
+  // a warning needs a change and at least 3 muscles behind it, as RepReport requires
+  return { ...st, changePct, musclesDown: num(st.musclesDown) ?? 0, musclesScored,
+    level: changePct == null || musclesScored < 3 ? "none" : st.level, example: ex };
+}
+
 async function sbLoadTrainingStatus(session) {
   const url = (select) => `${SUPABASE_URL}/rest/v1/training_data?select=${select}&user_id=eq.${session.user.id}`;
   const res = await fetch(url("status:data->status->data"), { headers: sbHeaders(session) });
@@ -1069,11 +1084,15 @@ async function sbLoadTrainingStatus(session) {
   if (!row) return null;
   const capDays = (n) => (n ? Math.min(7, n) : null);
   if (row.status && typeof row.status.active === "boolean") {
+    const st = validStrength(row.status.strength);
     return {
       active: row.status.active,
       daysPerWeek: capDays(row.status.daysPerWeek),
       lastDaysPerWeek: capDays(row.status.lastDaysPerWeek),
       deload: !!row.status.deload,
+      // RepReport's cut strength check (its computeCutStrength); null
+      // outside a cut and on status saved before it existed
+      strength: st,
     };
   }
   const legacy = await fetch(url("cur:data->meso->data->weeks->0->days,arch:data->archive->data->0->weeks->0->days"), { headers: sbHeaders(session) });
@@ -1081,7 +1100,7 @@ async function sbLoadTrainingStatus(session) {
   const [old] = await legacy.json();
   const cur = Array.isArray(old?.cur) && old.cur.length ? old.cur.length : null;
   const arch = Array.isArray(old?.arch) && old.arch.length ? old.arch.length : null;
-  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false };
+  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false, strength: null };
 }
 
 async function sbLoadCheckins(session) {
@@ -1587,6 +1606,7 @@ export default function App() {
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwLog, setBwLog] = useState([]);             // last 14 days of weigh-ins, oldest first
   const [training, setTraining] = useState(null);     // RepReport block status (sbLoadTrainingStatus); null = unknown/none
+  const [strengthAnswer, setStrengthAnswer] = useState(null); // this session's answer to the strength suggestion (see strengthChoice)
   const [intake, setIntake] = useState({});           // food log rows by date (loaded on demand)
   const [targetHistory, setTargetHistory] = useState([]); // target_history rows, oldest first
   // latest history for the save path (its closure can be a render behind), and
@@ -1753,6 +1773,10 @@ export default function App() {
     setRangeIntake({});
     setDayStatus({});
     setCheckins([]);
+    // the next account must not inherit this one's training status or its
+    // answer to the strength suggestion
+    setTraining(null);
+    setStrengthAnswer(null);
   };
 
   const handleAccountDeleted = () => {
@@ -2165,6 +2189,45 @@ export default function App() {
     return true;
   };
 
+  // Your answer to RepReport's strength suggestion ("keep" or "slow"), kept
+  // on the account so it quiets the suggestion on every device (see
+  // strengthView). This session's answer, else the saved one.
+  const strengthChoice = strengthAnswer || session?.user?.user_metadata?.strength_choice || null;
+  const rememberStrengthChoice = async (action, changePct) => {
+    const choice = { date: todayISO(), action, changePct: changePct ?? null };
+    setStrengthAnswer(choice);
+    // not via setSession, which would re-run the data loads (as in applyCalc)
+    try {
+      const next = await sbUpdateUserMeta(session, { strength_choice: choice });
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ access_token: next.access_token, refresh_token: next.refresh_token, user: next.user }));
+    } catch (e) { dbg("strength choice save FAILED: " + e.message); }
+  };
+  // Slow the cut to 0.5%/week in one step: the phase's target pace, and the
+  // followed target's calories raised by deltaKcal (carbs take it, protein
+  // and fat floors as usual). The check-ins carry on from the new numbers.
+  const slowCut = async (deltaKcal, changePct) => {
+    const followed = coaching?.followed;
+    if (!dietPhase || !followed) return;
+    // today's row and any later rows of the same cut block (a planned
+    // continuation of the cut keeps the slower pace too)
+    const kind = phaseKind(dietPhase);
+    const sorted = [...dietPhases].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+    const rows = [];
+    for (let i = sorted.findIndex((r) => r.id === dietPhase.id); i >= 0 && i < sorted.length && phaseKind(sorted[i]) === kind; i++) rows.push(sorted[i]);
+    try {
+      for (const r of rows) await sbUpdateDietPhase(session, r.id, { target_rate_pct: STRENGTH_SLOW_TO_PCT });
+    } catch (e) {
+      dbg("slow cut FAILED: " + e.message);
+      window.alert("Couldn't change the cut's pace — " + e.message);
+      return;
+    }
+    const cal = Math.round((Number(followed.target.cal) + deltaKcal) / 10) * 10;
+    const t = splitMacros({ cal, current: followed.target, phaseType: "deficit", weightLb: coaching.weightLb });
+    setPhases((prev) => prev.map((p) => (p.id === followed.id ? { ...p, target: { p: t.p, f: t.f, c: t.c, cal: t.cal }, example: false } : p)));
+    try { await reloadDietPhases(); } catch (e) { dbg("diet phase reload FAILED: " + e.message); }
+    await rememberStrengthChoice("slow", changePct);
+  };
+
   // Food log for the date being viewed in Plan — only today and past dates
   // can be logged. Cached per date; every write re-reads that date so the
   // screen always shows what's actually stored.
@@ -2397,6 +2460,9 @@ export default function App() {
             showCalcPrompt={!calcLater && phases.some((p) => p.example)}
             onOpenCalc={openCalc}
             onCalcLater={laterCalc}
+            strengthChoice={strengthChoice}
+            onSlowCut={slowCut}
+            onKeepStrength={(changePct) => rememberStrengthChoice("keep", changePct)}
           />
         )}
         {tab === "foods" && (
@@ -2438,7 +2504,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater }) {
+function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -2563,7 +2629,8 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)} />
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)}
+        strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -2919,7 +2986,71 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
 // training, and it exists for recovery, which eating less would work against.
 const DELOAD_NOTE = "Deload week in RepReport: sets are cut about in half and loads lightened so you can recover. Keep calories as planned — eating less would work against that.";
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload }) {
+/* ---------- strength during a cut (from RepReport) ----------
+   RepReport checks whether your lifts are holding up since the cut began
+   (its computeCutStrength, saved as status.strength). The phase card shows:
+   a line on how strength is doing, a heads-up when most muscles are about
+   3% down two readings running, and a suggestion to slow the cut when most
+   are 5% down (8% while the cut's first block is all there is to compare).
+   Keeping calories or slowing the cut quiets the suggestion for 2 weeks,
+   unless lifts drop another 2 points. Slowing applies in one step: the
+   ±250 kcal weekly limit is for corrections from noisy data, and this is
+   your decision. Thresholds are the owner's coaching choices (Oct 2026). */
+const STRENGTH_QUIET_DAYS = 14;
+const STRENGTH_WORSE_POINTS = 2;
+const STRENGTH_STALE_DAYS = 21;
+const STRENGTH_SLOW_TO_PCT = -0.5;
+
+const shortDate = (iso) => parseISO(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+function formatLift(s, units) {
+  const kg = (s.units || units) === "kg" ? " kg" : "";
+  const what = s.kind === "bodyweight" ? "bodyweight" : s.kind === "assisted" ? `${s.weight}${kg} assist` : `${s.weight}${kg}`;
+  return `${what}×${s.reps} (${s.rir} left)`;
+}
+
+// What the phase card says about strength, or null when there's nothing to
+// show (not a cut, no RepReport reading, or one for a different cut).
+function strengthView({ strength, phase, blockStart, choice, today, ratePct, weightLb, actualPct, canSlow = true }) {
+  if (!strength || phase?.phase_type !== "deficit" || !blockStart || strength.cutStart !== blockStart) return null;
+  const age = strength.asOf ? daysBetween(strength.asOf, today) : null;
+  const asOf = age != null && age > 7 ? ` (as of ${shortDate(strength.asOf)})` : "";
+  const r = strength.changePct == null ? null : Math.round(strength.changePct);
+  let line;
+  if (r == null) line = "Strength since the cut began: not enough sessions yet to compare.";
+  else if (strength.mode !== "trend" && strength.level !== "suggest") line = "Strength since the cut began: checking. The full comparison starts once you've repeated weeks of an earlier block in this cut.";
+  else line = `Strength since the cut began: ${r > -3 ? `holding (${r > 0 ? "+" : r < 0 ? "−" : "±"}${Math.abs(r)}%)` : `down about ${Math.abs(r)}%`}${asOf}.`;
+  // an old reading is shown, but not acted on
+  if (age != null && age > STRENGTH_STALE_DAYS) return { line, level: "none" };
+  const ex = strength.example;
+  const lift = ex ? ` (${ex.name}: ${formatLift(ex.before, ex.units)} → ${formatLift(ex.after, ex.units)})` : "";
+  const across = `down about ${Math.abs(r)}% across ${strength.musclesDown} of ${strength.musclesScored} muscles since the cut began${lift}`;
+  if (strength.level === "headsUp") {
+    return { line, level: "headsUp", message: `Heads-up: your lifts are ${across}. Nothing to change yet. Worth watching.` };
+  }
+  if (strength.level !== "suggest") return { line, level: "none" };
+  const quiet = choice?.date && daysBetween(choice.date, today) < STRENGTH_QUIET_DAYS
+    && !(choice.changePct != null && strength.changePct <= choice.changePct - STRENGTH_WORSE_POINTS);
+  if (quiet) {
+    const did = choice.action === "slow" ? "slow the cut" : "keep calories";
+    return { line, level: "quiet", message: `You chose to ${did} on ${shortDate(choice.date)}. The suggestion comes back on ${shortDate(addDaysISO(choice.date, STRENGTH_QUIET_DAYS))} unless your lifts drop further.` };
+  }
+  const pace = actualPct != null && actualPct < 0 ? ` Losing ${Math.abs(actualPct).toFixed(1)}% a week may be costing muscle.` : "";
+  // each 0.5%/week of pace is about 2.5 kcal a day per lb of bodyweight
+  const deltaKcal = canSlow && weightLb && ratePct < STRENGTH_SLOW_TO_PCT - EPS
+    ? Math.round((((STRENGTH_SLOW_TO_PCT - ratePct) / 100) * weightLb * KCAL_PER_LB) / 7 / 10) * 10
+    : 0;
+  const offer = deltaKcal > 0 ? { deltaKcal } : null;
+  return {
+    line, level: "suggest", offer,
+    message: `Your lifts are ${across}.${pace}`,
+    options: offer
+      ? "Slow to 0.5% a week, or plan a 1–2 week diet break at maintenance on the calendar."
+      : "Consider a 1–2 week diet break at maintenance on the calendar.",
+  };
+}
+
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength }) {
+  const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
 
@@ -2957,6 +3088,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const last = !monthly && !trend.ready ? latestTrendRate(bwLog, today) : null;
   const actual = trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
   const actualAge = trend.ready ? 0 : last?.age ?? null;
+  const sv = strengthView({ strength, phase, blockStart: ctx?.blockStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   // pace: actual vs target, in display units
   let pace = null;
@@ -3077,6 +3209,32 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
         </div>
       )}
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
+      {sv && (
+        <div style={S.stBox}>
+          <div style={S.stHead}>Strength (from RepReport)</div>
+          <div style={S.viNote}>{sv.line}</div>
+          {sv.message && (
+            <div style={{ ...S.viNote, color: sv.level === "suggest" ? "#ffb454" : sv.level === "headsUp" ? text : dim }}>{sv.message}</div>
+          )}
+          {sv.level === "suggest" && (
+            <>
+              <div style={S.viNote}>{sv.options}</div>
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                {sv.offer && (
+                  <button style={{ ...S.primaryBtn, flex: 2 }} disabled={strengthBusy}
+                    onClick={async () => { setStrengthBusy(true); await onSlowCut(sv.offer.deltaKcal, strength.changePct); setStrengthBusy(false); }}>
+                    Slow to 0.5%/week (+{sv.offer.deltaKcal} kcal/day)
+                  </button>
+                )}
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={strengthBusy}
+                  onClick={async () => { setStrengthBusy(true); await onKeepStrength(strength.changePct); setStrengthBusy(false); }}>
+                  Keep current
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
       {trainingActive === false && (
         <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>
       )}
@@ -5370,6 +5528,8 @@ const S = {
     background: "#fff", boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
   },
   viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
+  stBox: { marginTop: 16, paddingTop: 12, borderTop: `1px solid ${line}` },
+  stHead: { fontSize: 13, fontWeight: 600 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   // weekly check-in + day status
   ciCard: { background: panel, border: `1px solid ${accent}`, borderRadius: 12, padding: 14, marginBottom: 14 },
