@@ -417,6 +417,10 @@ function volumeImpactNote(ctx, impactR, applied) {
   const verb = losing ? "losing" : "gaining";
   const word = ctx.kind === "minicut" ? "mini-cut" : losing ? "cut" : "bulk";
   const need = `2 weeks of weigh-ins${ctx.kind === "minicut" ? " during the mini-cut" : ""} (${TREND_MIN_WEIGHINS}+ each week)`;
+  if (ctx.holding && impactR !== 0) {
+    const now = ctx.rate == null ? "" : ` (the scale now: ${ctx.rate >= 0 ? "+" : "−"}${Math.abs(ctx.rate * 100).toFixed(1)}%/week)`;
+    return `${level}, held at the most this ${word} has built up${now}: a slower or flat scale doesn't undo it. ${applied}`;
+  }
   if (ctx.estimated) {
     const assumed = ctx.kind === "minicut" ? VOLUME_DEFICIT_FULL_RATE : (losing ? VOLUME_DEFICIT_FULL_RATE : VOLUME_SURPLUS_FULL_RATE) * VOLUME_DEFAULT_STRENGTH;
     const pace = `you're ${verb} ${+(assumed * 100).toFixed(2)}%/week${ctx.kind === "minicut" ? " (the usual mini-cut pace)" : ""}`;
@@ -454,15 +458,30 @@ const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
 // your real pace instead of the assumed one); older than that, null.
 // RepReport's latestWeeklyWeightRate does the same; keep the two in step.
 const VOLUME_TREND_MAX_AGE_DAYS = 21;
-function latestTrendRate(bwLog, day) {
-  const now = weightTrend(bwLog, day);
+// Readings by date for one weigh-in log. dietPhaseContext reads every day of
+// every phase (each phase is held at its highest), and the phase history
+// calls it once per block, so each reading is worked out once. Safe because
+// the log is replaced, never edited in place (setBwLog); the length check
+// is a backstop. RepReport's cachedRate does the same.
+const trendCache = new WeakMap();
+function cachedTrend(bwLog, key, compute) {
+  if (!bwLog) return compute();
+  let c = trendCache.get(bwLog);
+  if (!c || c.n !== bwLog.length) { c = { n: bwLog.length, by: new Map() }; trendCache.set(bwLog, c); }
+  if (!c.by.has(key)) c.by.set(key, compute());
+  return c.by.get(key);
+}
+const cachedWeightTrend = (bwLog, day) => cachedTrend(bwLog, `r${day}`, () => weightTrend(bwLog, day));
+const latestTrendRate = (bwLog, day) => cachedTrend(bwLog, `l${day}`, () => findLatestTrendRate(bwLog, day));
+function findLatestTrendRate(bwLog, day) {
+  const now = cachedWeightTrend(bwLog, day);
   if (now.ready) return { rate: now.pctPerWeek / 100, age: 0 };
   // in a gap, read the trend as of your last weigh-in: a week cut short by
   // the gap would understate the pace
   const last = (bwLog || []).filter((r) => r.date <= day).map((r) => r.date).sort().pop();
   if (!last) return { rate: null, age: null };
   for (let age = daysBetween(last, day); age <= VOLUME_TREND_MAX_AGE_DAYS; age++) {
-    const trend = weightTrend(bwLog, addDaysISO(day, -age));
+    const trend = cachedWeightTrend(bwLog, addDaysISO(day, -age));
     if (trend.ready) return { rate: trend.pctPerWeek / 100, age };
   }
   return { rate: null, age: null };
@@ -477,7 +496,7 @@ function latestTrendRate(bwLog, day) {
 function latestTrendInside(bwLog, day, start) {
   const maxAge = Math.min(VOLUME_TREND_MAX_AGE_DAYS, daysBetween(start, day) - (MINICUT_TREND_DAYS - 1));
   for (let age = 0; age <= maxAge; age++) {
-    const trend = weightTrend(bwLog, addDaysISO(day, -age));
+    const trend = cachedWeightTrend(bwLog, addDaysISO(day, -age));
     if (trend.ready) return { rate: trend.pctPerWeek / 100, age };
   }
   return { rate: null, age: null };
@@ -508,6 +527,20 @@ function dietPhaseContext(rows, iso, bwLog) {
     const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind, b.start);
     return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
   };
+  // The block's level on a day, held at the highest it has reached: a flat
+  // or slower scale pauses the build-up rather than undoing it, inside the
+  // phase and for the fade after it (owner's choice, Oct 2026). Only days
+  // the weight trend actually showed count toward that high; an assumed pace
+  // counts on its own day only, so a mini-cut's assumed 30% doesn't lock in.
+  // RepReport's heldLevel; keep the two in step.
+  const heldLevel = (b, day) => {
+    let peak = own(b, day).level;
+    for (let d = b.start; d < day; d = addDaysISO(d, 1)) {
+      const o = own(b, d);
+      if (o.rate !== null && o.level > peak) peak = o.level;
+    }
+    return peak;
+  };
   const KINDS = ["deficit", "surplus", "minicut"];
   const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name, chainStart }
   const residual = (c, day) => (c ? c.v * Math.max(0, 1 - daysBetween(c.end, day) / c.fadeDays) : 0);
@@ -526,21 +559,26 @@ function dietPhaseContext(rows, iso, bwLog) {
     const typed = KINDS.includes(b.kind);
     if (b.end === null || b.end >= iso) {
       const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, rate: null, level: 0 };
+      const peak = typed ? heldLevel(b, iso) : 0;
       const levels = Object.fromEntries(KINDS.map((k) => [k, residual(carry[k], iso)]));
-      if (typed) levels[b.kind] = held(b, o.level);
+      if (typed) levels[b.kind] = held(b, peak);
+      // A mini-cut's deficit is what calls for its 30%: a bulk still fading
+      // doesn't offset it (mini-cuts sit inside a bulk to extend it; owner's
+      // call, Oct 2026). RepReport does the same.
+      if (b.kind === "minicut") levels.surplus = 0;
       // the earlier phase still fading (the larger, if both are)
       let fading = null;
       for (const t of KINDS) {
-        const c = carry[t], r = residual(c, iso);
+        const c = carry[t], r = levels[t] === 0 ? 0 : residual(c, iso);
         if (t !== b.kind && r > 0.005 && (!fading || r > fading.level)) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, holding: typed && peak - o.level > 0.005, ...levels, fading };
     }
     if (!typed) continue;
     const prev = carry[b.kind];
-    const level = held(b, own(b, b.end).level);
+    const level = held(b, heldLevel(b, b.end));
     const weeks = blockWeeksTo(b, b.end) + (inChain(b) ? prev.weeks : 0);
     const fadeWeeks = b.kind === "surplus" ? bulkMaintenanceWeeks(weeks) : weeks * CUT_MAINTENANCE_FRACTION;
     carry[b.kind] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name, chainStart: chainStartOf(b) };
