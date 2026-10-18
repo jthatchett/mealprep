@@ -541,17 +541,20 @@ function dietPhaseContext(rows, iso, bwLog) {
   // high; an assumed pace counts on its own day only, so a mini-cut's
   // assumed 30% doesn't lock in. Today's level always counts. RepReport's
   // heldLevel; keep the two in step.
-  const heldLevel = (b, day) => {
-    let peak = own(b, day).level;
-    const week = []; // the last VOLUME_HOLD_DAYS levels, null for an assumed pace
+  // key "level" (what the ceilings use) or "strength" (the pace alone,
+  // held the same way; RepReport's fast-cut rules read it).
+  const heldOf = (b, day, key) => {
+    let peak = own(b, day)[key];
+    const week = []; // the last VOLUME_HOLD_DAYS values, null for an assumed pace
     for (let d = b.start; d < day; d = addDaysISO(d, 1)) {
       const o = own(b, d);
-      week.push(o.rate !== null ? o.level : null);
+      week.push(o.rate !== null ? o[key] : null);
       if (week.length > VOLUME_HOLD_DAYS) week.shift();
       if (week.length === VOLUME_HOLD_DAYS && week.every((x) => x !== null)) peak = Math.max(peak, Math.min(...week));
     }
     return peak;
   };
+  const heldLevel = (b, day) => heldOf(b, day, "level");
   const KINDS = ["deficit", "surplus", "minicut"];
   const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name, chainStart }
   const residual = (c, day) => (c ? c.v * Math.max(0, 1 - daysBetween(c.end, day) / c.fadeDays) : 0);
@@ -605,6 +608,7 @@ function dietPhaseContext(rows, iso, bwLog) {
         }
       }
       return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed,
+        heldStrength: typed ? heldOf(b, iso, "strength") : 0, // the pace, held like the level
         // held above what today's scale alone gives, by at least a point of the bar
         holding: typed && (peak - o.level) * VOLUME_SHARE_PCT[b.kind] >= 1,
         // this block's weeks so far plus the earlier blocks it continues
