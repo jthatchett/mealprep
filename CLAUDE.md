@@ -8,7 +8,7 @@ Nutrition app (React + Vite, single `src/App.jsx`, Supabase via plain `fetch`). 
 
 ## Cross-app contract
 - Meal Prep reads RepReport's `training_data` row only through `data.status` (`active`, `daysPerWeek`, `lastDaysPerWeek`, `deload`, `strength`, `goal`), via `sbLoadTrainingStatus`; the phase card's `strengthView` turns `strength` into what you see, and `goalCheck` turns `goal` into the goal line. RepReport writes it in `buildTrainingStatus`. Change both sides together.
-- Logic duplicated in both apps must stay in step (listed in `docs/nutrition-rules.md`, "Logic shared with RepReport"): diet-phase resolution, the weight-trend rule, the diet-phase effect on volume ceilings, the goal check (`goalCheck`), consent and account handling.
+- Logic duplicated in both apps must stay in step (listed in `docs/nutrition-rules.md`, "Logic shared with RepReport"): diet-phase resolution, the weight-trend rule, the diet-phase effect on volume ceilings, the goal check (`goalCheck`, `goalPlanCheck`), consent and account handling.
 
 ## Working conventions
 - Verify with `npx vite build`. There's no test suite: check behavior by extracting the real functions or server-rendering the real components, not by reimplementing them.

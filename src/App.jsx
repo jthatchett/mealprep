@@ -2507,6 +2507,7 @@ export default function App() {
           onSelectDate={(iso) => { setSelectedDate(iso); setShowMonth(false); }}
           onEdit={editDietPhases}
           onClose={() => setShowMonth(false)}
+          trainingGoal={training?.active ? training.goal || null : null}
         />
       )}
       {saveConflict && (
@@ -3232,6 +3233,63 @@ const goalPhaseOf = (ctx) => (ctx ? {
   pacePct: ctx.type === "deficit" ? (ctx.heldStrength ?? ctx.strength ?? 0) * VOLUME_DEFICIT_FULL_RATE * 100 : null,
 } : null);
 
+// The goal check for a plan: a block (goal.block dates) against the diet
+// phases overlapping it. Each overlapping phase is checked at its planned
+// pace, since no trend exists yet (a cut with none planned counts as
+// 0.5%/week, a mini-cut as 1%), and a phase that starts inside the block
+// gets a note on the weeks it covers. Items: { type: "conflict" | "note",
+// id, start (the phase row's start), text }. A straight port of
+// RepReport's goalPlanCheck; keep the two in step.
+const GOAL_PHASE_LABEL = { minicut: "mini-cut", deficit: "cut", surplus: "bulk", maintenance: "maintenance phase" };
+const GOAL_PHASE_EFFECT = {
+  minicut: "recovery limits drop about 30% from its first day",
+  deficit: "recovery limits come down as the cut goes on (up to 20%)",
+  surplus: "recovery limits rise as the bulk goes on (up to 10%)",
+  maintenance: "the last phase's effect fades out from there",
+};
+function goalPlanCheck(goal, rows) {
+  const blk = goal?.block;
+  if (!blk || !rows?.length) return [];
+  const weekOf = (iso) => Math.floor(daysBetween(blk.start, iso) / 7) + 1;
+  const items = [];
+  phaseBlocks(rows).forEach((b) => {
+    const from = b.start > blk.start ? b.start : blk.start;
+    const to = b.end && b.end < blk.end ? b.end : blk.end;
+    if (from > to) return; // outside the block
+    b.rows.forEach((r, i) => {
+      const next = b.rows[i + 1];
+      const rEnd = next ? addDaysISO(next.start_date, -1) : b.end;
+      if ((rEnd && rEnd < blk.start) || r.start_date > blk.end) return;
+      const t = r.target_rate_pct != null && Number.isFinite(Number(r.target_rate_pct)) ? Number(r.target_rate_pct) : null;
+      const pacePct = r.phase_type !== "deficit" ? null : t != null ? -t : (b.kind === "minicut" ? 1 : VOLUME_DEFAULT_STRENGTH) * VOLUME_DEFICIT_FULL_RATE * 100;
+      goalCheck(goal, { type: r.phase_type, kind: b.kind, targetPct: t, pacePct }).conflicts
+        .forEach((c) => items.push({ type: "conflict", id: c.id, start: r.start_date, text: c.text }));
+    });
+    if (b.start > blk.start) {
+      const w1 = weekOf(from), w2 = weekOf(to);
+      const deload = !!blk.deloadStart && blk.deloadStart >= from && blk.deloadStart <= to;
+      const span = w1 === w2 ? `week ${w1}` : `weeks ${w1}–${w2}`;
+      items.push({ type: "note", id: `starts-${b.start}`, start: b.start,
+        text: `Your ${GOAL_PHASE_LABEL[b.kind] || "phase"} starts in week ${w1} of this block (${span}${deload ? ", including your deload" : ""}): ${GOAL_PHASE_EFFECT[b.kind] || ""}.` });
+    }
+  });
+  return items;
+}
+
+// The goal check for a phase being planned in the editor, against your
+// running RepReport block: the phase as planned (ending at its planned end,
+// then the maintenance added after it when there is one), replacing the
+// rows in `drop` (the phase being edited and its own maintenance), and
+// only the items about this phase.
+function phasePlanItems(trainingGoal, dietPhases, { preset, start, plannedEnd, targetRatePct, withMaintenance, drop = [] }) {
+  if (!preset || !trainingGoal?.block || !start) return [];
+  const planned = { id: "__plan", phase_type: preset.phase_type, phase_name: preset.name, start_date: start, end_date: plannedEnd, planned_end_date: plannedEnd, target_rate_pct: targetRatePct };
+  const after = withMaintenance && plannedEnd ? [{ id: "__maint", phase_type: "maintenance", phase_name: "Maintenance", start_date: addDaysISO(plannedEnd, 1), end_date: null, planned_end_date: null, target_rate_pct: 0 }] : [];
+  const others = (dietPhases || []).filter((r) => !drop.includes(r.id));
+  try { return goalPlanCheck(trainingGoal, [...others, planned, ...after]).filter((it) => it.start === start); }
+  catch (e) { console.error("Goal plan check failed:", e); return []; }
+}
+
 function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
@@ -3516,7 +3574,7 @@ function DateStrip({ selectedDate, setSelectedDate, dietPhases, onOpenMonth, onC
    EDIT PHASES mode turns a tap into "what phase is this day in / start a
    new one here".
    ============================================================ */
-function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, onClose }) {
+function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, onClose, trainingGoal = null }) {
   const today = todayISO();
   const [cursor, setCursor] = useState(() => selectedDate.slice(0, 8) + "01");
   const [editMode, setEditMode] = useState(false);
@@ -3595,6 +3653,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
               dietPhases={dietPhases}
               presets={presets}
               onEdit={onEdit}
+              trainingGoal={trainingGoal}
             />
           )}
         </div>
@@ -3607,7 +3666,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
 // (change its type, start, planned length, or delete it), or start a new
 // phase on that day. A phase runs until its planned end, or until the next
 // phase starts — whichever the calendar shows first.
-function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
+function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null }) {
   const covering = phaseOnDate(dietPhases, day);
   const [mode, setMode] = useState(covering ? "view" : "new");
   const blank = { presetId: "", start: day, weeks: "", openEnded: false, rate: "" }; // rate "" = default
@@ -3671,6 +3730,10 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   };
 
   const rateCheck = preset ? checkPhaseRate(preset.phase_type, preset.name, rateWeekly()) : { level: "ok", message: "" };
+  const planItems = phasePlanItems(trainingGoal, dietPhases, {
+    preset, start: form.start, plannedEnd, targetRatePct: preset?.phase_type === "maintenance" ? 0 : rateWeekly(),
+    withMaintenance: !!(autoMaint && !blockedBy), drop: [editingId, mode === "edit" ? ownMaint?.id : null],
+  });
 
   const save = async () => {
     if (!preset) return window.alert("pick a phase first");
@@ -3788,6 +3851,11 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
             : ` · then ~${autoMaint} wk maintenance is added after it`
           : ""}
       </div>
+      {planItems.map((it) => (
+        <div key={`${it.id}-${it.start}`} style={{ fontSize: 12, color: it.type === "conflict" ? "#ffb454" : dim, marginBottom: 8 }}>
+          {it.type === "conflict" ? "▲ " : ""}{it.text}
+        </div>
+      ))}
       {preset && transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : []) && (
         <div style={{ fontSize: 12, color: PHASE_COLORS[preset.phase_type], marginBottom: 10 }}>
           {transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : [])}
