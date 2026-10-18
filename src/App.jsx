@@ -331,7 +331,8 @@ const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46
    recovery less than a deficit hurts it); the shift builds with how far
    through the phase you are (planned length, else 12 weeks) and scales
    with how fast weight is actually moving (1%/wk loss or 0.5%/wk gain =
-   full effect; half until a weight trend exists). Maintenance phases
+   full effect; half until a weight trend exists, and a cut its planned
+   pace until it has its own trend, see CUT_WATER_DAYS). Maintenance phases
    don't shift anything. A mini-cut takes ~30% off (see MINICUT_VOLUME_CUT). */
 const VOLUME_CUT_SHIFT = 0.2;  // MRV -20% at a cut's full effect
 const VOLUME_HOLD_DAYS = 7;    // a phase's level holds at the highest it kept this many days in a row
@@ -378,6 +379,15 @@ const VOLUME_SHARE_PCT = { deficit: VOLUME_CUT_SHIFT * 100, surplus: VOLUME_BULK
    mini-cut. Owner's choice (Oct 2026) over a flat 30% that ignores the
    scale. RepReport's MINICUT_TREND_DAYS; keep the two in step. */
 const MINICUT_TREND_DAYS = 14;
+/* A cut's first week loses mostly water and glycogen, and until a cut has
+   its own trend the 14-day trend still reads the phase before. So a cut's
+   trend counts only once its 14 days start after the cut's first
+   CUT_WATER_DAYS (from day 20); until then, and whenever the cut has no
+   trend of its own, it runs at its planned pace (the covering row's
+   target_rate_pct), or VOLUME_DEFAULT_STRENGTH with none planned. Planned
+   days count as assumed, so they don't set the hold. Owner's choice, Oct
+   2026. RepReport's CUT_WATER_DAYS; keep the two in step. */
+const CUT_WATER_DAYS = 7;
 // a row's kind: deficit / surplus / maintenance, with mini-cuts their own
 const phaseKind = (r) => (isMiniCut(r.phase_type, r.phase_name) ? "minicut" : r.phase_type);
 const KIND_LABEL = { deficit: "cut", surplus: "bulk", minicut: "mini-cut" };
@@ -426,6 +436,14 @@ function volumeImpactNote(ctx, impactR, applied) {
     const now = !pace ? "" : stale ? ` (your last trend, ${ctx.rateAge} day${ctx.rateAge === 1 ? "" : "s"} ago: ${pace})` : ` (the scale now: ${pace})`;
     const tail = !pace ? ` Your pace shows again after ${need}.` : stale ? " Weigh in to update it." : "";
     return `${level}, held at the most this ${word} has built up${now}: a slower or flat scale doesn't undo it. ${applied}${tail}`;
+  }
+  if (ctx.planned) {
+    const t = ctx.phase?.target_rate_pct;
+    const pace = `you're losing ${+Math.abs(Number(t) || 0).toFixed(2)}%/week (your planned pace)`;
+    const when = ctx.trendFrom && ctx.date < ctx.trendFrom
+      ? `From ${shortDate(ctx.trendFrom)}, your weigh-ins set it (a cut's first week is mostly water)`
+      : `After ${need}, your actual trend sets it`;
+    return impactR === 0 ? `${level}. ${when}; until then it assumes ${pace}.` : `${level}, assuming ${pace}. ${when}. ${applied}`;
   }
   if (ctx.estimated) {
     const assumed = ctx.kind === "minicut" ? VOLUME_DEFICIT_FULL_RATE : (losing ? VOLUME_DEFICIT_FULL_RATE : VOLUME_SURPLUS_FULL_RATE) * VOLUME_DEFAULT_STRENGTH;
@@ -511,14 +529,20 @@ function latestTrendInside(bwLog, day, start) {
 function dietPhaseContext(rows, iso, bwLog) {
   const phase = phaseOnDate(rows, iso);
   if (!phase) return null;
-  const strengthOn = (type, day, kind, start) => {
+  // plannedPct: the covering row's planned %/week, for a cut before its own trend (CUT_WATER_DAYS)
+  const strengthOn = (type, day, kind, start, plannedPct = null) => {
     let { rate, age } = latestTrendRate(bwLog, day);
-    // a mini-cut ignores a trend that reaches back before it (MINICUT_TREND_DAYS),
-    // using its latest reading of mini-cut weigh-ins only, else none (full strength)
-    if (kind === "minicut" && rate !== null && addDaysISO(day, -(age + MINICUT_TREND_DAYS - 1)) < start) {
-      ({ rate, age } = latestTrendInside(bwLog, day, start));
+    // a mini-cut ignores a trend that reaches back before it (MINICUT_TREND_DAYS), a
+    // cut one that reaches into its first week (CUT_WATER_DAYS); each uses its latest
+    // reading from after that, else none
+    const from = kind === "minicut" ? start : kind === "deficit" ? addDaysISO(start, CUT_WATER_DAYS) : null;
+    if (from && rate !== null && addDaysISO(day, -(age + MINICUT_TREND_DAYS - 1)) < from) {
+      ({ rate, age } = latestTrendInside(bwLog, day, from));
     }
     if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    if (type === "deficit" && rate === null && plannedPct != null && plannedPct < 0) {
+      return { s: Math.min(1, -plannedPct / 100 / VOLUME_DEFICIT_FULL_RATE), estimated: true, planned: true, rate, rateAge: age };
+    }
     if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     return { s: 0, estimated: rate === null, rate, rateAge: age };
@@ -530,8 +554,9 @@ function dietPhaseContext(rows, iso, bwLog) {
     const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
     const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
     const progress = b.kind === "minicut" ? 1 : Math.min(1, weeksIn / plannedWeeks);
-    const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind, b.start);
-    return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
+    const t = covering[0]?.target_rate_pct;
+    const { s, estimated, planned = false, rate, rateAge } = strengthOn(b.type, day, b.kind, b.start, t != null && Number.isFinite(Number(t)) ? Number(t) : null);
+    return { progress, strength: s, estimated, planned, rate, rateAge, level: progress * s };
   };
   // The block's level on a day, held at the highest it has reached for a
   // full week (VOLUME_HOLD_DAYS in a row): a flat or slower scale pauses the
@@ -608,6 +633,8 @@ function dietPhaseContext(rows, iso, bwLog) {
         }
       }
       return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed,
+        // a cut at its planned pace (before its own trend): from when its trend can count
+        planned: !!o.planned, trendFrom: o.planned ? addDaysISO(b.start, CUT_WATER_DAYS + MINICUT_TREND_DAYS - 1) : null, date: iso,
         // the pace, held like the level; rounded to 2 decimals as RepReport
         // stamps it, so both apps' fast-cut lines agree at the 0.7 boundary
         heldStrength: typed ? Math.round(heldOf(b, iso, "strength") * 100) / 100 : 0,
@@ -3209,7 +3236,7 @@ function goalCheck(goal, phase) {
   // On a cut, emphasized muscles are "prioritized" and the rest held; on a
   // cut fast enough for the strength warning, strength is "held" too.
   const cut = phase?.type === "deficit";
-  const fastCut = cut && (phase.pacePct ?? 0) > GOAL_FAST_CUT_PCT + 1e-9;
+  const fastCut = cut && Math.round((phase.pacePct ?? 0) * 10 + 1e-9) / 10 > GOAL_FAST_CUT_PCT + 1e-9; // to one decimal, as RepReport's fastCutPace
   const build = emph.length ? `${cut ? "prioritizing" : "building"} ${goalList(emph)}` : growing && !cut ? "building muscle" : "holding muscle";
   const strong = `${fastCut ? "Holding strength" : "Getting stronger"}${lifts}`;
   const what = g === "strength" ? strong
