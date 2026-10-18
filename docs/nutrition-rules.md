@@ -191,7 +191,7 @@ A warning appears under it when the two pull apart:
 
 *(Cutoffs are the owner's choices, Oct 2026)*
 
-**While planning a phase,** the phase editor runs the same check against your running RepReport block, at the pace you're entering (a cut with no pace set counts as 0.5% a week, a mini-cut as 1%). A phase that starts partway through the block also gets a note on the weeks it covers: "Your mini-cut starts in week 4 of this block (weeks 4–6, including your deload): recovery limits drop about 30% from its first day." RepReport's block setup shows the same notes for a block you're planning.
+**While planning a phase,** the phase editor runs the same check against your running RepReport block, at the pace you're entering (a blank rate is checked at the default the editor shows: 0.7% a week for a cut, 1% for a mini-cut). The phase running today is checked at the pace the scale has held, the same reading as the card above, so the editor and the card agree. A phase that starts partway through the block also gets a note on the weeks it covers, naming the deload week (the block's last, lighter week) when it falls inside: "Your mini-cut starts in week 4 of this block (weeks 4–6; week 6 is your deload)." The volume bar shows what the phase does to training, so the note doesn't repeat it. RepReport's block setup shows the same notes for a block you're planning.
 
 ### Strength during a cut
 During a cut or mini-cut, the phase card shows a **Strength (from RepReport)** section. RepReport works out whether your lifts are holding up since the cut began: a line through every week of the cut for each exercise, comparing week 1s with week 1s and week 2s with week 2s, and counting the reps in reserve you logged. Its guide has the details. Losing strength steadily on a cut is the clearest sign you may be losing muscle.
@@ -232,7 +232,7 @@ These live in both apps. A change to one must be made in the other:
 
 ## Open problems
 
-- **Goals aren't connected.** RepReport stores a training goal per block (hypertrophy, strength, powerbuilding, maintenance) and a priority per muscle. Meal Prep stores diet phases. Nothing checks that they agree: a strength block during an aggressive cut, or hypertrophy with every muscle on maintain during a bulk, goes unnoticed. A shared goal record would let both apps state your goal back to you and flag conflicts.
+- **Goal words wait for limits.** The goal line gives your pace as a number. Words like "lean" or "aggressive" need agreed limits first (see [Your training goal](#your-training-goal-from-repreport)).
 - **Duplicated logic can drift.** The shared rules above are copied, not shared code, so a change in one app can silently disagree with the other.
 
 ---
