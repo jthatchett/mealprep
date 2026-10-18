@@ -3265,43 +3265,23 @@ const goalPhaseOf = (ctx) => (ctx ? {
 } : null);
 
 // The goal check for a plan: a block (goal.block dates) against the diet
-// phases overlapping it. Each overlapping phase is checked at its planned
-// pace, since no trend exists yet (a cut with none planned counts as
-// 0.5%/week, a mini-cut as 1%), and a phase that starts inside the block
-// gets a note on the weeks it covers. Items: { type: "conflict" | "note",
-// id, start (the phase row's start), text }. A straight port of
-// RepReport's goalPlanCheck; keep the two in step.
-// live: the phase running today as the phase card reads it ({ blockStart,
-// today, pacePct }), so its rows are checked at the pace the scale has
-// held, not the plan; null when none.
-const GOAL_PHASE_LABEL = { minicut: "mini-cut", deficit: "cut", surplus: "bulk", maintenance: "maintenance phase" };
+// phases overlapping it. A phase planned ahead is checked at its planned
+// pace (a cut with none set counts as 0.5%/week, a mini-cut as 1%); the
+// phase running today at the pace the scale has held (live: { blockStart,
+// today, pacePct }, as the phase card reads it). Only the goal warnings:
+// how to line phases up with blocks is a coach's call (owner, Oct 2026).
+// Items: { type: "conflict", id, start (the phase row's start), text }. A
+// straight port of RepReport's goalPlanCheck; keep the two in step.
 function goalPlanCheck(goal, rows, live = null) {
   const blk = goal?.block;
   if (!blk || !rows?.length) return [];
-  const weekOf = (iso) => Math.floor(daysBetween(blk.start, iso) / 7) + 1;
-  const deloadEnd = blk.deloadStart ? addDaysISO(blk.deloadStart, 6) : null;
-  // which weeks of the block a stretch covers, and whether the deload is one
-  const span = (from, to) => {
-    const w1 = weekOf(from), w2 = weekOf(to);
-    const dw = blk.deloadStart && blk.deloadStart <= to && deloadEnd >= from ? weekOf(blk.deloadStart) : null;
-    if (w1 === w2) return dw ? `week ${w1}, your deload week` : `week ${w1}`;
-    return `weeks ${w1}–${w2}${dw ? `; week ${dw} is your deload` : ""}`;
-  };
   const items = [];
   phaseBlocks(rows).forEach((b) => {
     b.rows.forEach((r, i) => {
-      const next = b.rows[i + 1], prev = b.rows[i - 1];
+      const next = b.rows[i + 1];
       // a row ends at its own end_date or the day before the next row, whichever is first
       const rEnd = [r.end_date, next ? addDaysISO(next.start_date, -1) : b.end].filter(Boolean).sort()[0] || null;
       if ((rEnd && rEnd < blk.start) || r.start_date > blk.end) return; // outside the block
-      const from = r.start_date > blk.start ? r.start_date : blk.start;
-      // a phase starts inside the block: its block's first row, or a row after a gap
-      const starts = r.start_date > blk.start && (i === 0 || (prev.end_date && prev.end_date < addDaysISO(r.start_date, -1)));
-      if (starts) {
-        const bEnd = b.end && b.end < blk.end ? b.end : blk.end;
-        items.push({ type: "note", id: `starts-${r.start_date}`, start: r.start_date,
-          text: `Your ${GOAL_PHASE_LABEL[b.kind] || "phase"} starts in week ${weekOf(from)} of this block (${span(from, bEnd)}).` });
-      }
       const t = r.target_rate_pct != null && Number.isFinite(Number(r.target_rate_pct)) ? Number(r.target_rate_pct) : null;
       const isLive = live && b.start === live.blockStart && r.start_date <= live.today;
       const pacePct = r.phase_type !== "deficit" ? null : isLive ? live.pacePct
@@ -3892,9 +3872,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
           : ""}
       </div>
       {planItems.map((it) => (
-        <div key={`${it.id}-${it.start}`} style={{ fontSize: 12, color: it.type === "conflict" ? "#ffb454" : dim, marginBottom: 8 }}>
-          {it.type === "conflict" ? "▲ " : ""}{it.text}
-        </div>
+        <div key={`${it.id}-${it.start}`} style={{ fontSize: 12, color: "#ffb454", marginBottom: 8 }}>▲ {it.text}</div>
       ))}
       {preset && transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : []) && (
         <div style={{ fontSize: 12, color: PHASE_COLORS[preset.phase_type], marginBottom: 10 }}>
