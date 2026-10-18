@@ -82,6 +82,7 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
   *(Coaching practice: RP Diet 2.0, Israetel, McDonald; no trial behind the exact lengths)*
 - **Moving or skipping maintenance is your call.** Starting a cut or bulk without the suggested maintenance shows a one-line note, but never blocks you.
 - **Back-to-back blocks of the same type chain together** for the training-volume effect and RepReport's strength check ([section 7](#7-how-meal-prep-uses-repreport)). A short maintenance between two cuts works as a diet break: the effect pauses rather than resetting. The second cut chains when it starts before the first one's fade runs out (2/3 of its length, so about 6½ weeks after a 10-week cut), even if the scale stalled at the end of the first.
+- **A bulk that resumes after a mini-cut is the same bulk.** The mini-cut is there to extend the bulk, so the bulk's clock stops while it runs, however long it lasts, and the bulk picks up its training-volume effect where it stood. Maintenance days around the mini-cut still count against the bulk's 2–4-week fade.
 
 ---
 

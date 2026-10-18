@@ -544,17 +544,36 @@ function dietPhaseContext(rows, iso, bwLog) {
   const KINDS = ["deficit", "surplus", "minicut"];
   const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name, chainStart }
   const residual = (c, day) => (c ? c.v * Math.max(0, 1 - daysBetween(c.end, day) / c.fadeDays) : 0);
+  const blocks = phaseBlocks(rows);
+  // days strictly between two dates that fall in a mini-cut
+  const miniCutDaysBetween = (from, to) => blocks.reduce((n, x) => {
+    if (x.kind !== "minicut") return n;
+    const lo = x.start > from ? x.start : addDaysISO(from, 1);
+    const end = x.end ?? iso;
+    const hi = end < to ? end : addDaysISO(to, -1);
+    return n + Math.max(0, daysBetween(lo, hi) + 1);
+  }, 0);
+  // Days from the end of the last block of b's kind to b's start, as the
+  // chain counts them. A bulk's clock stops during a mini-cut: a mini-cut
+  // sits inside a bulk to extend it, so the bulk after it (however long the
+  // mini-cut ran) is the same bulk (owner's call, Oct 2026). RepReport's
+  // chainGap does the same.
+  const chainGap = (c, b) => daysBetween(c.end, b.start) - (b.kind === "surplus" ? miniCutDaysBetween(c.end, b.start) : 0);
   // a block of the same type as one still fading picks up where that one
   // stood when it started (held, not decaying) until its own effect passes it
-  const held = (b, level) => Math.min(1, Math.max(residual(carry[b.kind], b.start), level));
+  const held = (b, level) => {
+    const c = carry[b.kind];
+    const start = c ? c.v * Math.max(0, 1 - chainGap(c, b) / c.fadeDays) : 0;
+    return Math.min(1, Math.max(start, level));
+  };
   // A block of the same type that starts inside the last one's fade window
   // continues it: chainStart is where that run of blocks began (a cut after
   // a short diet break is the same cut; RepReport's strength check compares
   // against the first one). Time only, not what's left of the effect: a cut
   // that stalled on the scale at the end is still the same cut.
-  const inChain = (b) => !!carry[b.kind] && daysBetween(carry[b.kind].end, b.start) < carry[b.kind].fadeDays;
+  const inChain = (b) => !!carry[b.kind] && chainGap(carry[b.kind], b) < carry[b.kind].fadeDays;
   const chainStartOf = (b) => (inChain(b) ? carry[b.kind].chainStart : b.start);
-  for (const b of phaseBlocks(rows)) {
+  for (const b of blocks) {
     if (b.start > iso) break;
     const typed = KINDS.includes(b.kind);
     if (b.end === null || b.end >= iso) {
