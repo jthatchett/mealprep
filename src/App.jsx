@@ -363,10 +363,18 @@ const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "")
    ~30% off MRV and the volume target, from week 1 rather than
    building across the phase (a 2–6 wk crash phase has no time to build).
    Coaching guidance for mini-cuts puts training at ~⅔–¾ of usual volume;
-   30% is the middle of that — a starting point to refine. Scaled by the
-   weight trend like any phase, but assumed at full strength until a trend
-   exists, since a mini-cut's target pace (~1%/wk) is the full-effect rate. */
+   30% is the middle of that — a starting point to refine. Full strength
+   until the weight trend's 2 weeks of weigh-ins all fall inside the
+   mini-cut (a mini-cut's target pace, 1–1.5%/wk, is at or past the
+   full-effect rate), then scaled by that trend like any phase. */
 const MINICUT_VOLUME_CUT = 0.3;
+/* The weight trend reads the 14 days ending on a date (weightTrend): a
+   reading counts for a mini-cut only when its first day is on or after the
+   mini-cut's start. Before that it still reads the phase before, often a
+   bulk's gain, which held the reduction back for half of a 4-week
+   mini-cut. Owner's choice (Oct 2026) over a flat 30% that ignores the
+   scale. RepReport's MINICUT_TREND_DAYS; keep the two in step. */
+const MINICUT_TREND_DAYS = 14;
 // a row's kind: deficit / surplus / maintenance, with mini-cuts their own
 const phaseKind = (r) => (isMiniCut(r.phase_type, r.phase_name) ? "minicut" : r.phase_type);
 const KIND_LABEL = { deficit: "cut", surplus: "bulk", minicut: "mini-cut" };
@@ -408,7 +416,7 @@ function volumeImpactNote(ctx, impactR, applied) {
   const losing = ctx.type === "deficit";
   const verb = losing ? "losing" : "gaining";
   const word = ctx.kind === "minicut" ? "mini-cut" : losing ? "cut" : "bulk";
-  const need = `2 weeks of weigh-ins (${TREND_MIN_WEIGHINS}+ each week)`;
+  const need = `2 weeks of weigh-ins${ctx.kind === "minicut" ? " during the mini-cut" : ""} (${TREND_MIN_WEIGHINS}+ each week)`;
   if (ctx.estimated) {
     const assumed = ctx.kind === "minicut" ? VOLUME_DEFICIT_FULL_RATE : (losing ? VOLUME_DEFICIT_FULL_RATE : VOLUME_SURPLUS_FULL_RATE) * VOLUME_DEFAULT_STRENGTH;
     const pace = `you're ${verb} ${+(assumed * 100).toFixed(2)}%/week${ctx.kind === "minicut" ? " (the usual mini-cut pace)" : ""}`;
@@ -463,8 +471,10 @@ function latestTrendRate(bwLog, day) {
 function dietPhaseContext(rows, iso, bwLog) {
   const phase = phaseOnDate(rows, iso);
   if (!phase) return null;
-  const strengthOn = (type, day, kind) => {
-    const { rate, age } = latestTrendRate(bwLog, day);
+  const strengthOn = (type, day, kind, start) => {
+    let { rate, age } = latestTrendRate(bwLog, day);
+    // a mini-cut ignores a trend that reaches back before it (MINICUT_TREND_DAYS)
+    if (kind === "minicut" && rate !== null && addDaysISO(day, -(age + MINICUT_TREND_DAYS - 1)) < start) { rate = null; age = null; }
     if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
@@ -477,7 +487,7 @@ function dietPhaseContext(rows, iso, bwLog) {
     const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
     const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
     const progress = b.kind === "minicut" ? 1 : Math.min(1, weeksIn / plannedWeeks);
-    const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind);
+    const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind, b.start);
     return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
   };
   const KINDS = ["deficit", "surplus", "minicut"];
