@@ -78,6 +78,7 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
   - after a cut: about ⅔ of the cut's length
   - after a bulk: 2, 3 or 4 weeks, for bulks up to 8, up to 16, or longer
   - after a mini-cut: none, because it goes straight back into the bulk
+  - after a cut or bulk that continues an earlier one (below), the length counts the whole run: 4 weeks after a 9-week bulk, a 4-week mini-cut and an 8-week bulk (17 weeks of bulk); about 11 after a 10-week cut, a 2-week diet break and a 6-week cut (16 weeks of cut). That's the length the training effect fades over, so the two always agree. *(Owner's choice, Oct 2026)*
 
   *(Coaching practice: RP Diet 2.0, Israetel, McDonald; no trial behind the exact lengths)*
 - **Moving or skipping maintenance is your call.** Starting a cut or bulk without the suggested maintenance shows a one-line note, but never blocks you.
@@ -167,7 +168,7 @@ RepReport saves a small status with your training data:
 **Training volume impact** is a copy of RepReport's diet-phase math:
 - A cut lowers every muscle's recovery ceiling (MRV) by up to **20%**, and a bulk raises it by up to **10%**. The shift builds over the phase and scales with how fast your weight is actually moving: full effect at 1% a week lost or 0.5% gained.
 - A mini-cut takes 30% off from day 1, even straight after a bulk: a bulk that's still fading doesn't offset it, since a mini-cut's deficit is what calls for the 30%. The weight trend only counts once its 2 weeks of weigh-ins all fall inside the mini-cut, because before that it still reads the phase before (a bulk's gain would hold the cut back). After that it follows the scale (during a gap in weigh-ins, the latest trend made only of mini-cut weigh-ins): the full 30% at the default mini-cut pace of 1% a week or faster, about 22% at 0.75% a week, 15% at 0.5% a week.
-- A flat or slower scale pauses the build-up rather than undoing it: during the phase the effect holds at the highest level the weight trend has shown, and the fade afterwards starts from there. *Example:* a 10-week cut at 1% a week whose scale goes flat for the last 2 weeks stays at −16% instead of dropping to 0%. A slowdown you chose holds the same way. The card then says "held at the most this cut has built up (the scale now: −0.5%/week)".
+- A flat or slower scale pauses the build-up rather than undoing it: during the phase the effect holds at the highest level the weight trend kept for a full week (one lucky weigh-in can't set it), and the fade afterwards starts from there. *Example:* a 10-week cut at 1% a week whose scale goes flat for the last 2 weeks stays at −15% instead of dropping to 0%. A slowdown you chose holds the same way. The card then says "held at the most this cut has built up (the scale now: −0.5%/week)", or "(your last trend, 5 days ago: …) … Weigh in to update it." when weigh-ins have stopped.
 - Effects fade after the phase ends.
 
 *Example:* halfway through a 12-week cut losing 1% a week, the bar reads −10% and chest MRV in RepReport goes from 20 to 18 sets. At the end of that cut it reads −20% (chest 16). At the end of a bulk gaining 0.5% a week it reads +10% (chest 22).

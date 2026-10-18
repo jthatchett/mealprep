@@ -334,6 +334,7 @@ const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46
    full effect; half until a weight trend exists). Maintenance phases
    don't shift anything. A mini-cut takes ~30% off (see MINICUT_VOLUME_CUT). */
 const VOLUME_CUT_SHIFT = 0.2;  // MRV -20% at a cut's full effect
+const VOLUME_HOLD_DAYS = 7;    // a phase's level holds at the highest it kept this many days in a row
 const VOLUME_BULK_SHIFT = 0.1; // MRV +10% at a bulk's full effect
 const VOLUME_FULL_EFFECT_WEEKS = 12;
 const VOLUME_DEFICIT_FULL_RATE = 0.01;
@@ -368,6 +369,8 @@ const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "")
    mini-cut (the default mini-cut pace, 1%/wk, is the full-effect rate),
    then scaled by that trend like any phase. */
 const MINICUT_VOLUME_CUT = 0.3;
+// points of the volume bar per unit of a phase's own level, by kind
+const VOLUME_SHARE_PCT = { deficit: VOLUME_CUT_SHIFT * 100, surplus: VOLUME_BULK_SHIFT * 100, minicut: MINICUT_VOLUME_CUT * 100 };
 /* The weight trend reads the 14 days ending on a date (weightTrend): a
    reading counts for a mini-cut only when its first day is on or after the
    mini-cut's start. Before that it still reads the phase before, often a
@@ -418,8 +421,11 @@ function volumeImpactNote(ctx, impactR, applied) {
   const word = ctx.kind === "minicut" ? "mini-cut" : losing ? "cut" : "bulk";
   const need = `2 weeks of weigh-ins${ctx.kind === "minicut" ? " during the mini-cut" : ""} (${TREND_MIN_WEIGHINS}+ each week)`;
   if (ctx.holding && impactR !== 0) {
-    const now = ctx.rate == null ? "" : ` (the scale now: ${ctx.rate >= 0 ? "+" : "−"}${Math.abs(ctx.rate * 100).toFixed(1)}%/week)`;
-    return `${level}, held at the most this ${word} has built up${now}: a slower or flat scale doesn't undo it. ${applied}`;
+    const pace = ctx.rate == null ? null : `${ctx.rate >= 0 ? "+" : "−"}${Math.abs(ctx.rate * 100).toFixed(1)}%/week`;
+    const stale = pace && ctx.rateAge > 0;
+    const now = !pace ? "" : stale ? ` (your last trend, ${ctx.rateAge} day${ctx.rateAge === 1 ? "" : "s"} ago: ${pace})` : ` (the scale now: ${pace})`;
+    const tail = !pace ? ` Your pace shows again after ${need}.` : stale ? " Weigh in to update it." : "";
+    return `${level}, held at the most this ${word} has built up${now}: a slower or flat scale doesn't undo it. ${applied}${tail}`;
   }
   if (ctx.estimated) {
     const assumed = ctx.kind === "minicut" ? VOLUME_DEFICIT_FULL_RATE : (losing ? VOLUME_DEFICIT_FULL_RATE : VOLUME_SURPLUS_FULL_RATE) * VOLUME_DEFAULT_STRENGTH;
@@ -527,17 +533,22 @@ function dietPhaseContext(rows, iso, bwLog) {
     const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind, b.start);
     return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
   };
-  // The block's level on a day, held at the highest it has reached: a flat
-  // or slower scale pauses the build-up rather than undoing it, inside the
-  // phase and for the fade after it (owner's choice, Oct 2026). Only days
-  // the weight trend actually showed count toward that high; an assumed pace
-  // counts on its own day only, so a mini-cut's assumed 30% doesn't lock in.
-  // RepReport's heldLevel; keep the two in step.
+  // The block's level on a day, held at the highest it has reached for a
+  // full week (VOLUME_HOLD_DAYS in a row): a flat or slower scale pauses the
+  // build-up rather than undoing it, inside the phase and for the fade after
+  // it, while one lucky weigh-in can't set the high (owner's choice, Oct
+  // 2026). Only days the weight trend actually showed count toward that
+  // high; an assumed pace counts on its own day only, so a mini-cut's
+  // assumed 30% doesn't lock in. Today's level always counts. RepReport's
+  // heldLevel; keep the two in step.
   const heldLevel = (b, day) => {
     let peak = own(b, day).level;
+    const week = []; // the last VOLUME_HOLD_DAYS levels, null for an assumed pace
     for (let d = b.start; d < day; d = addDaysISO(d, 1)) {
       const o = own(b, d);
-      if (o.rate !== null && o.level > peak) peak = o.level;
+      week.push(o.rate !== null ? o.level : null);
+      if (week.length > VOLUME_HOLD_DAYS) week.shift();
+      if (week.length === VOLUME_HOLD_DAYS && week.every((x) => x !== null)) peak = Math.max(peak, Math.min(...week));
     }
     return peak;
   };
@@ -593,7 +604,12 @@ function dietPhaseContext(rows, iso, bwLog) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, holding: typed && peak - o.level > 0.005, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed,
+        // held above what today's scale alone gives, by at least a point of the bar
+        holding: typed && (peak - o.level) * VOLUME_SHARE_PCT[b.kind] >= 1,
+        // this block's weeks so far plus the earlier blocks it continues
+        chainWeeks: typed ? blockWeeksTo(b, iso) + (inChain(b) ? carry[b.kind].weeks : 0) : null,
+        ...levels, fading };
     }
     if (!typed) continue;
     const prev = carry[b.kind];
@@ -621,11 +637,18 @@ function precedingBlock(rows, iso, exclude = []) {
   const prevDay = addDaysISO(iso, -1);
   const b = phaseBlocks(kept).find((x) => x.start <= prevDay && (x.end === null || x.end >= prevDay));
   if (!b) return null;
-  const weeks = Math.max(1, Math.round(blockWeeksTo(b, prevDay)));
-  return { type: b.type, name: b.name, weeks, maintenanceWeeks: suggestedMaintenanceWeeks(b.type, b.name, weeks) };
+  // the whole run when this block continues an earlier one (a cut after a
+  // diet break, a bulk after a mini-cut): the length the training fade uses
+  const own = blockWeeksTo(b, prevDay);
+  const run = dietPhaseContext(kept, prevDay, null)?.chainWeeks ?? own;
+  const weeks = Math.max(1, Math.round(run));
+  return { type: b.type, name: b.name, weeks, chained: run - own > 0.5, maintenanceWeeks: suggestedMaintenanceWeeks(b.type, b.name, weeks) };
 }
 
-const blockLabel = (b) => `${b.weeks}-wk ${isMiniCut(b.type, b.name) ? "mini-cut" : b.type === "deficit" ? "cut" : "bulk"}`;
+const blockLabel = (b) => {
+  const kind = isMiniCut(b.type, b.name) ? "mini-cut" : b.type === "deficit" ? "cut" : "bulk";
+  return `${b.weeks}-wk ${kind}${b.chained ? ` (counting the earlier ${kind} it continues)` : ""}`;
+};
 
 // A one-line, never-blocking note when a phase starting on `start` skips
 // or shortens the maintenance RP suggests after the block before it.
