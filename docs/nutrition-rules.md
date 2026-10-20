@@ -22,7 +22,7 @@ Every rule below carries one of three tags.
 |---|---|
 | **Targets** (presets) | Named macro targets (protein, fat, carbs, calories): Cut, Mini-cut, Maintenance, Bulk, and day-only targets such as a refeed |
 | **Diet phases** | Blocks on the calendar (cut, maintenance, bulk) that say which target you follow on each date |
-| **Weekly plan** | A Mon–Sun meal template. It isn't a record of what you ate. |
+| **Weekly plan** | Each week's Mon–Sun meal plan. A new week keeps your meals and day targets but starts with no foods. It isn't a record of what you ate. |
 | **Food log** | What you actually ate. Checking off a meal copies its foods in, with their macros at that moment, so later edits to the plan or a food never change what was logged. |
 | **Weigh-ins** | Prompted once a day (you can skip) |
 
@@ -145,6 +145,7 @@ For any calorie target:
 - **Foods** are either components, with macros stored directly, or recipes, with ingredients and a number of servings.
 - **Barcodes** look foods up in Open Food Facts.
 - **Checking off a meal** copies its foods into the log with their macros at that moment.
+- **Each week starts with no foods.** A week you haven't touched shows the meals and day targets (a Saturday refeed, say) of the latest week before it, with every meal empty. On an empty day, **Copy** fills that day, or every empty day, from the latest week you planned; days you've already planned are left alone. Editing this week's plan never changes an earlier week's plan or anything you logged. Plans are kept for 12 past weeks. When this shipped, the old repeating template became the previous week's plan, so it's one tap away. *(Owner's choice, Oct 2026)*
 - **Past days** can be marked as counting or not toward the estimate (see [section 5](#5-maintenance-estimate-and-the-weekly-check-in)).
 
 ---
