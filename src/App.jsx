@@ -1520,11 +1520,12 @@ function newDay() {
 
 /* ---------- copy a day's meal plan onto other day(s) ---------- */
 // Replaces target day(s)' slots wholesale with a deep clone of the
-// source day's slots. Entries carry no id (just {foodId, qty}), and
-// slot ids are only ever used as React keys within a single day's
-// render, so there's no cross-day collision to worry about — a full
-// replace is simplest and safest (idempotent, no risk of a merge
-// duplicating entries if the action is triggered twice).
+// source day's slots. Entries carry no id (just {foodId, qty}). Slot ids
+// are React keys and also line a day's food log up under its meals
+// (intake_log.slot_id); they carry across weeks (see planFor) and are
+// cloned as-is here, which is fine since each day's log is grouped
+// separately. A full replace is simplest and safest (idempotent, no risk of
+// a merge duplicating entries if the action is triggered twice).
 // targetId (the day's target override) is left untouched unless
 // copyTarget is true — an override (e.g. Sat = Refeed) is usually
 // specific to that day, not the day you're copying meals from.
@@ -1546,14 +1547,18 @@ function copyDayTo(week, sourceKey, targetKeys, { copyTarget = false } = {}) {
 /* ---------- the weekly plan, one per week ----------
    Saved in app_data.week as { v: 2, plans: { "<Monday ISO>": { Mon..Sun } } }.
    Each week starts with no foods: a week you haven't edited shows the meals
-   and day targets of the latest week before it (or the first one after it,
-   if there's none before), with every meal empty, and it's only saved once
-   you change it. Keeping the same meals (and their ids) means a day's food
-   log still lines up under its meals. Copying fills a week's empty days from
-   an earlier week. Before v2 the plan was one repeating Mon–Sun template;
-   on load it becomes last week's plan, so the current week starts empty
-   with that template one tap away. */
-const PLAN_KEEP_WEEKS = 12; // past weeks kept, besides the latest one before this week
+   and day targets of the latest saved week before it (or, before your first
+   saved week, of that first week), with every meal empty, and it's only
+   saved once you change it. Keeping the same meals (and their ids) means a
+   day's food log still lines up under its meals. Copying fills an empty day
+   from the latest earlier week that had foods planned on that weekday.
+   Before v2 the plan was one repeating Mon–Sun template; on load it becomes
+   last week's plan, so the current week starts empty with that template
+   one tap away. */
+// Past weeks whose foods are kept. Older weeks keep their meals and day
+// targets (so old logs still line up), except the week each weekday would
+// copy from, which keeps its foods too.
+const PLAN_KEEP_WEEKS = 12;
 function seedWeek() {
   const w = {};
   DAYS.forEach((d) => (w[d] = newDay()));
@@ -1599,20 +1604,50 @@ function planFor(store, monday) {
   for (const d of DAYS) w[d] = { ...plans[src][d], slots: plans[src][d].slots.map((sl) => ({ ...sl, entries: [] })) };
   return w;
 }
-// save `days` as the plan for `monday`, dropping weeks older than
-// PLAN_KEEP_WEEKS (except the latest one before this week)
+const stripFoods = (days) => {
+  const w = {};
+  for (const d of DAYS) w[d] = { ...days[d], slots: days[d].slots.map((sl) => ({ ...sl, entries: [] })) };
+  return w;
+};
+// For each weekday, the latest week before `monday` with foods planned that
+// day: { days: { Mon: <that day>, ... }, from: { Mon: "<its Monday>", ... } },
+// or null when no earlier week has any foods.
+function lastPlannedDays(store, monday) {
+  const keys = Object.keys(store.plans).filter((k) => k < monday).sort();
+  const days = {}, from = {};
+  for (const d of DAYS) {
+    for (let i = keys.length - 1; i >= 0; i--) {
+      if (dayHasFoods(store.plans[keys[i]][d])) { days[d] = store.plans[keys[i]][d]; from[d] = keys[i]; break; }
+    }
+  }
+  return Object.keys(from).length ? { days, from } : null;
+}
+// Whether a week's planned foods are kept when saved (see PLAN_KEEP_WEEKS).
+function planKeepsFoods(store, monday, today) {
+  if (monday >= addDaysISO(mondayOf(today), -7 * PLAN_KEEP_WEEKS)) return true;
+  const src = lastPlannedDays(store, mondayOf(today));
+  return !!src && Object.values(src.from).includes(monday);
+}
+// Save `days` as the plan for `monday`. Weeks older than PLAN_KEEP_WEEKS lose
+// their foods (not their meals or targets), except each weekday's copy
+// source; an old week whose meals and targets match the saved week before it
+// is dropped, since it would show the same anyway.
 function withPlan(store, monday, days, today) {
   const plans = { ...store.plans, [monday]: days };
   const cur = mondayOf(today);
   const oldest = addDaysISO(cur, -7 * PLAN_KEEP_WEEKS);
-  const latestPast = Object.keys(plans).filter((k) => k < cur).sort().pop();
-  for (const k of Object.keys(plans)) if (k < oldest && k !== latestPast) delete plans[k];
+  const keep = new Set(Object.keys(plans).filter((k) => k >= oldest));
+  Object.values(lastPlannedDays({ plans }, cur)?.from || {}).forEach((k) => keep.add(k));
+  let prev = null;
+  for (const k of Object.keys(plans).sort()) {
+    if (!keep.has(k)) {
+      const bare = stripFoods(plans[k]);
+      if (prev && JSON.stringify(stripFoods(prev)) === JSON.stringify(bare)) { delete plans[k]; continue; }
+      plans[k] = bare;
+    }
+    prev = plans[k];
+  }
   return { ...store, plans };
-}
-// the latest week before `monday` with any foods planned: { monday, days } or null
-function lastPlannedWeek(store, monday) {
-  const k = Object.keys(store.plans).filter((x) => x < monday && weekHasFoods(store.plans[x])).sort().pop();
-  return k ? { monday: k, days: store.plans[k] } : null;
 }
 // Copy `source`'s foods into the days of `target` that have none planned:
 // each meal matched by id, then by name, else added. Days you've already
@@ -2065,15 +2100,28 @@ export default function App() {
   const phases = store ? store.phases : SEED_PHASES;
   const planStore = store ? store.week : null; // every week's plan (v2)
   const planMonday = mondayOf(selectedDate);
-  const week = planStore ? planFor(planStore, planMonday) : null; // the selected week's plan
-  const prevPlan = planStore ? lastPlannedWeek(planStore, planMonday) : null;
+  const planFoodsKept = planStore ? planKeepsFoods(planStore, planMonday, todayISO()) : true;
+  // the selected week's plan (a week too old to keep foods shows without them)
+  const week = planStore ? (planFoodsKept ? planFor(planStore, planMonday) : stripFoods(planFor(planStore, planMonday))) : null;
+  const prevPlan = planStore ? lastPlannedDays(planStore, planMonday) : null; // each weekday's copy source
+  const todayWeek = planStore ? planFor(planStore, mondayOf(todayISO())) : null; // the phase card's week
 
   const setFoods  = (val) => setStore((s) => ({ ...s, foods:  typeof val === "function" ? val(s.foods)  : val }));
   const setPhases = (val) => setStore((s) => ({ ...s, phases: typeof val === "function" ? val(s.phases) : val }));
   // edits the selected week's plan (saving it if it was still the empty default)
   const setWeek   = (val) => setStore((s) => {
-    const next = typeof val === "function" ? val(planFor(s.week, planMonday)) : val;
-    return { ...s, week: withPlan(s.week, planMonday, next, todayISO()) };
+    const today = todayISO(), cur = mondayOf(today);
+    let base = s.week;
+    // an edit to another week mustn't reshape this week while it's still the
+    // empty default borrowed from it, so this week is saved as it looks now
+    if (planMonday !== cur && !base.plans[cur]) base = { ...base, plans: { ...base.plans, [cur]: planFor(base, cur) } };
+    // weeks before the first saved week borrow its meals, so before that week
+    // changes, the week before it keeps how it looked (meals and targets)
+    const first = Object.keys(base.plans).sort()[0];
+    const prior = addDaysISO(planMonday, -7);
+    if (planMonday <= first && !base.plans[prior]) base = { ...base, plans: { ...base.plans, [prior]: stripFoods(planFor(base, planMonday)) } };
+    const next = typeof val === "function" ? val(planFor(base, planMonday)) : val;
+    return { ...s, week: withPlan(base, planMonday, next, today) };
   });
   const setPlanStore = (val) => setStore((s) => ({ ...s, week: typeof val === "function" ? val(s.week) : val }));
 
@@ -2682,6 +2730,8 @@ export default function App() {
             setWeek={setWeek}
             prevPlan={prevPlan}
             planMonday={planMonday}
+            todayWeek={todayWeek}
+            planFoodsKept={planFoodsKept}
             foods={foods}
             setFoods={setFoods}
             phases={phases}
@@ -2750,7 +2800,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, prevPlan, planMonday, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength }) {
+function Plan({ week, setWeek, prevPlan, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -2766,7 +2816,7 @@ function Plan({ week, setWeek, prevPlan, planMonday, foods, setFoods, phases, ac
       ? `${dietPhaseOnDay.phase_name} — no matching targets`
       : "no diet phase set";
   // Where a picked / scanned food goes:
-  //   { mode: "template", slotId }            → the weekly plan (every <weekday>)
+  //   { mode: "template", slotId }            → this week's plan for this weekday
   //   { mode: "log", slotId, slotName }       → this date's food log only
   const [picker, setPicker] = useState(null);
   const [scanTarget, setScanTarget] = useState(null);
@@ -2875,7 +2925,7 @@ function Plan({ week, setWeek, prevPlan, planMonday, foods, setFoods, phases, ac
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)}
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)}
         strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
         trainingGoal={training?.active ? training.goal || null : null} />
 
@@ -2887,29 +2937,43 @@ function Plan({ week, setWeek, prevPlan, planMonday, foods, setFoods, phases, ac
         onCopyDay={(d) => setCopySource(d)}
       />
 
-      {/* a new week starts with no foods: offer the latest planned week's */}
-      {prevPlan && !dayHasFoods(day) && !(intakeRows && intakeRows.length) && dayHasFoods(prevPlan.days[activeDay]) && (() => {
-        const from = prevPlan.monday === addDaysISO(planMonday, -7) ? "last week" : `the week of ${shortDate(prevPlan.monday)}`;
-        const fillable = DAYS.filter((d) => !dayHasFoods(week[d]) && dayHasFoods(prevPlan.days[d])).length;
+      {/* a new week starts with no foods: offer each weekday's latest planned foods.
+          Hidden while a past day's log loads, and once all its meals are logged. */}
+      {planFoodsKept && prevPlan?.days[activeDay] && !dayHasFoods(day)
+        && !(loggable && (intakeRows === null || (day.slots.length > 0 && day.slots.every((s) => loggedBySlot[s.id])))) && (() => {
+        const curMon = mondayOf(todayISO());
+        const weekLabel = (m) => m === curMon ? "this week" : m === addDaysISO(curMon, -7) ? "last week" : m === addDaysISO(curMon, 7) ? "next week" : `the week of ${shortDate(m)}`;
+        const fillable = DAYS.filter((d) => !dayHasFoods(week[d]) && prevPlan.days[d]);
+        const sameWeek = fillable.every((d) => prevPlan.from[d] === prevPlan.from[activeDay]);
         return (
           <div style={S.calcPrompt}>
             <div style={{ fontWeight: 700, marginBottom: 4 }}>No foods planned for {DAY_NAMES[activeDay]}</div>
-            <div style={{ fontSize: 13, color: dim, marginBottom: 10 }}>Copy them from {from}. Days you've already planned stay as they are.</div>
+            <div style={{ fontSize: 13, color: dim, marginBottom: 10 }}>
+              Copy them from {weekLabel(prevPlan.from[activeDay])}. {fillable.length > 1 && !sameWeek
+                ? "Copy all fills each empty day from the last week that day was planned."
+                : "Days you've already planned stay as they are."}
+            </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button style={{ ...S.primaryBtn, flex: 1 }} onClick={() => setWeek((w) => copyFoodsInto(w, prevPlan.days, [activeDay]))}>Copy {DAY_NAMES[activeDay]}</button>
-              {fillable > 1 && (
-                <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => setWeek((w) => copyFoodsInto(w, prevPlan.days))}>Copy all {fillable} empty days</button>
+              {fillable.length > 1 && (
+                <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => setWeek((w) => copyFoodsInto(w, prevPlan.days))}>Copy all {fillable.length} empty days</button>
               )}
             </div>
           </div>
         );
       })()}
+      {!planFoodsKept && (
+        <div style={{ fontSize: 13, color: dim, margin: "0 0 12px" }}>
+          Plans older than {PLAN_KEEP_WEEKS} weeks keep their meals but not their foods. Foods you add here go straight to this day's log.
+        </div>
+      )}
 
       {/* phase + target dashboard */}
       <div style={S.dash}>
         <div style={S.dashHead}>
           {/* follows the diet phase by default; picking a preset overrides it
-              for this weekday, this week and the new weeks after it */}
+              for this weekday in this week's plan, and weeks you haven't
+              edited after it inherit it (up to the next week you've edited) */}
           <label style={S.dashLabel}>TARGETS</label>
           <select
             key={day.targetId || "follow"}
@@ -2963,8 +3027,8 @@ function Plan({ week, setWeek, prevPlan, planMonday, foods, setFoods, phases, ac
           }
           onCopyNext={() => copySlotToNextDay(slot)}
           canCopyNext={!!nextDayKey}
-          onAdd={() => setPicker(loggedBySlot[slot.id] ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
-          onScan={() => setScanTarget(loggedBySlot[slot.id] ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
+          onAdd={() => setPicker(loggedBySlot[slot.id] || !planFoodsKept ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
+          onScan={() => setScanTarget(loggedBySlot[slot.id] || !planFoodsKept ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
           onQty={(ei, qty) =>
             update((d) => (d.slots[si].entries[ei].qty = qty))
           }

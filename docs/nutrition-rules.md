@@ -33,7 +33,7 @@ The weekly check-in ties these together: it compares what you logged with how yo
 ## 2. Targets
 
 - **New accounts start with example targets.** They're marked as examples, so nothing treats them as your real maintenance until you edit them or use the calculator. *(App's choice)*
-- **Day overrides:** any weekday can use a different target than the phase, for example a Saturday refeed. Day-only targets can't be picked as a diet phase, so RepReport never mistakes a refeed for a cut.
+- **Day overrides:** any weekday can use a different target than the phase, for example a Saturday refeed. It's set in that week's plan, and a new week starts with the previous week's overrides. Day-only targets can't be picked as a diet phase, so RepReport never mistakes a refeed for a cut.
 - **Target history:** every change to a target is dated, so a past day is always judged against the target it had then.
 
 ### Starting targets calculator
@@ -145,7 +145,7 @@ For any calorie target:
 - **Foods** are either components, with macros stored directly, or recipes, with ingredients and a number of servings.
 - **Barcodes** look foods up in Open Food Facts.
 - **Checking off a meal** copies its foods into the log with their macros at that moment.
-- **Each week starts with no foods.** A week you haven't touched shows the meals and day targets (a Saturday refeed, say) of the latest week before it, with every meal empty. On an empty day, **Copy** fills that day, or every empty day, from the latest week you planned; days you've already planned are left alone. Editing this week's plan never changes an earlier week's plan or anything you logged. Plans are kept for 12 past weeks. When this shipped, the old repeating template became the previous week's plan, so it's one tap away. *(Owner's choice, Oct 2026)*
+- **Each week starts with no foods.** A week you haven't touched shows the meals and day targets (a Saturday refeed, say) of the latest saved week before it (or, before your first saved week, of that first week), with every meal empty. On an empty day, **Copy** fills it from the last week that day had foods planned, and **Copy all** fills every empty day the same way; days you've already planned are left alone. Editing one week never changes a week you've already edited, this week, or anything you logged. Past plans keep their foods for 12 weeks; older weeks keep their meals and day targets, so old logs still line up under their meals, and the last week each weekday was planned keeps its foods so it can still be copied. When this shipped, the old repeating template became the previous week's plan, so it's one tap away. *(Owner's choice, Oct 2026)*
 - **Past days** can be marked as counting or not toward the estimate (see [section 5](#5-maintenance-estimate-and-the-weekly-check-in)).
 
 ---
