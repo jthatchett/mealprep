@@ -21,6 +21,7 @@ function bwSkippedOn(day) {
   try { return localStorage.getItem(BW_SKIP_KEY) === day; } catch { return false; }
 }
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAY_NAMES = { Mon: "Monday", Tue: "Tuesday", Wed: "Wednesday", Thu: "Thursday", Fri: "Friday", Sat: "Saturday", Sun: "Sunday" };
 
 /* ---------- Supabase config ---------- */
 const SUPABASE_URL = "https://wydrhwlmsbcwkhcmgiss.supabase.co";
@@ -323,25 +324,20 @@ const roundRate = (n) => Math.round(n * 1e4) / 1e4;
 const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46e6a0" };
 
 /* ---------- training volume impact (mirrors RepReport) ----------
-   How much the diet phase is moving RepReport's recovery ceilings (MRV):
-   the average change across muscles, as a % of each muscle's baseline.
-   This is a straight port of RepReport's resolveDietPhaseContext +
-   applyDietPhaseShift (src/App.jsx there) — keep the two in step. In
-   short: a cut lowers each MRV toward the low end of RP's published range
-   and a bulk raises it toward the high end; the shift builds with how far
+   How much the diet phase is moving RepReport's recovery ceilings (MRV),
+   as a % of baseline. This is a straight port of RepReport's
+   resolveDietPhaseContext + dietVolumeImpactPct (src/App.jsx there) — keep
+   the two in step. In short: every muscle's MRV moves by one flat share,
+   -20% at a cut's full effect and +10% at a bulk's (a surplus helps
+   recovery less than a deficit hurts it); the shift builds with how far
    through the phase you are (planned length, else 12 weeks) and scales
    with how fast weight is actually moving (1%/wk loss or 0.5%/wk gain =
-   full effect; half until a weight trend exists). Maintenance phases
-   don't shift anything. Bounded by RP's ranges, so it tops out near ±17% —
-   except a mini-cut, which takes ~30% off (see MINICUT_VOLUME_CUT). */
-const VOLUME_MRV = {
-  // muscle: [baseline MRV, RP low, RP high]
-  chest: [20, 16, 24], horizontalBack: [23, 20, 26], verticalBack: [23, 20, 26],
-  biceps: [23, 20, 26], triceps: [18, 16, 20], frontDelts: [10, 8, 12],
-  sideDelts: [27, 24, 30], rearDelts: [16, 12, 20], traps: [16, 12, 20],
-  forearms: [27, 24, 30], quads: [16, 14, 18], hamstrings: [11, 8, 14],
-  glutes: [27, 24, 30], calves: [20, 16, 24], abs: [16, 12, 20],
-};
+   full effect; half until a weight trend exists, and a cut its planned
+   pace until it has its own trend, see CUT_WATER_DAYS). Maintenance phases
+   don't shift anything. A mini-cut takes ~30% off (see MINICUT_VOLUME_CUT). */
+const VOLUME_CUT_SHIFT = 0.2;  // MRV -20% at a cut's full effect
+const VOLUME_HOLD_DAYS = 7;    // a phase's level holds at the highest it kept this many days in a row
+const VOLUME_BULK_SHIFT = 0.1; // MRV +10% at a bulk's full effect
 const VOLUME_FULL_EFFECT_WEEKS = 12;
 const VOLUME_DEFICIT_FULL_RATE = 0.01;
 const VOLUME_SURPLUS_FULL_RATE = 0.005;
@@ -366,14 +362,33 @@ const CUT_MAINTENANCE_FRACTION = 2 / 3;
 const bulkMaintenanceWeeks = (bulkWeeks) => (bulkWeeks <= 8 ? 2 : bulkWeeks <= 16 ? 3 : 4);
 const isMiniCut = (type, name) => type === "deficit" && /mini/i.test(name || "");
 
-/* Mini-cuts cut volume harder than the landmark ranges allow a regular
-   cut to: ~30% off MRV and the volume target, from week 1 rather than
+/* Mini-cuts cut volume harder than a regular cut does (-20% at most):
+   ~30% off MRV and the volume target, from week 1 rather than
    building across the phase (a 2–6 wk crash phase has no time to build).
    Coaching guidance for mini-cuts puts training at ~⅔–¾ of usual volume;
-   30% is the middle of that — a starting point to refine. Scaled by the
-   weight trend like any phase, but assumed at full strength until a trend
-   exists, since a mini-cut's target pace (~1%/wk) is the full-effect rate. */
+   30% is the middle of that — a starting point to refine. Full strength
+   until the weight trend's 2 weeks of weigh-ins all fall inside the
+   mini-cut (the default mini-cut pace, 1%/wk, is the full-effect rate),
+   then scaled by that trend like any phase. */
 const MINICUT_VOLUME_CUT = 0.3;
+// points of the volume bar per unit of a phase's own level, by kind
+const VOLUME_SHARE_PCT = { deficit: VOLUME_CUT_SHIFT * 100, surplus: VOLUME_BULK_SHIFT * 100, minicut: MINICUT_VOLUME_CUT * 100 };
+/* The weight trend reads the 14 days ending on a date (weightTrend): a
+   reading counts for a mini-cut only when its first day is on or after the
+   mini-cut's start. Before that it still reads the phase before, often a
+   bulk's gain, which held the reduction back for half of a 4-week
+   mini-cut. Owner's choice (Oct 2026) over a flat 30% that ignores the
+   scale. RepReport's MINICUT_TREND_DAYS; keep the two in step. */
+const MINICUT_TREND_DAYS = 14;
+/* A cut's first week loses mostly water and glycogen, and until a cut has
+   its own trend the 14-day trend still reads the phase before. So a cut's
+   trend counts only once its 14 days start after the cut's first
+   CUT_WATER_DAYS (from day 20); until then, and whenever the cut has no
+   trend of its own, it runs at its planned pace (the covering row's
+   target_rate_pct), or VOLUME_DEFAULT_STRENGTH with none planned. Planned
+   days count as assumed, so they don't set the hold. Owner's choice, Oct
+   2026. RepReport's CUT_WATER_DAYS; keep the two in step. */
+const CUT_WATER_DAYS = 7;
 // a row's kind: deficit / surplus / maintenance, with mini-cuts their own
 const phaseKind = (r) => (isMiniCut(r.phase_type, r.phase_name) ? "minicut" : r.phase_type);
 const KIND_LABEL = { deficit: "cut", surplus: "bulk", minicut: "mini-cut" };
@@ -415,7 +430,22 @@ function volumeImpactNote(ctx, impactR, applied) {
   const losing = ctx.type === "deficit";
   const verb = losing ? "losing" : "gaining";
   const word = ctx.kind === "minicut" ? "mini-cut" : losing ? "cut" : "bulk";
-  const need = `2 weeks of weigh-ins (${TREND_MIN_WEIGHINS}+ each week)`;
+  const need = `2 weeks of weigh-ins${ctx.kind === "minicut" ? " during the mini-cut" : ""} (${TREND_MIN_WEIGHINS}+ each week)`;
+  if (ctx.holding && impactR !== 0) {
+    const pace = ctx.rate == null ? null : `${ctx.rate >= 0 ? "+" : "−"}${Math.abs(ctx.rate * 100).toFixed(1)}%/week`;
+    const stale = pace && ctx.rateAge > 0;
+    const now = !pace ? "" : stale ? ` (your last trend, ${ctx.rateAge} day${ctx.rateAge === 1 ? "" : "s"} ago: ${pace})` : ` (the scale now: ${pace})`;
+    const tail = !pace ? ` Your pace shows again after ${need}.` : stale ? " Weigh in to update it." : "";
+    return `${level}, held at the most this ${word} has built up${now}: a slower or flat scale doesn't undo it. ${applied}${tail}`;
+  }
+  if (ctx.planned) {
+    const t = ctx.phase?.target_rate_pct;
+    const pace = `you're losing ${+Math.abs(Number(t) || 0).toFixed(2)}%/week (your planned pace)`;
+    const when = ctx.trendFrom && ctx.date < ctx.trendFrom
+      ? `From ${shortDate(ctx.trendFrom)}, your weigh-ins set it (a cut's first week is mostly water)`
+      : `After ${need}, your actual trend sets it`;
+    return impactR === 0 ? `${level}. ${when}; until then it assumes ${pace}.` : `${level}, assuming ${pace}. ${when}. ${applied}`;
+  }
   if (ctx.estimated) {
     const assumed = ctx.kind === "minicut" ? VOLUME_DEFICIT_FULL_RATE : (losing ? VOLUME_DEFICIT_FULL_RATE : VOLUME_SURPLUS_FULL_RATE) * VOLUME_DEFAULT_STRENGTH;
     const pace = `you're ${verb} ${+(assumed * 100).toFixed(2)}%/week${ctx.kind === "minicut" ? " (the usual mini-cut pace)" : ""}`;
@@ -453,15 +483,45 @@ const blockWeeksTo = (b, iso) => (daysBetween(b.start, iso) + 1) / 7;
 // your real pace instead of the assumed one); older than that, null.
 // RepReport's latestWeeklyWeightRate does the same; keep the two in step.
 const VOLUME_TREND_MAX_AGE_DAYS = 21;
-function latestTrendRate(bwLog, day) {
-  const now = weightTrend(bwLog, day);
+// Readings by date for one weigh-in log. dietPhaseContext reads every day of
+// every phase (each phase is held at its highest), and the phase history
+// calls it once per block, so each reading is worked out once. Safe because
+// the log is replaced, never edited in place (setBwLog); the length check
+// is a backstop. RepReport's cachedRate does the same.
+const trendCache = new WeakMap();
+function cachedTrend(bwLog, key, compute) {
+  if (!bwLog) return compute();
+  let c = trendCache.get(bwLog);
+  if (!c || c.n !== bwLog.length) { c = { n: bwLog.length, by: new Map() }; trendCache.set(bwLog, c); }
+  if (!c.by.has(key)) c.by.set(key, compute());
+  return c.by.get(key);
+}
+const cachedWeightTrend = (bwLog, day) => cachedTrend(bwLog, `r${day}`, () => weightTrend(bwLog, day));
+const latestTrendRate = (bwLog, day) => cachedTrend(bwLog, `l${day}`, () => findLatestTrendRate(bwLog, day));
+function findLatestTrendRate(bwLog, day) {
+  const now = cachedWeightTrend(bwLog, day);
   if (now.ready) return { rate: now.pctPerWeek / 100, age: 0 };
   // in a gap, read the trend as of your last weigh-in: a week cut short by
   // the gap would understate the pace
   const last = (bwLog || []).filter((r) => r.date <= day).map((r) => r.date).sort().pop();
   if (!last) return { rate: null, age: null };
   for (let age = daysBetween(last, day); age <= VOLUME_TREND_MAX_AGE_DAYS; age++) {
-    const trend = weightTrend(bwLog, addDaysISO(day, -age));
+    const trend = cachedWeightTrend(bwLog, addDaysISO(day, -age));
+    if (trend.ready) return { rate: trend.pctPerWeek / 100, age };
+  }
+  return { rate: null, age: null };
+}
+
+// The most recent ready reading (up to VOLUME_TREND_MAX_AGE_DAYS old) whose
+// 14 days all fall on or after `start`. For a weigh-in gap inside a
+// mini-cut: latestTrendRate reads the trend as of your last weigh-in, which
+// can reach back before the mini-cut even when a later reading, all
+// mini-cut weigh-ins, was ready (and used) the day before. RepReport's
+// latestWeeklyWeightRateSince does the same; keep the two in step.
+function latestTrendInside(bwLog, day, start) {
+  const maxAge = Math.min(VOLUME_TREND_MAX_AGE_DAYS, daysBetween(start, day) - (MINICUT_TREND_DAYS - 1));
+  for (let age = 0; age <= maxAge; age++) {
+    const trend = cachedWeightTrend(bwLog, addDaysISO(day, -age));
     if (trend.ready) return { rate: trend.pctPerWeek / 100, age };
   }
   return { rate: null, age: null };
@@ -470,9 +530,20 @@ function latestTrendRate(bwLog, day) {
 function dietPhaseContext(rows, iso, bwLog) {
   const phase = phaseOnDate(rows, iso);
   if (!phase) return null;
-  const strengthOn = (type, day, kind) => {
-    const { rate, age } = latestTrendRate(bwLog, day);
+  // plannedPct: the covering row's planned %/week, for a cut before its own trend (CUT_WATER_DAYS)
+  const strengthOn = (type, day, kind, start, plannedPct = null) => {
+    let { rate, age } = latestTrendRate(bwLog, day);
+    // a mini-cut ignores a trend that reaches back before it (MINICUT_TREND_DAYS), a
+    // cut one that reaches into its first week (CUT_WATER_DAYS); each uses its latest
+    // reading from after that, else none
+    const from = kind === "minicut" ? start : kind === "deficit" ? addDaysISO(start, CUT_WATER_DAYS) : null;
+    if (from && rate !== null && addDaysISO(day, -(age + MINICUT_TREND_DAYS - 1)) < from) {
+      ({ rate, age } = latestTrendInside(bwLog, day, from));
+    }
     if (kind === "minicut") return { s: rate === null ? 1 : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
+    if (type === "deficit" && rate === null && plannedPct != null && plannedPct < 0) {
+      return { s: Math.min(1, -plannedPct / 100 / VOLUME_DEFICIT_FULL_RATE), estimated: true, planned: true, rate, rateAge: age };
+    }
     if (type === "deficit") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate < 0 ? Math.min(1, -rate / VOLUME_DEFICIT_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     if (type === "surplus") return { s: rate === null ? VOLUME_DEFAULT_STRENGTH : rate > 0 ? Math.min(1, rate / VOLUME_SURPLUS_FULL_RATE) : 0, estimated: rate === null, rate, rateAge: age };
     return { s: 0, estimated: rate === null, rate, rateAge: age };
@@ -484,50 +555,112 @@ function dietPhaseContext(rows, iso, bwLog) {
     const weeksIn = Math.max(0, daysBetween(b.start, day) / 7);
     const plannedWeeks = plannedEnd ? Math.max(1, (daysBetween(b.start, plannedEnd) + 1) / 7) : VOLUME_FULL_EFFECT_WEEKS;
     const progress = b.kind === "minicut" ? 1 : Math.min(1, weeksIn / plannedWeeks);
-    const { s, estimated, rate, rateAge } = strengthOn(b.type, day, b.kind);
-    return { progress, strength: s, estimated, rate, rateAge, level: progress * s };
+    const t = covering[0]?.target_rate_pct;
+    const { s, estimated, planned = false, rate, rateAge } = strengthOn(b.type, day, b.kind, b.start, t != null && Number.isFinite(Number(t)) ? Number(t) : null);
+    return { progress, strength: s, estimated, planned, rate, rateAge, level: progress * s };
   };
+  // The block's level on a day, held at the highest it has reached for a
+  // full week (VOLUME_HOLD_DAYS in a row): a flat or slower scale pauses the
+  // build-up rather than undoing it, inside the phase and for the fade after
+  // it, while one lucky weigh-in can't set the high (owner's choice, Oct
+  // 2026). Only days the weight trend actually showed count toward that
+  // high; an assumed pace counts on its own day only, so a mini-cut's
+  // assumed 30% doesn't lock in. Today's level always counts. RepReport's
+  // heldLevel; keep the two in step.
+  // key "level" (what the ceilings use) or "strength" (the pace alone,
+  // held the same way; RepReport's fast-cut rules read it).
+  const heldOf = (b, day, key) => {
+    let peak = own(b, day)[key];
+    const week = []; // the last VOLUME_HOLD_DAYS values, null for an assumed pace
+    for (let d = b.start; d < day; d = addDaysISO(d, 1)) {
+      const o = own(b, d);
+      week.push(o.rate !== null ? o[key] : null);
+      if (week.length > VOLUME_HOLD_DAYS) week.shift();
+      if (week.length === VOLUME_HOLD_DAYS && week.every((x) => x !== null)) peak = Math.max(peak, Math.min(...week));
+    }
+    return peak;
+  };
+  const heldLevel = (b, day) => heldOf(b, day, "level");
   const KINDS = ["deficit", "surplus", "minicut"];
-  const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name }
+  const carry = { deficit: null, surplus: null, minicut: null }; // { v, end, fadeDays, weeks, name, chainStart }
   const residual = (c, day) => (c ? c.v * Math.max(0, 1 - daysBetween(c.end, day) / c.fadeDays) : 0);
+  const blocks = phaseBlocks(rows);
+  // days strictly between two dates that fall in a mini-cut
+  const miniCutDaysBetween = (from, to) => blocks.reduce((n, x) => {
+    if (x.kind !== "minicut") return n;
+    const lo = x.start > from ? x.start : addDaysISO(from, 1);
+    const end = x.end ?? iso;
+    const hi = end < to ? end : addDaysISO(to, -1);
+    return n + Math.max(0, daysBetween(lo, hi) + 1);
+  }, 0);
+  // Days from the end of the last block of b's kind to b's start, as the
+  // chain counts them. A bulk's clock stops during a mini-cut: a mini-cut
+  // sits inside a bulk to extend it, so the bulk after it (however long the
+  // mini-cut ran) is the same bulk (owner's call, Oct 2026). RepReport's
+  // chainGap does the same.
+  const chainGap = (c, b) => daysBetween(c.end, b.start) - (b.kind === "surplus" ? miniCutDaysBetween(c.end, b.start) : 0);
   // a block of the same type as one still fading picks up where that one
   // stood when it started (held, not decaying) until its own effect passes it
-  const held = (b, level) => Math.min(1, Math.max(residual(carry[b.kind], b.start), level));
-  for (const b of phaseBlocks(rows)) {
+  const held = (b, level) => {
+    const c = carry[b.kind];
+    const start = c ? c.v * Math.max(0, 1 - chainGap(c, b) / c.fadeDays) : 0;
+    return Math.min(1, Math.max(start, level));
+  };
+  // A block of the same type that starts inside the last one's fade window
+  // continues it: chainStart is where that run of blocks began (a cut after
+  // a short diet break is the same cut; RepReport's strength check compares
+  // against the first one). Time only, not what's left of the effect: a cut
+  // that stalled on the scale at the end is still the same cut.
+  const inChain = (b) => !!carry[b.kind] && chainGap(carry[b.kind], b) < carry[b.kind].fadeDays;
+  const chainStartOf = (b) => (inChain(b) ? carry[b.kind].chainStart : b.start);
+  for (const b of blocks) {
     if (b.start > iso) break;
     const typed = KINDS.includes(b.kind);
     if (b.end === null || b.end >= iso) {
       const o = typed ? own(b, iso) : { progress: 0, strength: 0, estimated: false, rate: null, level: 0 };
+      const peak = typed ? heldLevel(b, iso) : 0;
       const levels = Object.fromEntries(KINDS.map((k) => [k, residual(carry[k], iso)]));
-      if (typed) levels[b.kind] = held(b, o.level);
+      if (typed) levels[b.kind] = held(b, peak);
+      // A mini-cut's deficit is what calls for its 30%: a bulk still fading
+      // doesn't offset it (mini-cuts sit inside a bulk to extend it; owner's
+      // call, Oct 2026). RepReport does the same.
+      if (b.kind === "minicut") levels.surplus = 0;
       // the earlier phase still fading (the larger, if both are)
       let fading = null;
       for (const t of KINDS) {
-        const c = carry[t], r = residual(c, iso);
+        const c = carry[t], r = levels[t] === 0 ? 0 : residual(c, iso);
         if (t !== b.kind && r > 0.005 && (!fading || r > fading.level)) {
           fading = { type: t, name: c.name, level: r, weeksLeft: Math.ceil((c.fadeDays - daysBetween(c.end, iso)) / 7) };
         }
       }
-      return { phase, type: b.type, kind: b.kind, blockStart: b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed, ...levels, fading };
+      return { phase, type: b.type, kind: b.kind, blockStart: b.start, chainStart: typed ? chainStartOf(b) : b.start, progress: o.progress, strength: o.strength, estimated: o.estimated, rate: o.rate, rateAge: o.rateAge ?? null, typed,
+        // a cut at its planned pace (before its own trend): from when its trend can count
+        planned: !!o.planned, trendFrom: o.planned ? addDaysISO(b.start, CUT_WATER_DAYS + MINICUT_TREND_DAYS - 1) : null, date: iso,
+        // the pace, held like the level; rounded to 2 decimals as RepReport
+        // stamps it, so both apps' fast-cut lines agree at the 0.7 boundary
+        heldStrength: typed ? Math.round(heldOf(b, iso, "strength") * 100) / 100 : 0,
+        // held above what today's scale alone gives, by at least a point of the bar
+        holding: typed && (peak - o.level) * VOLUME_SHARE_PCT[b.kind] >= 1,
+        // this block's weeks so far plus the earlier blocks it continues
+        chainWeeks: typed ? blockWeeksTo(b, iso) + (inChain(b) ? carry[b.kind].weeks : 0) : null,
+        ...levels, fading };
     }
     if (!typed) continue;
     const prev = carry[b.kind];
-    const level = held(b, own(b, b.end).level);
-    const weeks = blockWeeksTo(b, b.end) + (residual(prev, b.start) > 0 ? prev.weeks : 0);
+    const level = held(b, heldLevel(b, b.end));
+    const weeks = blockWeeksTo(b, b.end) + (inChain(b) ? prev.weeks : 0);
     const fadeWeeks = b.kind === "surplus" ? bulkMaintenanceWeeks(weeks) : weeks * CUT_MAINTENANCE_FRACTION;
-    carry[b.kind] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name };
+    carry[b.kind] = { v: level, end: b.end, fadeDays: Math.max(7, fadeWeeks * 7), weeks, name: b.name, chainStart: chainStartOf(b) };
   }
   return null;
 }
 
-// Average MRV change across muscles, in % (negative = less volume).
+// The change to every muscle's MRV, in % (negative = less volume).
 function volumeImpactPct(ctx) {
   if (!ctx || (!ctx.deficit && !ctx.surplus && !ctx.minicut)) return 0;
   // a cut still fading under a mini-cut doesn't stack on it: the larger
   // of the two reductions applies
-  const shifts = Object.values(VOLUME_MRV).map(([base, lo, hi]) =>
-    (-Math.max((base - lo) * ctx.deficit, base * MINICUT_VOLUME_CUT * ctx.minicut) + (hi - base) * ctx.surplus) / base);
-  return (shifts.reduce((a, b) => a + b, 0) / shifts.length) * 100;
+  return (-Math.max(VOLUME_CUT_SHIFT * ctx.deficit, MINICUT_VOLUME_CUT * ctx.minicut) + VOLUME_BULK_SHIFT * ctx.surplus) * 100;
 }
 
 // The block that ended the day before `iso` (a cut/bulk the phase starting
@@ -538,11 +671,18 @@ function precedingBlock(rows, iso, exclude = []) {
   const prevDay = addDaysISO(iso, -1);
   const b = phaseBlocks(kept).find((x) => x.start <= prevDay && (x.end === null || x.end >= prevDay));
   if (!b) return null;
-  const weeks = Math.max(1, Math.round(blockWeeksTo(b, prevDay)));
-  return { type: b.type, name: b.name, weeks, maintenanceWeeks: suggestedMaintenanceWeeks(b.type, b.name, weeks) };
+  // the whole run when this block continues an earlier one (a cut after a
+  // diet break, a bulk after a mini-cut): the length the training fade uses
+  const own = blockWeeksTo(b, prevDay);
+  const run = dietPhaseContext(kept, prevDay, null)?.chainWeeks ?? own;
+  const weeks = Math.max(1, Math.round(run));
+  return { type: b.type, name: b.name, weeks, chained: run - own > 0.5, maintenanceWeeks: suggestedMaintenanceWeeks(b.type, b.name, weeks) };
 }
 
-const blockLabel = (b) => `${b.weeks}-wk ${isMiniCut(b.type, b.name) ? "mini-cut" : b.type === "deficit" ? "cut" : "bulk"}`;
+const blockLabel = (b) => {
+  const kind = isMiniCut(b.type, b.name) ? "mini-cut" : b.type === "deficit" ? "cut" : "bulk";
+  return `${b.weeks}-wk ${kind}${b.chained ? ` (counting the earlier ${kind} it continues)` : ""}`;
+};
 
 // A one-line, never-blocking note when a phase starting on `start` skips
 // or shortens the maintenance RP suggests after the block before it.
@@ -1061,6 +1201,36 @@ async function sbSetDayStatus(session, date, included) {
 // before that existed fall back to the block's own days — a live meso counts
 // as active there, since telling finished from running would mean
 // downloading every week.
+// RepReport's status.strength, or null when it isn't usable: a malformed one
+// (a corrupt row, or a RepReport change without the matching one here) must
+// not break the phase card.
+function validStrength(st) {
+  if (!st || typeof st !== "object" || typeof st.level !== "string" || typeof st.cutStart !== "string") return null;
+  const num = (n) => (typeof n === "number" && Number.isFinite(n) ? n : null);
+  const lift = (x) => (x && typeof x === "object" && num(x.weight) != null && num(x.reps) != null && num(x.rir) != null ? x : null);
+  const ex = st.example && typeof st.example === "object" && lift(st.example.before) && lift(st.example.after) ? st.example : null;
+  const changePct = num(st.changePct);
+  const musclesScored = num(st.musclesScored) ?? 0;
+  // a warning needs a change and at least 3 muscles behind it, as RepReport requires
+  return { ...st, changePct, musclesDown: num(st.musclesDown) ?? 0, musclesScored,
+    level: changePct == null || musclesScored < 3 ? "none" : st.level, example: ex };
+}
+
+// RepReport's half of the goal check (its buildGoalStatus), or null when
+// it's missing or malformed. Labels are plain words RepReport chose.
+function validGoal(g) {
+  if (!g || typeof g !== "object" || typeof g.primaryGoal !== "string") return null;
+  const words = (a) => (Array.isArray(a) ? a.filter((x) => typeof x === "string" && x) : []);
+  const f = g.focus && typeof g.focus === "object" ? g.focus : {};
+  const iso = (x) => typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x);
+  const b = g.block && typeof g.block === "object" && iso(g.block.start) && iso(g.block.end)
+    ? { start: g.block.start, end: g.block.end, weeks: Number.isFinite(g.block.weeks) ? g.block.weeks : null, deloadStart: iso(g.block.deloadStart) ? g.block.deloadStart : null }
+    : null;
+  const focus = { emphasize: words(f.emphasize), primary: words(f.primary), maintain: words(f.maintain) };
+  if (!focus.emphasize.length && !focus.primary.length && !focus.maintain.length) return null; // nothing to judge by
+  return { primaryGoal: g.primaryGoal, focus, mainLifts: words(g.mainLifts), block: b };
+}
+
 async function sbLoadTrainingStatus(session) {
   const url = (select) => `${SUPABASE_URL}/rest/v1/training_data?select=${select}&user_id=eq.${session.user.id}`;
   const res = await fetch(url("status:data->status->data"), { headers: sbHeaders(session) });
@@ -1069,11 +1239,17 @@ async function sbLoadTrainingStatus(session) {
   if (!row) return null;
   const capDays = (n) => (n ? Math.min(7, n) : null);
   if (row.status && typeof row.status.active === "boolean") {
+    const st = validStrength(row.status.strength);
     return {
       active: row.status.active,
       daysPerWeek: capDays(row.status.daysPerWeek),
       lastDaysPerWeek: capDays(row.status.lastDaysPerWeek),
       deload: !!row.status.deload,
+      // RepReport's cut strength check (its computeCutStrength); null
+      // outside a cut and on status saved before it existed
+      strength: st,
+      // the running block's goal (its buildGoalStatus); null without one
+      goal: row.status.active ? validGoal(row.status.goal) : null,
     };
   }
   const legacy = await fetch(url("cur:data->meso->data->weeks->0->days,arch:data->archive->data->0->weeks->0->days"), { headers: sbHeaders(session) });
@@ -1081,7 +1257,7 @@ async function sbLoadTrainingStatus(session) {
   const [old] = await legacy.json();
   const cur = Array.isArray(old?.cur) && old.cur.length ? old.cur.length : null;
   const arch = Array.isArray(old?.arch) && old.arch.length ? old.arch.length : null;
-  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false };
+  return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false, strength: null, goal: null };
 }
 
 async function sbLoadCheckins(session) {
@@ -1344,11 +1520,12 @@ function newDay() {
 
 /* ---------- copy a day's meal plan onto other day(s) ---------- */
 // Replaces target day(s)' slots wholesale with a deep clone of the
-// source day's slots. Entries carry no id (just {foodId, qty}), and
-// slot ids are only ever used as React keys within a single day's
-// render, so there's no cross-day collision to worry about — a full
-// replace is simplest and safest (idempotent, no risk of a merge
-// duplicating entries if the action is triggered twice).
+// source day's slots. Entries carry no id (just {foodId, qty}). Slot ids
+// are React keys and also line a day's food log up under its meals
+// (intake_log.slot_id); they carry across weeks (see planFor) and are
+// cloned as-is here, which is fine since each day's log is grouped
+// separately. A full replace is simplest and safest (idempotent, no risk of
+// a merge duplicating entries if the action is triggered twice).
 // targetId (the day's target override) is left untouched unless
 // copyTarget is true — an override (e.g. Sat = Refeed) is usually
 // specific to that day, not the day you're copying meals from.
@@ -1363,6 +1540,143 @@ function copyDayTo(week, sourceKey, targetKeys, { copyTarget = false } = {}) {
       slots: JSON.parse(JSON.stringify(source.slots)),
       targetId: copyTarget ? source.targetId ?? null : next[key].targetId ?? null,
     };
+  }
+  return next;
+}
+
+/* ---------- the weekly plan, one per week ----------
+   Saved in app_data.week as { v: 2, plans: { "<Monday ISO>": { Mon..Sun } } }.
+   Each week starts with no foods: a week you haven't edited shows the meals
+   and day targets of the latest saved week before it (or, before your first
+   saved week, of that first week), with every meal empty, and it's only
+   saved once you change it. Keeping the same meals (and their ids) means a
+   day's food log still lines up under its meals. Copying fills an empty day
+   from the latest earlier week that had foods planned on that weekday.
+   Before v2 the plan was one repeating Mon–Sun template; on load it becomes
+   last week's plan, so the current week starts empty with that template
+   one tap away. */
+// Past weeks whose foods are kept. Older weeks keep their meals and day
+// targets (so old logs still line up), except the week each weekday would
+// copy from, which keeps its foods too.
+const PLAN_KEEP_WEEKS = 12;
+function seedWeek() {
+  const w = {};
+  DAYS.forEach((d) => (w[d] = newDay()));
+  return w;
+}
+const isPlanStore = (w) => !!w && w.v === 2 && !!w.plans && typeof w.plans === "object";
+// A saved Mon–Sun plan, made whole: missing days get default meals, and days
+// saved before targets followed the diet phase lose their per-weekday phaseId
+// (it was always set, default Maintenance); a deliberate override is re-picked
+// in the TARGETS dropdown. idRemap: old preset ids to stable ones.
+function cleanWeek(days, idRemap = {}) {
+  const out = {};
+  for (const d of DAYS) {
+    const val = days?.[d];
+    if (!val || typeof val !== "object" || !Array.isArray(val.slots)) { out[d] = newDay(); continue; }
+    const { phaseId, ...rest } = val;
+    const targetId = "targetId" in val ? val.targetId : null;
+    out[d] = { ...rest, targetId: targetId ? idRemap[targetId] || targetId : null };
+  }
+  return out;
+}
+// whatever app_data.week holds (v2, the old single template, or nothing) as a v2 store
+function loadPlanStore(raw, today, idRemap = {}) {
+  const plans = {};
+  if (isPlanStore(raw)) {
+    for (const [k, days] of Object.entries(raw.plans)) if (/^\d{4}-\d{2}-\d{2}$/.test(k)) plans[k] = cleanWeek(days, idRemap);
+  } else if (raw && typeof raw === "object" && DAYS.some((d) => raw[d])) {
+    plans[addDaysISO(mondayOf(today), -7)] = cleanWeek(raw, idRemap);
+  }
+  if (!Object.keys(plans).length) plans[mondayOf(today)] = seedWeek();
+  return { v: 2, plans };
+}
+const dayHasFoods = (day) => !!day && day.slots.some((s) => s.entries.length > 0);
+const weekHasFoods = (days) => !!days && DAYS.some((d) => dayHasFoods(days[d]));
+// the plan for the week starting `monday` (see above)
+function planFor(store, monday) {
+  const plans = store.plans;
+  if (plans[monday]) return plans[monday];
+  const keys = Object.keys(plans).sort();
+  const src = keys.filter((k) => k < monday).pop() || keys.find((k) => k > monday);
+  if (!src) return seedWeek(); // not reached: a loaded store always has a plan
+  const w = {};
+  for (const d of DAYS) w[d] = { ...plans[src][d], slots: plans[src][d].slots.map((sl) => ({ ...sl, entries: [] })) };
+  return w;
+}
+const stripFoods = (days) => {
+  const w = {};
+  for (const d of DAYS) w[d] = { ...days[d], slots: days[d].slots.map((sl) => ({ ...sl, entries: [] })) };
+  return w;
+};
+// For each weekday, the latest week before `monday` with foods planned that
+// day: { days: { Mon: <that day>, ... }, from: { Mon: "<its Monday>", ... } },
+// or null when no earlier week has any foods.
+function lastPlannedDays(store, monday) {
+  const keys = Object.keys(store.plans).filter((k) => k < monday).sort();
+  const days = {}, from = {};
+  for (const d of DAYS) {
+    for (let i = keys.length - 1; i >= 0; i--) {
+      if (dayHasFoods(store.plans[keys[i]][d])) { days[d] = store.plans[keys[i]][d]; from[d] = keys[i]; break; }
+    }
+  }
+  return Object.keys(from).length ? { days, from } : null;
+}
+// Whether a week's planned foods are kept when saved (see PLAN_KEEP_WEEKS).
+function planKeepsFoods(store, monday, today) {
+  if (monday >= addDaysISO(mondayOf(today), -7 * PLAN_KEEP_WEEKS)) return true;
+  const src = lastPlannedDays(store, mondayOf(today));
+  return !!src && Object.values(src.from).includes(monday);
+}
+// Save `days` as the plan for `monday`. Weeks older than PLAN_KEEP_WEEKS lose
+// their foods (not their meals or targets), except each weekday's copy
+// source; an old week whose meals and targets match the saved week before it
+// is dropped, since it would show the same anyway.
+function withPlan(store, monday, days, today) {
+  const plans = { ...store.plans, [monday]: days };
+  const cur = mondayOf(today);
+  const oldest = addDaysISO(cur, -7 * PLAN_KEEP_WEEKS);
+  const keep = new Set(Object.keys(plans).filter((k) => k >= oldest));
+  Object.values(lastPlannedDays({ plans }, cur)?.from || {}).forEach((k) => keep.add(k));
+  let prev = null;
+  for (const k of Object.keys(plans).sort()) {
+    if (!keep.has(k)) {
+      const bare = stripFoods(plans[k]);
+      if (prev && JSON.stringify(stripFoods(prev)) === JSON.stringify(bare)) { delete plans[k]; continue; }
+      plans[k] = bare;
+    }
+    prev = plans[k];
+  }
+  return { ...store, plans };
+}
+// The latest week before `monday` whose `dayKey` has foods in the meal
+// matching `slot` (by id, then name): { monday, entries } or null.
+function lastPlannedMeal(store, monday, dayKey, slot) {
+  const keys = Object.keys(store.plans).filter((k) => k < monday).sort();
+  for (let i = keys.length - 1; i >= 0; i--) {
+    const slots = store.plans[keys[i]][dayKey]?.slots || [];
+    const m = slots.find((x) => x.id === slot.id) || slots.find((x) => x.name === slot.name);
+    if (m?.entries.length) return { monday: keys[i], entries: m.entries };
+  }
+  return null;
+}
+// Copy `source`'s foods into the days of `target` that have none planned:
+// each meal matched by id, then by name, else added. Days you've already
+// planned and every day's targets are left alone.
+function copyFoodsInto(target, source, dayKeys = DAYS) {
+  const next = { ...target };
+  for (const d of dayKeys) {
+    const t = target[d], src = source?.[d];
+    if (!t || dayHasFoods(t) || !dayHasFoods(src)) continue;
+    const slots = JSON.parse(JSON.stringify(t.slots));
+    for (const ss of src.slots) {
+      if (!ss.entries.length) continue;
+      let i = slots.findIndex((x) => x.id === ss.id);
+      if (i < 0) i = slots.findIndex((x) => x.name === ss.name);
+      if (i >= 0) slots[i].entries = JSON.parse(JSON.stringify(ss.entries));
+      else slots.push(JSON.parse(JSON.stringify(ss)));
+    }
+    next[d] = { ...t, slots };
   }
   return next;
 }
@@ -1539,10 +1853,10 @@ export default function App() {
   const [tab, setTab] = useState("plan");
   const [store, setStore] = useState(null); // { foods, phases, week } — atomic
   const [loaded, setLoaded] = useState(false);
-  // The date being viewed in Plan. The meal plan itself is still one
-  // repeating Mon–Sun template (dated per-day plans come later), so a date
-  // resolves to its weekday's template day — the date adds the week strip,
-  // the month calendar, and which diet phase that day falls in.
+  // The date being viewed in Plan. Each week has its own Mon–Sun plan (see
+  // planFor), so a date resolves to its weekday in that week's plan; the
+  // date also picks the week strip, the month calendar, and which diet
+  // phase that day falls in.
   const [selectedDate, setSelectedDate] = useState(() => todayISO());
   const activeDay = weekdayKey(selectedDate);
   const setActiveDay = (dayKey) =>
@@ -1587,6 +1901,7 @@ export default function App() {
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
   const [bwLog, setBwLog] = useState([]);             // last 14 days of weigh-ins, oldest first
   const [training, setTraining] = useState(null);     // RepReport block status (sbLoadTrainingStatus); null = unknown/none
+  const [strengthAnswer, setStrengthAnswer] = useState(null); // this session's answer to the strength suggestion (see strengthChoice)
   const [intake, setIntake] = useState({});           // food log rows by date (loaded on demand)
   const [targetHistory, setTargetHistory] = useState([]); // target_history rows, oldest first
   // latest history for the save path (its closure can be a render behind), and
@@ -1753,6 +2068,10 @@ export default function App() {
     setRangeIntake({});
     setDayStatus({});
     setCheckins([]);
+    // the next account must not inherit this one's training status or its
+    // answer to the strength suggestion
+    setTraining(null);
+    setStrengthAnswer(null);
   };
 
   const handleAccountDeleted = () => {
@@ -1790,11 +2109,31 @@ export default function App() {
   // convenience destructure — safe because render is gated on loaded+store
   const foods  = store ? store.foods  : [];
   const phases = store ? store.phases : SEED_PHASES;
-  const week   = store ? store.week   : null;
+  const planStore = store ? store.week : null; // every week's plan (v2)
+  const planMonday = mondayOf(selectedDate);
+  const planFoodsKept = planStore ? planKeepsFoods(planStore, planMonday, todayISO()) : true;
+  // the selected week's plan (a week too old to keep foods shows without them)
+  const week = planStore ? (planFoodsKept ? planFor(planStore, planMonday) : stripFoods(planFor(planStore, planMonday))) : null;
+  const todayWeek = planStore ? planFor(planStore, mondayOf(todayISO())) : null; // the phase card's week
 
   const setFoods  = (val) => setStore((s) => ({ ...s, foods:  typeof val === "function" ? val(s.foods)  : val }));
   const setPhases = (val) => setStore((s) => ({ ...s, phases: typeof val === "function" ? val(s.phases) : val }));
-  const setWeek   = (val) => setStore((s) => ({ ...s, week:   typeof val === "function" ? val(s.week)   : val }));
+  // edits the selected week's plan (saving it if it was still the empty default)
+  const setWeek   = (val) => setStore((s) => {
+    const today = todayISO(), cur = mondayOf(today);
+    let base = s.week;
+    // an edit to another week mustn't reshape this week while it's still the
+    // empty default borrowed from it, so this week is saved as it looks now
+    if (planMonday !== cur && !base.plans[cur]) base = { ...base, plans: { ...base.plans, [cur]: planFor(base, cur) } };
+    // weeks before the first saved week borrow its meals, so before that week
+    // changes, the week before it keeps how it looked (meals and targets)
+    const first = Object.keys(base.plans).sort()[0];
+    const prior = addDaysISO(planMonday, -7);
+    if (planMonday <= first && !base.plans[prior]) base = { ...base, plans: { ...base.plans, [prior]: stripFoods(planFor(base, planMonday)) } };
+    const next = typeof val === "function" ? val(planFor(base, planMonday)) : val;
+    return { ...s, week: withPlan(base, planMonday, next, today) };
+  });
+  const setPlanStore = (val) => setStore((s) => ({ ...s, week: typeof val === "function" ? val(s.week) : val }));
 
   // load — from Supabase, once session is available
   useEffect(() => {
@@ -1802,11 +2141,6 @@ export default function App() {
     let cancelled = false;
     (async () => {
       setLoadError(false);
-      const seedWeek = () => {
-        const w = {};
-        DAYS.forEach((d) => (w[d] = newDay()));
-        return w;
-      };
       const nameToStableId = {
         "Mini-cut": "phase-minicut",
         "Cut": "phase-cut",
@@ -1837,18 +2171,8 @@ export default function App() {
             return p;
           });
 
-          let loadedWeek = row.week && Object.keys(row.week).length ? row.week : seedWeek();
-          // Days saved before targets followed the diet phase carry a
-          // per-weekday phaseId that was always set (default Maintenance).
-          // One-time move: drop it so the day follows its diet phase; any
-          // deliberate override is re-picked in the TARGETS dropdown.
-          const migrated = {};
-          for (const [day, val] of Object.entries(loadedWeek)) {
-            const { phaseId, ...rest } = val;
-            const targetId = "targetId" in val ? val.targetId : null;
-            migrated[day] = { ...rest, targetId: targetId ? idRemap[targetId] || targetId : null };
-          }
-          loadedWeek = migrated;
+          // every week's plan; the old single template becomes last week's (see loadPlanStore)
+          const loadedWeek = loadPlanStore(row.week, todayISO(), idRemap);
 
           const loadedStore = { foods: loadedFoods, phases: loadedPhases, week: loadedWeek };
           // baseline = what was loaded, so opening the app doesn't re-save it.
@@ -1859,7 +2183,7 @@ export default function App() {
           // new user (query SUCCEEDED, returned no row) — seed defaults, saved on first change.
           // A row with no foods still exists, so its updated_at is the base to save over.
           // New accounts start with an empty food list (starter foods were burying people's own).
-          const seeded = { foods: [], phases: SEED_PHASES, week: seedWeek() };
+          const seeded = { foods: [], phases: SEED_PHASES, week: loadPlanStore(null, todayISO()) };
           savedRef.current = { updatedAt: row ? row.updated_at : null, json: JSON.stringify(seeded) };
           setStore(seeded);
         }
@@ -2165,6 +2489,45 @@ export default function App() {
     return true;
   };
 
+  // Your answer to RepReport's strength suggestion ("keep" or "slow"), kept
+  // on the account so it quiets the suggestion on every device (see
+  // strengthView). This session's answer, else the saved one.
+  const strengthChoice = strengthAnswer || session?.user?.user_metadata?.strength_choice || null;
+  const rememberStrengthChoice = async (action, changePct) => {
+    const choice = { date: todayISO(), action, changePct: changePct ?? null };
+    setStrengthAnswer(choice);
+    // not via setSession, which would re-run the data loads (as in applyCalc)
+    try {
+      const next = await sbUpdateUserMeta(session, { strength_choice: choice });
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ access_token: next.access_token, refresh_token: next.refresh_token, user: next.user }));
+    } catch (e) { dbg("strength choice save FAILED: " + e.message); }
+  };
+  // Slow the cut to 0.5%/week in one step: the phase's target pace, and the
+  // followed target's calories raised by deltaKcal (carbs take it, protein
+  // and fat floors as usual). The check-ins carry on from the new numbers.
+  const slowCut = async (deltaKcal, changePct) => {
+    const followed = coaching?.followed;
+    if (!dietPhase || !followed) return;
+    // today's row and any later rows of the same cut block (a planned
+    // continuation of the cut keeps the slower pace too)
+    const kind = phaseKind(dietPhase);
+    const sorted = [...dietPhases].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+    const rows = [];
+    for (let i = sorted.findIndex((r) => r.id === dietPhase.id); i >= 0 && i < sorted.length && phaseKind(sorted[i]) === kind; i++) rows.push(sorted[i]);
+    try {
+      for (const r of rows) await sbUpdateDietPhase(session, r.id, { target_rate_pct: STRENGTH_SLOW_TO_PCT });
+    } catch (e) {
+      dbg("slow cut FAILED: " + e.message);
+      window.alert("Couldn't change the cut's pace — " + e.message);
+      return;
+    }
+    const cal = Math.round((Number(followed.target.cal) + deltaKcal) / 10) * 10;
+    const t = splitMacros({ cal, current: followed.target, phaseType: "deficit", weightLb: coaching.weightLb });
+    setPhases((prev) => prev.map((p) => (p.id === followed.id ? { ...p, target: { p: t.p, f: t.f, c: t.c, cal: t.cal }, example: false } : p)));
+    try { await reloadDietPhases(); } catch (e) { dbg("diet phase reload FAILED: " + e.message); }
+    await rememberStrengthChoice("slow", changePct);
+  };
+
   // Food log for the date being viewed in Plan — only today and past dates
   // can be logged. Cached per date; every write re-reads that date so the
   // screen always shows what's actually stored.
@@ -2317,6 +2680,8 @@ export default function App() {
           onSelectDate={(iso) => { setSelectedDate(iso); setShowMonth(false); }}
           onEdit={editDietPhases}
           onClose={() => setShowMonth(false)}
+          trainingGoal={training?.active ? training.goal || null : null}
+          goalLive={training?.active && training.goal ? goalLiveOf(dietPhaseContext(dietPhases, todayISO(), bwLog), todayISO()) : null}
         />
       )}
       {saveConflict && (
@@ -2373,6 +2738,10 @@ export default function App() {
           <Plan
             week={week}
             setWeek={setWeek}
+            planStore={planStore}
+            planMonday={planMonday}
+            todayWeek={todayWeek}
+            planFoodsKept={planFoodsKept}
             foods={foods}
             setFoods={setFoods}
             phases={phases}
@@ -2397,6 +2766,9 @@ export default function App() {
             showCalcPrompt={!calcLater && phases.some((p) => p.example)}
             onOpenCalc={openCalc}
             onCalcLater={laterCalc}
+            strengthChoice={strengthChoice}
+            onSlowCut={slowCut}
+            onKeepStrength={(changePct) => rememberStrengthChoice("keep", changePct)}
           />
         )}
         {tab === "foods" && (
@@ -2419,10 +2791,10 @@ export default function App() {
           <Data
             foods={foods}
             phases={phases}
-            week={week}
+            week={planStore}
             setFoods={setFoods}
             setPhases={setPhases}
-            setWeek={setWeek}
+            setWeek={setPlanStore}
             debugLog={debugLog}
             session={session}
             onDeleteStart={() => { accountGoneRef.current = true; }}
@@ -2438,7 +2810,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -2454,7 +2826,7 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
       ? `${dietPhaseOnDay.phase_name} — no matching targets`
       : "no diet phase set";
   // Where a picked / scanned food goes:
-  //   { mode: "template", slotId }            → the weekly plan (every <weekday>)
+  //   { mode: "template", slotId }            → this week's plan for this weekday
   //   { mode: "log", slotId, slotName }       → this date's food log only
   const [picker, setPicker] = useState(null);
   const [scanTarget, setScanTarget] = useState(null);
@@ -2563,7 +2935,9 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={week} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)} />
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)}
+        strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
+        trainingGoal={training?.active ? training.goal || null : null} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -2573,11 +2947,18 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
         onCopyDay={(d) => setCopySource(d)}
       />
 
+      {!planFoodsKept && (
+        <div style={{ fontSize: 13, color: dim, margin: "0 0 12px" }}>
+          Plans older than {PLAN_KEEP_WEEKS} weeks keep their meals but not their foods. Foods you add here go straight to this day's log.
+        </div>
+      )}
+
       {/* phase + target dashboard */}
       <div style={S.dash}>
         <div style={S.dashHead}>
           {/* follows the diet phase by default; picking a preset overrides it
-              for this weekday (every week) */}
+              for this weekday in this week's plan, and weeks you haven't
+              edited after it inherit it (up to the next week you've edited) */}
           <label style={S.dashLabel}>TARGETS</label>
           <select
             key={day.targetId || "follow"}
@@ -2631,8 +3012,21 @@ function Plan({ week, setWeek, foods, setFoods, phases, activeDay, setActiveDay,
           }
           onCopyNext={() => copySlotToNextDay(slot)}
           canCopyNext={!!nextDayKey}
-          onAdd={() => setPicker(loggedBySlot[slot.id] ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
-          onScan={() => setScanTarget(loggedBySlot[slot.id] ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
+          {...(() => {
+            // ⋮ "copy from last week": this meal's foods from the latest
+            // earlier week it had any, on this weekday; only into an empty meal
+            const src = planFoodsKept && !slot.entries.length ? lastPlannedMeal(planStore, planMonday, activeDay, slot) : null;
+            const curMon = mondayOf(todayISO());
+            const label = !src ? "last week" : src.monday === curMon ? "this week" : src.monday === addDaysISO(curMon, -7) ? "last week"
+              : src.monday === addDaysISO(curMon, 7) ? "next week" : `the week of ${shortDate(src.monday)}`;
+            return {
+              copyPrevLabel: label,
+              canCopyPrev: !!src,
+              onCopyPrev: () => src && update((d) => { d.slots[si].entries = JSON.parse(JSON.stringify(src.entries)); }),
+            };
+          })()}
+          onAdd={() => setPicker(loggedBySlot[slot.id] || !planFoodsKept ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
+          onScan={() => setScanTarget(loggedBySlot[slot.id] || !planFoodsKept ? { mode: "log", slotId: slot.id, slotName: slot.name } : { mode: "template", slotId: slot.id })}
           onQty={(ei, qty) =>
             update((d) => (d.slots[si].entries[ei].qty = qty))
           }
@@ -2919,7 +3313,172 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
 // training, and it exists for recovery, which eating less would work against.
 const DELOAD_NOTE = "Deload week in RepReport: sets are cut about in half and loads lightened so you can recover. Keep calories as planned — eating less would work against that.";
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload }) {
+/* ---------- strength during a cut (from RepReport) ----------
+   RepReport checks whether your lifts are holding up since the cut began
+   (its computeCutStrength, saved as status.strength). The phase card shows:
+   a line on how strength is doing, a heads-up when most muscles are about
+   3% down two readings running, and a suggestion to slow the cut when most
+   are 5% down (8% while the cut's first block is all there is to compare).
+   Keeping calories or slowing the cut quiets the suggestion for 2 weeks,
+   unless lifts drop another 2 points. Slowing applies in one step: the
+   ±250 kcal weekly limit is for corrections from noisy data, and this is
+   your decision. Thresholds are the owner's coaching choices (Oct 2026). */
+const STRENGTH_QUIET_DAYS = 14;
+const STRENGTH_WORSE_POINTS = 2;
+const STRENGTH_STALE_DAYS = 21;
+const STRENGTH_SLOW_TO_PCT = -0.5;
+
+const shortDate = (iso) => parseISO(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+function formatLift(s, units) {
+  const kg = (s.units || units) === "kg" ? " kg" : "";
+  const what = s.kind === "bodyweight" ? "bodyweight" : s.kind === "assisted" ? `${s.weight}${kg} assist` : `${s.weight}${kg}`;
+  return `${what}×${s.reps} (${s.rir} left)`;
+}
+
+// What the phase card says about strength, or null when there's nothing to
+// show (not a cut, no RepReport reading, or one for a different cut).
+// cutStart is the start of the cut's chain (dietPhaseContext's chainStart):
+// a cut after a short diet break continues the one before it.
+function strengthView({ strength, phase, cutStart, choice, today, ratePct, weightLb, actualPct, canSlow = true }) {
+  if (!strength || phase?.phase_type !== "deficit" || !cutStart || strength.cutStart !== cutStart) return null;
+  const age = strength.asOf ? daysBetween(strength.asOf, today) : null;
+  const asOf = age != null && age > 7 ? ` (as of ${shortDate(strength.asOf)})` : "";
+  const r = strength.changePct == null ? null : Math.round(strength.changePct);
+  let line;
+  if (r == null) line = "Strength since the cut began: not enough sessions yet to compare.";
+  else if (strength.mode !== "trend" && strength.level !== "suggest") line = "Strength since the cut began: checking. The full comparison starts once you've repeated weeks of an earlier block in this cut.";
+  else line = `Strength since the cut began: ${r > -3 ? `holding (${r > 0 ? "+" : r < 0 ? "−" : "±"}${Math.abs(r)}%)` : `down about ${Math.abs(r)}%`}${asOf}.`;
+  // an old reading is shown, but not acted on
+  if (age != null && age > STRENGTH_STALE_DAYS) return { line, level: "none" };
+  const ex = strength.example;
+  const lift = ex ? ` (${ex.name}: ${formatLift(ex.before, ex.units)} → ${formatLift(ex.after, ex.units)})` : "";
+  const across = `down about ${Math.abs(r)}% across ${strength.musclesDown} of ${strength.musclesScored} muscles since the cut began${lift}`;
+  if (strength.level === "headsUp") {
+    return { line, level: "headsUp", message: `Heads-up: your lifts are ${across}. Nothing to change yet. Worth watching.` };
+  }
+  if (strength.level !== "suggest") return { line, level: "none" };
+  const quiet = choice?.date && daysBetween(choice.date, today) < STRENGTH_QUIET_DAYS
+    && !(choice.changePct != null && strength.changePct <= choice.changePct - STRENGTH_WORSE_POINTS);
+  if (quiet) {
+    const did = choice.action === "slow" ? "slow the cut" : "keep calories";
+    return { line, level: "quiet", message: `You chose to ${did} on ${shortDate(choice.date)}. The suggestion comes back on ${shortDate(addDaysISO(choice.date, STRENGTH_QUIET_DAYS))} unless your lifts drop further.` };
+  }
+  const pace = actualPct != null && actualPct < 0 ? ` Losing ${Math.abs(actualPct).toFixed(1)}% a week may be costing muscle.` : "";
+  // each 0.5%/week of pace is about 2.5 kcal a day per lb of bodyweight
+  const deltaKcal = canSlow && weightLb && ratePct < STRENGTH_SLOW_TO_PCT - EPS
+    ? Math.round((((STRENGTH_SLOW_TO_PCT - ratePct) / 100) * weightLb * KCAL_PER_LB) / 7 / 10) * 10
+    : 0;
+  const offer = deltaKcal > 0 ? { deltaKcal } : null;
+  return {
+    line, level: "suggest", offer,
+    message: `Your lifts are ${across}.${pace}`,
+    options: offer
+      ? "Slow to 0.5% a week, or plan a 1–2 week diet break at maintenance on the calendar."
+      : "Consider a 1–2 week diet break at maintenance on the calendar.",
+  };
+}
+
+/* ---------- goal check (mirrors RepReport) ----------
+   One line on what RepReport's block and the diet phase are doing together,
+   and a warning when they pull apart, naming the app to change. A straight
+   port of RepReport's goalCheck (wording included); keep the two in step.
+   Cutoffs are the owner's (Oct 2026): a bulk with no muscle above Maintain
+   (not a strength block, which holds every muscle at maintain by design);
+   a strength or powerbuilding block on a cut faster than 0.7%/week (the
+   cut's held pace, as RepReport's own fast-cut rules read it). */
+const GOAL_FAST_CUT_PCT = 0.7; // %/week
+const goalList = (xs) => (xs.length <= 1 ? xs[0] || ""
+  : xs.length <= 4 ? `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`
+  : `${xs.slice(0, 3).join(", ")} and ${xs.length - 3} more`);
+const goalPct = (x) => `${x > 0 ? "+" : x < 0 ? "−" : ""}${+Math.abs(x).toFixed(2)}%`;
+const isStrengthGoal = (g) => g === "strength" || g === "powerbuilding";
+// goal: training status goal. phase: { type, kind, targetPct (planned
+// %/week or null), pacePct (a cut's held %/week loss) } or null.
+function goalCheck(goal, phase) {
+  if (!goal) return null;
+  const g = goal.primaryGoal;
+  const emph = goal.focus?.emphasize || [];
+  const growing = emph.length > 0 || (goal.focus?.primary || []).length > 0;
+  const nLifts = goal.mainLifts?.length || 0;
+  const lifts = !nLifts ? "" : nLifts > 3 ? ` on your ${nLifts} main lifts` : ` on ${goalList(goal.mainLifts)}`;
+  // On a cut, emphasized muscles are "prioritized" and the rest held; on a
+  // cut fast enough for the strength warning, strength is "held" too.
+  const cut = phase?.type === "deficit";
+  const fastCut = cut && Math.round((phase.pacePct ?? 0) * 10 + 1e-9) / 10 > GOAL_FAST_CUT_PCT + 1e-9; // to one decimal, as RepReport's fastCutPace
+  const build = emph.length ? `${cut ? "prioritizing" : "building"} ${goalList(emph)}` : growing && !cut ? "building muscle" : "holding muscle";
+  const strong = `${fastCut ? "Holding strength" : "Getting stronger"}${lifts}`;
+  const what = g === "strength" ? strong
+    : g === "powerbuilding" ? `${strong} while ${build}`
+    : build.charAt(0).toUpperCase() + build.slice(1);
+  let where = "";
+  if (phase?.type === "deficit") where = ` on a ${phase.kind === "minicut" ? "mini-cut" : "cut"}${phase.targetPct != null ? ` (${goalPct(phase.targetPct)}/week)` : ""}`;
+  else if (phase?.type === "surplus") where = ` on a bulk${phase.targetPct != null ? ` (${goalPct(phase.targetPct * WEEKS_PER_MONTH)}/month)` : ""}`;
+  else if (phase?.type === "maintenance") where = " at maintenance";
+  const recomp = phase?.type === "maintenance" && g !== "strength" && growing;
+  const summary = `${what}${where}${recomp ? ": expect slow, steady gains" : ""}.`;
+  const conflicts = [];
+  if (phase?.type === "surplus" && g !== "strength" && !growing) {
+    conflicts.push({ id: "bulk-no-growth", text: "Your block holds every muscle at maintenance volume, so a bulk mostly adds fat. Change the block's goal in RepReport, or switch to maintenance calories in Meal Prep." });
+  }
+  if (fastCut && isStrengthGoal(g)) {
+    conflicts.push({ id: "strength-fast-cut", text: "On a cut this fast, holding your main lifts is the win, and RepReport won't add sets to them. PRs are unlikely until you're back at maintenance. If PRs matter more right now, slow the cut to 0.7% a week or less in Meal Prep." });
+  }
+  return { summary, conflicts };
+}
+// The diet phase as goalCheck reads it, from a dietPhaseContext result.
+const goalPhaseOf = (ctx) => (ctx ? {
+  type: ctx.type, kind: ctx.kind,
+  targetPct: ctx.phase?.target_rate_pct != null && Number.isFinite(Number(ctx.phase.target_rate_pct)) ? Number(ctx.phase.target_rate_pct) : null,
+  pacePct: ctx.type === "deficit" ? (ctx.heldStrength ?? ctx.strength ?? 0) * VOLUME_DEFICIT_FULL_RATE * 100 : null,
+} : null);
+
+// The goal check for a plan: a block (goal.block dates) against the diet
+// phases overlapping it. A phase planned ahead is checked at its planned
+// pace (a cut with none set counts as 0.5%/week, a mini-cut as 1%); the
+// phase running today at the pace the scale has held (live: { blockStart,
+// today, pacePct }, as the phase card reads it). Only the goal warnings:
+// how to line phases up with blocks is a coach's call (owner, Oct 2026).
+// Items: { type: "conflict", id, start (the phase row's start), text }. A
+// straight port of RepReport's goalPlanCheck; keep the two in step.
+function goalPlanCheck(goal, rows, live = null) {
+  const blk = goal?.block;
+  if (!blk || !rows?.length) return [];
+  const items = [];
+  phaseBlocks(rows).forEach((b) => {
+    b.rows.forEach((r, i) => {
+      const next = b.rows[i + 1];
+      // a row ends at its own end_date or the day before the next row, whichever is first
+      const rEnd = [r.end_date, next ? addDaysISO(next.start_date, -1) : b.end].filter(Boolean).sort()[0] || null;
+      if ((rEnd && rEnd < blk.start) || r.start_date > blk.end) return; // outside the block
+      const t = r.target_rate_pct != null && Number.isFinite(Number(r.target_rate_pct)) ? Number(r.target_rate_pct) : null;
+      const isLive = live && b.start === live.blockStart && r.start_date <= live.today;
+      const pacePct = r.phase_type !== "deficit" ? null : isLive ? live.pacePct
+        : t != null ? -t : (b.kind === "minicut" ? 1 : VOLUME_DEFAULT_STRENGTH) * VOLUME_DEFICIT_FULL_RATE * 100;
+      goalCheck(goal, { type: r.phase_type, kind: b.kind, targetPct: t, pacePct }).conflicts
+        .forEach((c) => items.push({ type: "conflict", id: c.id, start: r.start_date, text: c.text }));
+    });
+  });
+  return items;
+}
+// The live half of a plan check, from a dietPhaseContext result on `today`.
+const goalLiveOf = (ctx, today) => (ctx?.type === "deficit" ? { blockStart: ctx.blockStart, today, pacePct: goalPhaseOf(ctx).pacePct } : null);
+
+// The goal check for a phase being planned in the editor, against your
+// running RepReport block: the phase as planned (ending at its planned end,
+// then the maintenance added after it when there is one), replacing the
+// rows in `drop` (the phase being edited and its own maintenance), and
+// only the items about this phase.
+function phasePlanItems(trainingGoal, dietPhases, { preset, start, plannedEnd, targetRatePct, withMaintenance, drop = [], live = null }) {
+  if (!preset || !trainingGoal?.block || !start) return [];
+  const planned = { id: "__plan", phase_type: preset.phase_type, phase_name: preset.name, start_date: start, end_date: plannedEnd, planned_end_date: plannedEnd, target_rate_pct: targetRatePct };
+  const after = withMaintenance && plannedEnd ? [{ id: "__maint", phase_type: "maintenance", phase_name: "Maintenance", start_date: addDaysISO(plannedEnd, 1), end_date: null, planned_end_date: null, target_rate_pct: 0 }] : [];
+  const others = (dietPhases || []).filter((r) => !drop.includes(r.id));
+  try { return goalPlanCheck(trainingGoal, [...others, planned, ...after], live).filter((it) => it.start === start); }
+  catch (e) { console.error("Goal plan check failed:", e); return []; }
+}
+
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
+  const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
 
@@ -2938,6 +3497,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const sign = (n, digits) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(digits);
   const cals = phaseCalories(phase, presets || [], week);
   const ctx = dietPhaseContext(dietPhases, today, bwLog);
+  const goal = goalCheck(trainingGoal, goalPhaseOf(ctx));
   const impact = volumeImpactPct(ctx);
   // only while the last phase is still fading — after that it's history
   const note = ctx?.fading ? transitionNote(dietPhases, phase.start_date, phase.phase_type, prog.plannedWeeks, [phase.id]) : null;
@@ -2957,6 +3517,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const last = !monthly && !trend.ready ? latestTrendRate(bwLog, today) : null;
   const actual = trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
   const actualAge = trend.ready ? 0 : last?.age ?? null;
+  const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   // pace: actual vs target, in display units
   let pace = null;
@@ -3012,6 +3573,14 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
           {prog.overrun ? "past planned end" : "plan"} ›
         </button>
       </div>
+      {goal && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ ...S.viNote, color: text, marginTop: 0 }}>{goal.summary} <span style={{ color: dim }}>(your RepReport block)</span></div>
+          {goal.conflicts.map((c) => (
+            <div key={c.id} style={{ ...S.viNote, color: "#ffb454" }}>▲ {c.text}</div>
+          ))}
+        </div>
+      )}
 
       <div style={S.pcStats}>
         <div>
@@ -3077,6 +3646,32 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
         </div>
       )}
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
+      {sv && (
+        <div style={S.stBox}>
+          <div style={S.stHead}>Strength (from RepReport)</div>
+          <div style={S.viNote}>{sv.line}</div>
+          {sv.message && (
+            <div style={{ ...S.viNote, color: sv.level === "suggest" ? "#ffb454" : sv.level === "headsUp" ? text : dim }}>{sv.message}</div>
+          )}
+          {sv.level === "suggest" && (
+            <>
+              <div style={S.viNote}>{sv.options}</div>
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                {sv.offer && (
+                  <button style={{ ...S.primaryBtn, flex: 2 }} disabled={strengthBusy}
+                    onClick={async () => { setStrengthBusy(true); await onSlowCut(sv.offer.deltaKcal, strength.changePct); setStrengthBusy(false); }}>
+                    Slow to 0.5%/week (+{sv.offer.deltaKcal} kcal/day)
+                  </button>
+                )}
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={strengthBusy}
+                  onClick={async () => { setStrengthBusy(true); await onKeepStrength(strength.changePct); setStrengthBusy(false); }}>
+                  Keep current
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
       {trainingActive === false && (
         <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>
       )}
@@ -3166,7 +3761,7 @@ function DateStrip({ selectedDate, setSelectedDate, dietPhases, onOpenMonth, onC
    EDIT PHASES mode turns a tap into "what phase is this day in / start a
    new one here".
    ============================================================ */
-function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, onClose }) {
+function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, onClose, trainingGoal = null, goalLive = null }) {
   const today = todayISO();
   const [cursor, setCursor] = useState(() => selectedDate.slice(0, 8) + "01");
   const [editMode, setEditMode] = useState(false);
@@ -3245,6 +3840,8 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
               dietPhases={dietPhases}
               presets={presets}
               onEdit={onEdit}
+              trainingGoal={trainingGoal}
+              goalLive={goalLive}
             />
           )}
         </div>
@@ -3257,7 +3854,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
 // (change its type, start, planned length, or delete it), or start a new
 // phase on that day. A phase runs until its planned end, or until the next
 // phase starts — whichever the calendar shows first.
-function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
+function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null, goalLive = null }) {
   const covering = phaseOnDate(dietPhases, day);
   const [mode, setMode] = useState(covering ? "view" : "new");
   const blank = { presetId: "", start: day, weeks: "", openEnded: false, rate: "" }; // rate "" = default
@@ -3321,6 +3918,10 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
   };
 
   const rateCheck = preset ? checkPhaseRate(preset.phase_type, preset.name, rateWeekly()) : { level: "ok", message: "" };
+  const planItems = phasePlanItems(trainingGoal, dietPhases, {
+    preset, start: form.start, plannedEnd, targetRatePct: preset?.phase_type === "maintenance" ? 0 : rateWeekly(),
+    withMaintenance: !!(autoMaint && !blockedBy), drop: [editingId, mode === "edit" ? ownMaint?.id : null], live: goalLive,
+  });
 
   const save = async () => {
     if (!preset) return window.alert("pick a phase first");
@@ -3438,6 +4039,9 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit }) {
             : ` · then ~${autoMaint} wk maintenance is added after it`
           : ""}
       </div>
+      {planItems.map((it) => (
+        <div key={`${it.id}-${it.start}`} style={{ fontSize: 12, color: "#ffb454", marginBottom: 8 }}>▲ {it.text}</div>
+      ))}
       {preset && transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : []) && (
         <div style={{ fontSize: 12, color: PHASE_COLORS[preset.phase_type], marginBottom: 10 }}>
           {transitionNote(dietPhases, form.start, preset.phase_type, weeksValue, editingId ? [editingId] : [])}
@@ -3533,6 +4137,9 @@ function Slot({
   onRemoveSlot,
   onCopyNext,
   canCopyNext,
+  onCopyPrev,
+  canCopyPrev,
+  copyPrevLabel,
   onAdd,
   onScan,
   onQty,
@@ -3610,6 +4217,16 @@ function Slot({
                   }}
                 >
                   ⧉ copy to next day
+                </button>
+                <button
+                  style={{ ...S.slotMenuItem, opacity: canCopyPrev ? 1 : 0.4 }}
+                  disabled={!canCopyPrev}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onCopyPrev();
+                  }}
+                >
+                  ⧉ copy from {copyPrevLabel}
                 </button>
                 <button
                   style={{ ...S.slotMenuItem, color: "#ff5d7a" }}
@@ -5106,7 +5723,9 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, ses
         const d = JSON.parse(reader.result);
         if (d.foods) setFoods(d.foods);
         if (d.phases) setPhases(d.phases);
-        if (d.week) setWeek(d.week);
+        // a backup's plans; an old backup's single template becomes this week's plan
+        if (isPlanStore(d.week)) setWeek(loadPlanStore(d.week, todayISO()));
+        else if (d.week && typeof d.week === "object" && DAYS.some((k) => d.week[k])) setWeek((st) => withPlan(st, mondayOf(todayISO()), cleanWeek(d.week), todayISO()));
         setMsg("Imported ✓");
       } catch {
         setMsg("Import failed — invalid file");
@@ -5370,6 +5989,8 @@ const S = {
     background: "#fff", boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
   },
   viNote: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
+  stBox: { marginTop: 16, paddingTop: 12, borderTop: `1px solid ${line}` },
+  stHead: { fontSize: 13, fontWeight: 600 },
   pcNeed: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 10 },
   // weekly check-in + day status
   ciCard: { background: panel, border: `1px solid ${accent}`, borderRadius: 12, padding: 14, marginBottom: 14 },
