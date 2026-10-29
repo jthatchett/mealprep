@@ -4312,8 +4312,13 @@ function NumInput({ value, onChange, onFocus, onBlur, ...rest }) {
       inputMode="decimal"
       {...rest}
       value={text ?? value ?? ""}
+      placeholder={rest.placeholder ?? (Number(value) === 0 ? "0" : undefined)}
       onFocus={(e) => {
-        const start = String(value ?? "");
+        // a 0 is cleared on focus (shown as a grey placeholder), so typing
+        // "5" gives 5, not "05": iOS Safari ignores select() on number
+        // inputs, which is what replaced it elsewhere. Leaving it empty
+        // reads as 0 again.
+        const start = Number(value) === 0 && value !== "" && value != null ? "" : String(value ?? "");
         setText(start);
         justFocused.current = start;
         const el = e.target;
@@ -5106,7 +5111,7 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
                 ].map(([lab, k]) => (
                   <div key={k}>
                     <span style={S.macroMini}>{lab}</span>
-                    <input
+                    <NumInput
                       type="number"
                       step="0.1"
                       value={draft.macros[k]}
