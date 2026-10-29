@@ -110,6 +110,8 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 - **Needs:** at least 10 complete logged days, 8 weigh-in days, and 2 weeks of weight data.
 - **Raw estimate:** average calories on counted days, minus the energy of the weight change (about 3,500 kcal per lb, a standard approximation).
 - **Each check-in moves 30% of the way toward the new raw estimate, and never more than ±150 kcal.** One odd week can't swing your targets.
+- **Faster when the data agrees:** when last week's check-in and this week's both put your maintenance on the same side of the estimate, the move is 50%, at most ±250 kcal. *Example:* data at 2,130 then 2,200 against a 2,650 start: 2,650 → 2,500 (30%) → 2,350 (50%), where 30% both weeks would give 2,410. A one-off spike never gets the faster step. *(Owner's choice, Oct 2026)*
+- **Your Adjust sticks:** choosing Adjust makes the calories you picked the new estimate (less what the phase's target pace adds), so the next check-in starts from your number instead of pulling you back. *Example:* at maintenance with the estimate at 2,500, you Adjust to 2,150; with next week's data at 2,300, it suggests 2,195, not ~2,390. *(Owner's choice, Oct 2026)*
 - **Starting point:** your Maintenance target's calories, if you've set them yourself rather than keeping the example.
 
 *(App's choice for the window, minimums, 30% and ±150)*

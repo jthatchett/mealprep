@@ -1007,6 +1007,11 @@ const EST_MIN_INCLUDED = 10;          // complete days needed in the window
 const EST_MIN_WEIGHINS = 8;           // weigh-in days needed in the window
 const EST_STEP = 0.3;                 // each check-in moves 30% toward the new data…
 const EST_MAX_STEP = 150;             // …and never more than ±150 kcal
+// When two check-ins in a row point the same way (each week's data on the
+// same side of the estimate), the move speeds up: 50%, at most ±250 kcal.
+// A one-off spike still only gets the normal step. (Owner's choice, Oct 2026)
+const EST_STEP_AGREE = 0.5;
+const EST_MAX_STEP_AGREE = 250;
 const CHECKIN_MAX_CHANGE = 250;       // a check-in moves daily calories at most ±250
 const TREND_ALPHA = 0.1;              // smoothing for the trend-weight line
 const lbToKg = (lb) => lb / 2.2046;
@@ -1083,11 +1088,21 @@ function rawMaintenance({ log, intakeByDate, statusByDate, today }) {
 
 // This check-in's estimate: move part of the way from the last one (or the
 // starting guess) toward the new data, capped per week.
-function nextEstimate(prior, raw) {
+// agrees: last week's check-in also had data, on the same side of its estimate.
+function nextEstimate(prior, raw, agrees = false) {
   if (raw == null) return prior;
-  const step = Math.max(-EST_MAX_STEP, Math.min(EST_MAX_STEP, EST_STEP * (raw - prior)));
+  const [k, cap] = agrees ? [EST_STEP_AGREE, EST_MAX_STEP_AGREE] : [EST_STEP, EST_MAX_STEP];
+  const step = Math.max(-cap, Math.min(cap, k * (raw - prior)));
   return prior + step;
 }
+// Last week's data and this week's both say the estimate is off the same way.
+function estimateAgrees(last, prior, raw) {
+  if (!last || last.estimate_raw == null || raw == null || prior == null) return false;
+  const was = Number(last.estimate_raw) - Number(last.estimate), now = raw - prior;
+  return Math.abs(was) >= 1 && Math.abs(now) >= 1 && Math.sign(was) === Math.sign(now);
+}
+// Calories above (or below) maintenance that a phase's target pace needs.
+const paceKcal = (ratePctPerWeek, weightLb) => (weightLb ? ((ratePctPerWeek / 100) * weightLb * KCAL_PER_LB) / 7 : 0);
 
 // Macro split for a calorie target (research basis in the plan):
 //  protein: never cut; raised to the phase floor if below it
@@ -1106,7 +1121,7 @@ function splitMacros({ cal, current, phaseType, weightLb }) {
 // target rate, capped at ±250 from current; warns if it implies losing
 // faster than 1% of bodyweight a week (top of Helms 2014's range).
 function suggestTargets({ estimate, ratePctPerWeek, weightLb, current, phaseType }) {
-  const ideal = estimate + (weightLb ? ((ratePctPerWeek / 100) * weightLb * KCAL_PER_LB) / 7 : 0);
+  const ideal = estimate + paceKcal(ratePctPerWeek, weightLb);
   const cal = Math.max(current.cal - CHECKIN_MAX_CHANGE, Math.min(current.cal + CHECKIN_MAX_CHANGE, ideal));
   const impliedPct = weightLb ? (((cal - estimate) * 7) / KCAL_PER_LB / weightLb) * 100 : 0;
   return {
@@ -2431,7 +2446,8 @@ export default function App() {
     const prior = last ? Number(last.estimate) : startingGuess;
     const raw = rawMaintenance({ log: bwLog, intakeByDate, statusByDate, today });
     // no starting guess (example targets): the first real estimate stands as is
-    const estimate = prior != null ? nextEstimate(prior, raw.raw) : raw.raw;
+    const agrees = estimateAgrees(last, prior, raw.raw);
+    const estimate = prior != null ? nextEstimate(prior, raw.raw, agrees) : raw.raw;
     const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
     const weightLb = raw.trendWeight ?? latest;
     const wk = weightTrend(bwLog, today);
@@ -2445,7 +2461,7 @@ export default function App() {
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
     return {
-      today, weekStart, intakeByDate, statusByDate, raw, estimate, prior, startingGuess, weightLb, ratePct,
+      today, weekStart, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct,
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
       // nothing to check in on until there's an estimate (example targets, no data yet)
       due: !!dietPhase && !!followed && !thisWeek && estimate != null,
@@ -2466,9 +2482,15 @@ export default function App() {
     const c = coaching;
     if (!c || !c.followed) return false;
     const before = { ...c.followed.target };
+    // Adjust: the calories you chose become the estimate (less what the
+    // phase's pace adds), so next week starts from your number instead of
+    // pulling you back toward the old one. (Owner's choice, Oct 2026)
+    const estimate = action === "adjust" && chosen?.cal != null
+      ? chosen.cal - paceKcal(c.ratePct, c.weightLb)
+      : c.estimate;
     try {
       await sbInsertCheckin(session, {
-        week_start: c.weekStart, estimate: Math.round(c.estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw),
+        week_start: c.weekStart, estimate: Math.round(estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw),
         included_days: c.raw.includedDays, weigh_in_days: c.raw.weighInDays,
         actual_rate_pct: c.actualPct == null ? null : roundRate(c.actualPct), target_rate_pct: roundRate(c.ratePct),
         preset_id: c.followed.id, before,
@@ -2484,7 +2506,7 @@ export default function App() {
       setPhases((prev) => prev.map((p) => (p.id === c.followed.id ? { ...p, target: { p: chosen.p, f: chosen.f, c: chosen.c, cal: chosen.cal } } : p)));
     }
     setCheckins((prev) => [...prev, {
-      week_start: c.weekStart, estimate: Math.round(c.estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw), action, chosen,
+      week_start: c.weekStart, estimate: Math.round(estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw), action, chosen,
     }]);
     return true;
   };
@@ -3249,7 +3271,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
                 needDays ? `${needDays} more fully logged day${needDays === 1 ? "" : "s"}` : null,
                 needWeigh ? `${needWeigh} more weigh-in${needWeigh === 1 ? "" : "s"}` : null,
               ].filter(Boolean).join(" and ") || "a few more days of data"}.`
-            : `Your data says ${Math.round(c.raw.raw).toLocaleString()}; it moves part way each week (${signed(c.estimate - c.prior)}).`}
+            : `Your data says ${Math.round(c.raw.raw).toLocaleString()}; it moves part way each week (${signed(c.estimate - c.prior)}${c.agrees ? ", faster since last week's data agreed" : ""}).`}
         </div>
       </div>
       <div style={S.ciLine}>
@@ -3279,6 +3301,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
             {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
             {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
+            {adjusting && <div>• Your calories become the new maintenance estimate{c.ratePct ? " (less what the phase's pace adds)" : ""}, so next week starts from them instead of pulling you back.</div>}
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             {!adjusting ? (
