@@ -310,7 +310,7 @@ function checkPhaseRate(phaseType, name, weeklyPct) {
   if (phaseType === "surplus") {
     const monthly = weeklyPct * WEEKS_PER_MONTH;
     if (monthly > 4 + EPS) return { level: "block", message: "a bulk can be at most 4 %/month" };
-    if (monthly > 2 + EPS) return { level: "warn", message: "faster than the ~1–2 %/month research suggests for lean gains. You can still save it." };
+    if (monthly > 2 + EPS) return { level: "warn", message: "faster than the ~1–2 %/month research suggests for lean gains (Iraki et al. 2019); faster tends to add more fat. You can still save it." };
   }
   return { level: "ok", message: "" };
 }
@@ -1168,7 +1168,7 @@ function targetsFromMaintenance(preset, maintenance, weightLb) {
 
 async function sbLoadIntakeRange(session, from, to) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/intake_log?select=date,qty,cal&user_id=eq.${session.user.id}&date=gte.${from}&date=lte.${to}`,
+    `${SUPABASE_URL}/rest/v1/intake_log?select=date,qty,cal,p&user_id=eq.${session.user.id}&date=gte.${from}&date=lte.${to}`,
     { headers: sbHeaders(session) }
   );
   if (!res.ok) throw new Error("Failed to load food log: " + res.status);
@@ -1208,7 +1208,11 @@ function validStrength(st) {
   if (!st || typeof st !== "object" || typeof st.level !== "string" || typeof st.cutStart !== "string") return null;
   const num = (n) => (typeof n === "number" && Number.isFinite(n) ? n : null);
   const lift = (x) => (x && typeof x === "object" && num(x.weight) != null && num(x.reps) != null && num(x.rir) != null ? x : null);
-  const ex = st.example && typeof st.example === "object" && lift(st.example.before) && lift(st.example.after) ? st.example : null;
+  const lifts = (a) => (Array.isArray(a) && a.length && a.every(lift) ? a : null);
+  // beforeSets/afterSets: both sets RepReport scored (older RepReport sends only before/after)
+  const ex = st.example && typeof st.example === "object" && lift(st.example.before) && lift(st.example.after)
+    ? { ...st.example, beforeSets: lifts(st.example.beforeSets), afterSets: lifts(st.example.afterSets) }
+    : null;
   const changePct = num(st.changePct);
   const musclesScored = num(st.musclesScored) ?? 0;
   // a warning needs a change and at least 3 muscles behind it, as RepReport requires
@@ -1258,6 +1262,50 @@ async function sbLoadTrainingStatus(session) {
   const cur = Array.isArray(old?.cur) && old.cur.length ? old.cur.length : null;
   const arch = Array.isArray(old?.arch) && old.arch.length ? old.arch.length : null;
   return { active: cur != null, daysPerWeek: capDays(cur), lastDaysPerWeek: capDays(cur ?? arch), deload: false, strength: null, goal: null };
+}
+
+// A day's logged protein (g), or null when any food's protein is unknown
+// (a calories-only quick add).
+const dayProtein = (rows) => (rows.some((r) => r.p == null) ? null : rows.reduce((n, r) => n + Number(r.qty) * Number(r.p), 0));
+
+// The protein summary RepReport reads (see the Root's proteinStatus):
+// the 7 days ending yesterday, days that count toward the estimate and
+// have a protein total. Target: each day's preset (the weekday's override,
+// else the diet phase's), as it was that day.
+function buildProteinStatus({ today, intakeByDate, statusByDate, proteinByDate, presets, targetHistory, dietPhases, planStore }) {
+  const asOf = addDaysISO(today, -1);
+  const targetOn = (d) => {
+    const dated = presetsAsOf(presets, targetHistory, d);
+    const ph = phaseOnDate(dietPhases, d);
+    const day = planStore ? planFor(planStore, mondayOf(d))?.[weekdayKey(d)] : null;
+    const preset = (day?.targetId && dated.find((p) => p.id === day.targetId)) || (ph && dated.find((p) => p.id === ph.phase_id)) || null;
+    return preset ? Number(preset.target.p) || null : null;
+  };
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = addDaysISO(asOf, -i);
+    if (!(intakeByDate[d] > 0) || statusByDate[d] === false || proteinByDate[d] == null) continue;
+    days.push({ g: proteinByDate[d], target: targetOn(d) });
+  }
+  const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const targets = days.map((x) => x.target).filter((t) => t != null);
+  return {
+    version: 1, asOf, daysLogged: days.length,
+    proteinAvg: days.length ? Math.round(avg(days.map((x) => x.g))) : null,
+    proteinTarget: targets.length ? Math.round(avg(targets)) : null,
+  };
+}
+
+// Write the summary RepReport reads (app_data.status): only that column,
+// so it never touches updated_at or the plan/foods save-conflict check.
+// No row yet (a new account before its first save) → nothing is written.
+async function sbSaveStatus(session, status) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?user_id=eq.${session.user.id}`, {
+    method: "PATCH",
+    headers: sbHeaders(session, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+    body: JSON.stringify({ status }),
+  });
+  if (!res.ok) throw new Error("Failed to save status for RepReport: " + res.status);
 }
 
 async function sbLoadCheckins(session) {
@@ -2380,6 +2428,7 @@ export default function App() {
      past check-ins — loaded once signed in; the estimate and suggestion are
      computed from them on every render, so they always match the log. */
   const [rangeIntake, setRangeIntake] = useState({}); // { iso: kcal } from the server
+  const [rangeProtein, setRangeProtein] = useState(null); // { iso: grams | null (a food's protein unknown) }; null until loaded
   const [dayStatus, setDayStatus] = useState({});     // { iso: included } — explicit choices only
   const [checkins, setCheckins] = useState([]);
   const [coachError, setCoachError] = useState(null);
@@ -2396,8 +2445,14 @@ export default function App() {
         ]);
         if (cancelled) return;
         const byDate = {};
-        for (const r of rows) byDate[r.date] = (byDate[r.date] || 0) + Number(r.qty) * Number(r.cal);
+        const protein = {};
+        for (const r of rows) {
+          byDate[r.date] = (byDate[r.date] || 0) + Number(r.qty) * Number(r.cal);
+          const g = r.p == null ? null : Number(r.qty) * Number(r.p);
+          protein[r.date] = (r.date in protein && protein[r.date] === null) || g === null ? null : (protein[r.date] || 0) + g;
+        }
         setRangeIntake(byDate);
+        setRangeProtein(protein);
         setDayStatus(Object.fromEntries(status.map((s) => [s.date, s.included])));
         setCheckins(cks);
         setCoachError(null);
@@ -2452,6 +2507,31 @@ export default function App() {
       card: shown ? { kcal: Number(shown.estimate), estimated: shown.estimate_raw != null || sorted.some((c) => c.estimate_raw != null) } : startingGuess ? { kcal: startingGuess, estimated: false } : null,
     };
   }, [store, rangeIntake, intake, dayStatus, checkins, bwLog, dietPhase]);
+
+  /* ---------- protein summary for RepReport ----------
+     The 7 days ending yesterday (today is still being logged): the average
+     protein over the days that count toward the estimate, and the average of
+     those days' protein targets (the diet phase's preset as it was that day,
+     or the weekday's override). A day with a calories-only quick add has no
+     protein total, so it's left out. RepReport shows it, and adds it to its
+     lifts-down note when under 80% of target; it never changes training. */
+  const proteinStatus = useMemo(() => {
+    if (!coaching || !store || rangeProtein == null) return null;
+    const proteinByDate = { ...rangeProtein };
+    for (const [d, rows] of Object.entries(intake)) proteinByDate[d] = dayProtein(rows);
+    return buildProteinStatus({
+      today: coaching.today, intakeByDate: coaching.intakeByDate, statusByDate: coaching.statusByDate, proteinByDate,
+      presets: store.phases || [], targetHistory, dietPhases, planStore: store.week,
+    });
+  }, [coaching, store, rangeProtein, intake, targetHistory, dietPhases]);
+  const savedStatusRef = useRef(null);
+  useEffect(() => {
+    if (!session || !proteinStatus) return;
+    const json = JSON.stringify(proteinStatus);
+    if (json === savedStatusRef.current) return;
+    savedStatusRef.current = json;
+    sbSaveStatus(session, proteinStatus).catch((e) => { savedStatusRef.current = null; dbg("status save FAILED: " + e.message); });
+  }, [session, proteinStatus]);
 
   // tick / untick a day for the estimate (also used by the Plan day row)
   const setDayIncluded = async (date, included) => {
@@ -3330,9 +3410,20 @@ const STRENGTH_SLOW_TO_PCT = -0.5;
 
 const shortDate = (iso) => parseISO(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 function formatLift(s, units) {
+  return `${liftLoad(s, units)}×${s.reps} (${s.rir} left)`;
+}
+function liftLoad(s, units) {
   const kg = (s.units || units) === "kg" ? " kg" : "";
-  const what = s.kind === "bodyweight" ? "bodyweight" : s.kind === "assisted" ? `${s.weight}${kg} assist` : `${s.weight}${kg}`;
-  return `${what}×${s.reps} (${s.rir} left)`;
+  return s.kind === "bodyweight" ? "bodyweight" : s.kind === "assisted" ? `${s.weight}${kg} assist` : `${s.weight}${kg}`;
+}
+// The sets RepReport scored: "225×7, 225×5 (2 left)" when the sets share a
+// weight and reps in reserve, else each set in full.
+function formatLifts(sets, units) {
+  if (sets.length === 1) return formatLift(sets[0], units);
+  const same = sets.every((x) => x.rir === sets[0].rir);
+  return same
+    ? `${sets.map((x) => `${liftLoad(x, units)}×${x.reps}`).join(", ")} (${sets[0].rir} left)`
+    : sets.map((x) => formatLift(x, units)).join(", ");
 }
 
 // What the phase card says about strength, or null when there's nothing to
@@ -3351,7 +3442,10 @@ function strengthView({ strength, phase, cutStart, choice, today, ratePct, weigh
   // an old reading is shown, but not acted on
   if (age != null && age > STRENGTH_STALE_DAYS) return { line, level: "none" };
   const ex = strength.example;
-  const lift = ex ? ` (${ex.name}: ${formatLift(ex.before, ex.units)} → ${formatLift(ex.after, ex.units)})` : "";
+  const lift = !ex ? ""
+    : ex.beforeSets && ex.afterSets
+      ? ` (${ex.name}: ${formatLifts(ex.beforeSets, ex.units)} → ${formatLifts(ex.afterSets, ex.units)})`
+      : ` (${ex.name}: ${formatLift(ex.before, ex.units)} → ${formatLift(ex.after, ex.units)})`;
   const across = `down about ${Math.abs(r)}% across ${strength.musclesDown} of ${strength.musclesScored} muscles since the cut began${lift}`;
   if (strength.level === "headsUp") {
     return { line, level: "headsUp", message: `Heads-up: your lifts are ${across}. Nothing to change yet. Worth watching.` };
@@ -3477,6 +3571,23 @@ function phasePlanItems(trainingGoal, dietPhases, { preset, start, plannedEnd, t
   catch (e) { console.error("Goal plan check failed:", e); return []; }
 }
 
+// A long cut's diet-break option (owner's choice, Oct 2026). Trials used
+// 2–3 weeks of dieting per break and found about the same fat loss with or
+// without breaks (MATADOR, Byrne et al. 2018; ICECAP, Peos et al.), so the
+// 12 weeks is a practical choice, not a researched one. Counted from this
+// cut's own start, so a cut right after a break starts over. Mini-cuts are
+// short by design and get no note.
+const DIET_BREAK_NOTE_WEEKS = 12;
+function dietBreakNote({ phase, today, deload, trainingGoal }) {
+  if (phase?.phase_type !== "deficit" || isMiniCut(phase.phase_type, phase.phase_name)) return null;
+  const weeks = Math.floor(daysBetween(phase.start_date, today) / 7);
+  if (weeks < DIET_BREAK_NOTE_WEEKS) return null;
+  const d = trainingGoal?.block?.deloadStart;
+  const when = deload ? " Your RepReport deload is this week."
+    : d && d > today ? ` Your next RepReport deload starts ${shortDate(d)}.` : "";
+  return `This cut has run ${weeks} weeks. A 1–2 week break at maintenance is an option; studies find about the same fat loss either way.${when}`;
+}
+
 function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
@@ -3581,6 +3692,10 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
           ))}
         </div>
       )}
+      {(() => {
+        const breakNote = dietBreakNote({ phase, today, deload, trainingGoal });
+        return breakNote && <div style={{ ...S.viNote, color: dim }}>{breakNote}</div>;
+      })()}
 
       <div style={S.pcStats}>
         <div>
@@ -3797,6 +3912,10 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
               const future = iso > today;
               const overrun = ph && ph.planned_end_date && iso > ph.planned_end_date;
               const on = iso === (editMode ? editDay : selectedDate);
+              // the running RepReport block (from its goal status), deload in the accent color
+              const blk = trainingGoal?.block;
+              const inBlock = !!blk && iso >= blk.start && iso <= blk.end;
+              const inDeload = inBlock && !!blk.deloadStart && iso >= blk.deloadStart;
               return (
                 <button
                   key={iso}
@@ -3812,6 +3931,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
                   }}
                 >
                   {parseISO(iso).getDate()}
+                  {inBlock && <span style={{ display: "block", height: 2, width: "60%", margin: "2px auto 0", background: inDeload ? accent : text, opacity: inDeload ? 1 : 0.45 }} />}
                 </button>
               );
             })}
@@ -3822,6 +3942,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
               <span key={k}><span style={{ color: PHASE_COLORS[k] }}>■</span> {lab}</span>
             ))}
             <span>lighter = planned · dashed = past planned end</span>
+            {trainingGoal?.block && <span><span style={{ color: text, opacity: 0.45 }}>▬</span> RepReport block · <span style={{ color: accent }}>▬</span> deload</span>}
           </div>
 
           <button
