@@ -6148,7 +6148,7 @@ const S = {
   monthGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 },
   monthCell: {
     aspectRatio: "1 / 1", borderRadius: 10, fontSize: 13, cursor: "pointer",
-    fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center",
+    fontFamily: "inherit", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
   },
   dayCopyBtn: {
     width: "100%",
