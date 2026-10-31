@@ -422,6 +422,9 @@ function phaseBlocks(rows) {
 // ceilings sit and what that's based on: the weigh-in trend, or an assumed
 // pace until 2 weeks of weigh-ins exist. RepReport's dashboard says the
 // same (dietImpactNote there); keep the two in step.
+// The week of a cut (week 1 = its first 7 days) from which a scale that
+// hasn't dropped gets the stalled-cut wording. Same as RepReport. (c)
+const STALLED_CUT_NOTE_WEEKS = 3;
 function volumeImpactNote(ctx, impactR, applied) {
   const level = impactR === 0
     ? "Volume ceilings are at your normal baseline"
@@ -457,9 +460,15 @@ function volumeImpactNote(ctx, impactR, applied) {
   const shown = `${r >= 0 ? "+" : "−"}${Math.abs(r).toFixed(1)}%/week`;
   if (losing ? r >= 0 : r <= 0) {
     // the trend contradicts the phase: anything left is an earlier phase fading
-    return impactR === 0
-      ? `${level}: your weight isn't ${losing ? "dropping" : "rising"} (${shown}), so the ${word} isn't affecting recovery yet.`
-      : `${level}. ${applied}`;
+    if (impactR !== 0) return `${level}. ${applied}`;
+    // From week 3 of a cut with no loss to show, "yet" no longer fits: say
+    // the cut isn't working and where to look (owner's call, Oct 2026).
+    // RepReport's dietImpactNote says the same, plus "in Meal Prep".
+    const weeks = Math.floor(daysBetween(ctx.blockStart, ctx.date) / 7);
+    if (losing && weeks >= STALLED_CUT_NOTE_WEEKS - 1) {
+      return `${level}: your weight hasn't dropped since this ${word} started ${weeks} weeks ago (now ${shown}), so RepReport plans as if you're at maintenance. If you're eating in a deficit, check your logging.`;
+    }
+    return `${level}: your weight isn't ${losing ? "dropping" : "rising"} (${shown}), so the ${word} isn't affecting recovery yet.`;
   }
   // a gap in weigh-ins: still your last real trend, with how old it is
   const stale = ctx.rateAge > 0;
