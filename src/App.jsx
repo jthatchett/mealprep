@@ -3305,6 +3305,9 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   const needWeigh = Math.max(0, EST_MIN_WEIGHINS - c.raw.weighInDays);
   const signed = (n, d = 0) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(d);
   const editCal = edit ? Math.round(4 * edit.p + 4 * edit.c + 9 * edit.f) : 0;
+  const [showDays, setShowDays] = useState(false);
+  const counted = logged.filter((d) => dayIncluded(d, c.intakeByDate, c.statusByDate)).length;
+  const gainWord = c.raw.lbPerWeek == null ? "" : c.raw.lbPerWeek > 0.05 ? "rose" : c.raw.lbPerWeek < -0.05 ? "fell" : "changed";
 
   const finish = async (action, chosen) => {
     setBusy(true);
@@ -3315,10 +3318,20 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   return (
     <div style={S.ciCard}>
       <div style={S.ciKicker}>WEEKLY CHECK-IN · {fmtDay(c.today).toUpperCase()}</div>
+      <div style={S.ciSub}>Once a week: compare what you ate with how your weight moved, and tune your calories to match.</div>
 
-      {logged.length > 0 && (
+      {/* 1 — which days count */}
+      <div style={S.ciStep}>1 · Check last week's log</div>
+      <div style={S.ciLine}>
+        {logged.length === 0 ? "Nothing logged last week." : <>
+          Counting <b>{counted} of {logged.length}</b> logged day{logged.length === 1 ? "" : "s"}
+          {empty > 0 && empty < 7 && <span style={{ color: dim }}> · {empty} empty, skipped</span>}
+          {" "}<button style={S.linkBtn} onClick={() => setShowDays(!showDays)}>{showDays ? "done" : "review"}</button>
+        </>}
+      </div>
+      {showDays && logged.length > 0 && (
         <>
-          <div style={S.ciStep}>Which days last week were fully logged?</div>
+          <div style={S.ciSub}>Untick any day you didn't log completely; a half-logged day makes it look like you ate less than you did.</div>
           {logged.map((d) => (
             <label key={d} style={S.ciDay}>
               <input type="checkbox" checked={dayIncluded(d, c.intakeByDate, c.statusByDate)} onChange={(e) => onToggleDay(d, e.target.checked)} />
@@ -3328,28 +3341,57 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
           ))}
         </>
       )}
-      {empty > 0 && <div style={{ ...S.ciSub, marginTop: logged.length ? 4 : 0 }}>{empty === 7 ? "Nothing logged last week" : `${empty} day${empty === 1 ? "" : "s"} with nothing logged (skipped)`}</div>}
 
-      <div style={S.ciStep}>This week</div>
-      <div style={S.ciLine}>
-        Maintenance ≈ <b>{Math.round(c.estimate).toLocaleString()} kcal</b>
-        <div style={S.ciSub}>
-          {c.raw.raw == null
-            ? `${c.last ? "Unchanged from last week" : "Starting guess"}. Needs ${[
-                needDays ? `${needDays} more fully logged day${needDays === 1 ? "" : "s"}` : null,
-                needWeigh ? `${needWeigh} more weigh-in${needWeigh === 1 ? "" : "s"}` : null,
-              ].filter(Boolean).join(" and ") || "a few more days of data"}.`
-            : `Your data says ${Math.round(c.raw.raw).toLocaleString()}; it moves part way each week (${signed(c.estimate - c.prior)}).`}
+      {/* 2 — what the data says */}
+      <div style={S.ciStep}>2 · What your data says</div>
+      {c.raw.raw == null ? (
+        <div style={S.ciLine}>
+          Not enough data yet. Needs {[
+            needDays ? `${needDays} more fully logged day${needDays === 1 ? "" : "s"}` : null,
+            needWeigh ? `${needWeigh} more weigh-in${needWeigh === 1 ? "" : "s"}` : null,
+          ].filter(Boolean).join(" and ") || "a few more days of data"} in the last 3 weeks.
+          <div style={S.ciSub}>Maintenance estimate stays at <b>{Math.round(c.estimate).toLocaleString()} kcal</b> ({c.last ? "last week's" : "your starting guess"}).</div>
         </div>
-      </div>
-      <div style={S.ciLine}>
-        Weight trend: {c.actualPct == null ? <span style={{ color: dim }}>not ready yet</span> : <b>{signed(c.actualPct, 2)}%/wk</b>}
-        <span style={{ color: dim }}> · target {c.followed && c.ratePct === 0 ? "hold weight" : `${signed(c.ratePct, 2)}%/wk`}</span>
-      </div>
+      ) : (
+        <>
+          <div style={S.ciLine}>
+            Last 3 weeks: you ate <b>{Math.round(c.raw.avgIntake).toLocaleString()} kcal/day</b> ({c.raw.includedDays} days) and your weight {gainWord} <b>{Math.abs(c.raw.lbPerWeek).toFixed(1)} lb/wk</b>.
+          </div>
+          <div style={S.ciLine}>
+            → Weight-neutral would be about <b>{Math.round(c.raw.raw).toLocaleString()} kcal</b>.
+            <div style={S.ciSub}>
+              {Math.abs(c.raw.lbPerWeek) >= 0.05
+                ? `${c.raw.lbPerWeek > 0 ? "Gaining" : "Losing"} ${Math.abs(c.raw.lbPerWeek).toFixed(1)} lb/wk ≈ ${Math.round(Math.abs(c.raw.lbPerWeek) * KCAL_PER_LB / 7)} kcal/day ${c.raw.lbPerWeek > 0 ? "over" : "under"} what you burn.`
+                : "Your weight barely moved, so that's about what you ate."}
+            </div>
+          </div>
+          {c.actualPct != null && (
+            <div style={S.ciSub}>
+              Last 2 weeks alone: {signed(c.actualPct, 2)}%/wk (target {c.ratePct === 0 ? "hold ±0.25%" : `${signed(c.ratePct, 2)}%/wk`}). The 3-week number is steadier, but one water-weight jump can still lean on it.
+            </div>
+          )}
+          <div style={{ ...S.ciLine, marginTop: 8 }}>
+            Maintenance estimate:{" "}
+            {c.prior != null
+              ? <><span style={{ color: dim }}>{Math.round(c.prior).toLocaleString()} →</span> <b>{Math.round(c.estimate).toLocaleString()} kcal</b> <span style={{ color: dim }}>({signed(c.estimate - c.prior)})</span></>
+              : <b>{Math.round(c.estimate).toLocaleString()} kcal</b>}
+            {c.prior != null && (
+              <div style={S.ciSub}>
+                It moves {Math.round(EST_STEP * 100)}% of the way toward {Math.round(c.raw.raw).toLocaleString()} each week (at most ±{EST_MAX_STEP}), so one odd stretch can't swing it.
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {s && (
         <>
-          <div style={S.ciStep}>Suggested daily targets ({c.followed.name})</div>
+          <div style={S.ciStep}>3 · Suggested targets ({c.followed.name})</div>
+          <div style={S.ciLine}>
+            {s.cal === Math.round(cur.cal)
+              ? <>Keep eating <b>{s.cal.toLocaleString()} kcal/day</b>.</>
+              : <>Eat <b>{s.cal.toLocaleString()} kcal/day</b> <span style={{ color: dim }}>({signed(s.cal - Math.round(cur.cal))} from now)</span>{c.ratePct === 0 ? ", your maintenance estimate" : ` to aim for ${signed(c.ratePct, 2)}%/wk`}.</>}
+          </div>
           <div style={S.ciTable}>
             {[["Calories", "cal"], ["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].map(([lab, k]) => (
               <div key={k} style={S.ciCell}>
@@ -3373,9 +3415,9 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             {!adjusting ? (
               <>
-                <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={() => finish("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal })}>Apply</button>
-                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => { setEdit({ p: s.p, f: s.f, c: s.c }); setAdjusting(true); }}>Adjust</button>
-                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => finish("keep", null)}>Keep current</button>
+                <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={() => finish("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal })}>Use {s.cal.toLocaleString()}</button>
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => { setEdit({ p: s.p, f: s.f, c: s.c }); setAdjusting(true); }}>Edit</button>
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => finish("keep", null)}>Keep {Math.round(cur.cal).toLocaleString()}</button>
               </>
             ) : (
               <>

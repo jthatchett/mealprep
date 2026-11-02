@@ -126,6 +126,8 @@ Shown on Monday, or later that week if you missed it, until you complete it:
 2. **See** the maintenance estimate, your actual rate against the phase target, and suggested targets.
 3. **Choose** Apply, Adjust (edit first) or Keep current. Every decision is saved.
 
+The card spells out the math in order: what you ate and how your weight moved over the 3-week window, the weight-neutral calories that implies, and how far the estimate moved toward it. It also shows the last-2-weeks weight trend against the phase target, since that's the number on the phase card and it can differ from the 3-week slope (a single water-weight jump leans on the longer window). *(Owner's request, Nov 2026)*
+
 **Suggested targets:**
 - **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in.
 - **A warning appears** if the result implies losing more than 1% of bodyweight a week.
