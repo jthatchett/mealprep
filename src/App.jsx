@@ -1018,6 +1018,11 @@ const EST_MIN_WEIGHINS = 8;           // weigh-in days needed in the window
 const EST_STEP = 0.3;                 // each check-in moves 30% toward the new data…
 const EST_MAX_STEP = 150;             // …and never more than ±150 kcal
 const CHECKIN_MAX_CHANGE = 250;       // a check-in moves daily calories at most ±250
+// The first check-in with enough data, when the estimate so far is only a
+// starting guess (calculator or typed in, ~±10%): the guess deserves little
+// weight, so it moves further. Later check-ins use the steps above.
+const EST_FIRST_STEP = 0.6;
+const EST_FIRST_MAX_STEP = 300;       // also the calorie limit that week, so the move isn't capped again
 const TREND_ALPHA = 0.1;              // smoothing for the trend-weight line
 const lbToKg = (lb) => lb / 2.2046;
 
@@ -1093,9 +1098,10 @@ function rawMaintenance({ log, intakeByDate, statusByDate, today }) {
 
 // This check-in's estimate: move part of the way from the last one (or the
 // starting guess) toward the new data, capped per week.
-function nextEstimate(prior, raw) {
+function nextEstimate(prior, raw, first = false) {
   if (raw == null) return prior;
-  const step = Math.max(-EST_MAX_STEP, Math.min(EST_MAX_STEP, EST_STEP * (raw - prior)));
+  const max = first ? EST_FIRST_MAX_STEP : EST_MAX_STEP;
+  const step = Math.max(-max, Math.min(max, (first ? EST_FIRST_STEP : EST_STEP) * (raw - prior)));
   return prior + step;
 }
 
@@ -1115,13 +1121,14 @@ function splitMacros({ cal, current, phaseType, weightLb }) {
 // Suggested daily targets: estimate + the calories that produce the phase's
 // target rate, capped at ±250 from current; warns if it implies losing
 // faster than 1% of bodyweight a week (top of Helms 2014's range).
-function suggestTargets({ estimate, ratePctPerWeek, weightLb, current, phaseType }) {
+function suggestTargets({ estimate, ratePctPerWeek, weightLb, current, phaseType, maxChange = CHECKIN_MAX_CHANGE }) {
   const ideal = estimate + (weightLb ? ((ratePctPerWeek / 100) * weightLb * KCAL_PER_LB) / 7 : 0);
-  const cal = Math.max(current.cal - CHECKIN_MAX_CHANGE, Math.min(current.cal + CHECKIN_MAX_CHANGE, ideal));
+  const cal = Math.max(current.cal - maxChange, Math.min(current.cal + maxChange, ideal));
   const impliedPct = weightLb ? (((cal - estimate) * 7) / KCAL_PER_LB / weightLb) * 100 : 0;
   return {
     ...splitMacros({ cal, current, phaseType, weightLb }),
     ideal: Math.round(ideal),
+    maxChange,
     capped: Math.abs(cal - ideal) > 1,
     tooFast: impliedPct < -1,
     impliedPct,
@@ -2496,7 +2503,9 @@ export default function App() {
     const prior = last ? Number(last.estimate) : startingGuess;
     const raw = rawMaintenance({ log: bwLog, intakeByDate, statusByDate, today });
     // no starting guess (example targets): the first real estimate stands as is
-    const estimate = prior != null ? nextEstimate(prior, raw.raw) : raw.raw;
+    // first data-based estimate replacing a starting guess: a bigger step (EST_FIRST_STEP)
+    const firstData = prior != null && raw.raw != null && !sorted.some((c) => c.week_start < weekStart && c.estimate_raw != null);
+    const estimate = prior != null ? nextEstimate(prior, raw.raw, firstData) : raw.raw;
     const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
     const weightLb = raw.trendWeight ?? latest;
     const wk = weightTrend(bwLog, today);
@@ -2505,12 +2514,12 @@ export default function App() {
     // weigh-ins (this week's, or an earlier check-in's), never on a guess
     const grounded = raw.raw != null || sorted.some((c) => c.estimate_raw != null);
     const suggestion = followed && estimate != null && grounded
-      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type })
+      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: firstData ? EST_FIRST_MAX_STEP : CHECKIN_MAX_CHANGE })
       : null;
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
     return {
-      today, weekStart, intakeByDate, statusByDate, raw, estimate, prior, startingGuess, weightLb, ratePct,
+      today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, startingGuess, weightLb, ratePct,
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
       // nothing to check in on until there's an estimate (example targets, no data yet)
       due: !!dietPhase && !!followed && !thisWeek && estimate != null,
@@ -3356,7 +3365,9 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
           {c.prior != null
             ? <><span style={{ color: dim }}>{Math.round(c.prior).toLocaleString()} →</span> <b>{Math.round(c.estimate).toLocaleString()} kcal</b> <span style={{ color: dim }}>({signed(c.estimate - c.prior)})</span></>
             : <b>{Math.round(c.estimate).toLocaleString()} kcal</b>}
-          <div style={S.ciSub}>From what you ate and how your weight moved over the last 3 weeks. It moves a little each week, so one odd stretch (like a water-weight jump) can't swing it.</div>
+          <div style={S.ciSub}>From what you ate and how your weight moved over the last 3 weeks. {c.firstData
+            ? "Your first estimate from your own data, so it moves further than usual this week; after this it moves a little each week."
+            : "It moves a little each week, so one odd stretch (like a water-weight jump) can't swing it."}</div>
         </div>
       )}
 
@@ -3380,7 +3391,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             ))}
           </div>
           <div style={S.ciNotes}>
-            {s.capped && <div>• Capped at ±{CHECKIN_MAX_CHANGE} kcal this week (the data points to {s.ideal.toLocaleString()}).</div>}
+            {s.capped && <div>• Capped at ±{s.maxChange} kcal this week (the data points to {s.ideal.toLocaleString()}).</div>}
             {s.proteinRaised && <div>• Protein raised to the {c.followed.phase_type === "deficit" ? "cut minimum (~2 g/kg bodyweight)" : "minimum (~1.6 g/kg)"}.</div>}
             {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
             {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
