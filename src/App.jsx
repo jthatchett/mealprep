@@ -3307,6 +3307,11 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   const editCal = edit ? Math.round(4 * edit.p + 4 * edit.c + 9 * edit.f) : 0;
   const [showDays, setShowDays] = useState(false);
   const counted = logged.filter((d) => dayIncluded(d, c.intakeByDate, c.statusByDate)).length;
+  // where the estimate goes if later readings match this one (shown only when it's still far off)
+  const path = [];
+  if (c.raw.raw != null && c.prior != null) {
+    for (let e = c.estimate, i = 0; i < 2 && Math.abs(c.raw.raw - e) > 50; i++) { e = nextEstimate(e, c.raw.raw); path.push(Math.round(e)); }
+  }
   const gainWord = c.raw.lbPerWeek == null ? "" : c.raw.lbPerWeek > 0.05 ? "rose" : c.raw.lbPerWeek < -0.05 ? "fell" : "changed";
 
   const finish = async (action, chosen) => {
@@ -3358,7 +3363,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             Last 3 weeks: you ate <b>{Math.round(c.raw.avgIntake).toLocaleString()} kcal/day</b> ({c.raw.includedDays} days) and your weight {gainWord} <b>{Math.abs(c.raw.lbPerWeek).toFixed(1)} lb/wk</b>.
           </div>
           <div style={S.ciLine}>
-            → Weight-neutral would be about <b>{Math.round(c.raw.raw).toLocaleString()} kcal</b>.
+            → On its own, this reading puts maintenance at <b>{Math.round(c.raw.raw).toLocaleString()} kcal</b>.
             <div style={S.ciSub}>
               {Math.abs(c.raw.lbPerWeek) >= 0.05
                 ? `${c.raw.lbPerWeek > 0 ? "Gaining" : "Losing"} ${Math.abs(c.raw.lbPerWeek).toFixed(1)} lb/wk ≈ ${Math.round(Math.abs(c.raw.lbPerWeek) * KCAL_PER_LB / 7)} kcal/day ${c.raw.lbPerWeek > 0 ? "over" : "under"} what you burn.`
@@ -3377,7 +3382,8 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
               : <b>{Math.round(c.estimate).toLocaleString()} kcal</b>}
             {c.prior != null && (
               <div style={S.ciSub}>
-                It moves {Math.round(EST_STEP * 100)}% of the way toward {Math.round(c.raw.raw).toLocaleString()} each week (at most ±{EST_MAX_STEP}), so one odd stretch can't swing it.
+                One reading is noisy (water, salt and logging gaps can move it a few hundred kcal), so the estimate moves {Math.round(EST_STEP * 100)}% of the way toward it each week, at most ±{EST_MAX_STEP}.
+                {path.length > 0 && ` If the next weeks keep saying ${Math.round(c.raw.raw).toLocaleString()}, it keeps going: ${path.map((n) => n.toLocaleString()).join(" → ")}…`}
               </div>
             )}
           </div>
@@ -3390,7 +3396,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
           <div style={S.ciLine}>
             {s.cal === Math.round(cur.cal)
               ? <>Keep eating <b>{s.cal.toLocaleString()} kcal/day</b>.</>
-              : <>Eat <b>{s.cal.toLocaleString()} kcal/day</b> <span style={{ color: dim }}>({signed(s.cal - Math.round(cur.cal))} from now)</span>{c.ratePct === 0 ? ", your maintenance estimate" : ` to aim for ${signed(c.ratePct, 2)}%/wk`}.</>}
+              : <>Eat <b>{s.cal.toLocaleString()} kcal/day</b> <span style={{ color: dim }}>({signed(s.cal - Math.round(cur.cal))} from now)</span>{c.ratePct === 0 ? ", this week's maintenance estimate" : ` to aim for ${signed(c.ratePct, 2)}%/wk`}.</>}
           </div>
           <div style={S.ciTable}>
             {[["Calories", "cal"], ["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].map(([lab, k]) => (
