@@ -112,9 +112,11 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 - **Raw estimate:** average calories on counted days, minus the energy of the weight change (about 3,500 kcal per lb, a standard approximation).
 - **Each check-in moves 30% of the way toward the new raw estimate, and never more than ±150 kcal.** One odd week can't swing your targets.
 - **Except the first one with enough data, when the estimate so far is only a starting guess: it moves 60%, at most ±300 kcal.** A calculator guess is only good to about ±10%, so it shouldn't hold your own data back for weeks; not 100%, because early data is the noisiest (logging habits settling, water shifts from a diet change). Example: guess 2,650, first reading 2,227 → 2,396 in one step (it was 2,523 under the 30% rule). *(Owner's choice, Nov 2026)*
+- **Faster when the data agrees:** after that first one, when last week's check-in and this week's both put your maintenance on the same side of the estimate, the move is 50%, at most ±250 kcal. *Example:* estimate 2,500; last week's data said 2,300 (estimate → 2,440); this week's says 2,250 → 2,345, where 30% would give 2,383. A one-off spike never gets the faster step, and neither does the week after an Adjust (see next). *(Owner's choice, Oct 2026)*
+- **Your Adjust sticks:** choosing Adjust makes the calories you picked the new estimate (less what the phase's target pace adds), so the next check-in starts from your number instead of pulling you back. *Example:* at maintenance with the estimate at 2,500, you Adjust to 2,150; with next week's data at 2,300, it suggests 2,195, not ~2,390. *(Owner's choice, Oct 2026)*
 - **Starting point:** your Maintenance target's calories, if you've set them yourself rather than keeping the example.
 
-*(App's choice for the window, minimums, 30% and ±150; owner's choice for 60% and ±300)*
+*(App's choice for the window, minimums, 30% and ±150; owner's choice for 60%/±300, 50%/±250 and Adjust sticking)*
 
 **Which days count:**
 - A day counts if you logged food.
