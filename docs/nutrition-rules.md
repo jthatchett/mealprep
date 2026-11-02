@@ -111,9 +111,10 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 - **Needs:** at least 10 complete logged days, 8 weigh-in days, and 2 weeks of weight data.
 - **Raw estimate:** average calories on counted days, minus the energy of the weight change (about 3,500 kcal per lb, a standard approximation).
 - **Each check-in moves 30% of the way toward the new raw estimate, and never more than ±150 kcal.** One odd week can't swing your targets.
+- **Except the first one with enough data, when the estimate so far is only a starting guess: it moves 60%, at most ±300 kcal.** A calculator guess is only good to about ±10%, so it shouldn't hold your own data back for weeks; not 100%, because early data is the noisiest (logging habits settling, water shifts from a diet change). Example: guess 2,650, first reading 2,227 → 2,396 in one step (it was 2,523 under the 30% rule). *(Owner's choice, Nov 2026)*
 - **Starting point:** your Maintenance target's calories, if you've set them yourself rather than keeping the example.
 
-*(App's choice for the window, minimums, 30% and ±150)*
+*(App's choice for the window, minimums, 30% and ±150; owner's choice for 60% and ±300)*
 
 **Which days count:**
 - A day counts if you logged food.
@@ -126,8 +127,10 @@ Shown on Monday, or later that week if you missed it, until you complete it:
 2. **See** the maintenance estimate, your actual rate against the phase target, and suggested targets.
 3. **Choose** Apply, Adjust (edit first) or Keep current. Every decision is saved.
 
+The card keeps it short: which days count, the estimate's change this week (old → new), and the suggested targets. It doesn't show the raw 3-week number on its own, since that single reading swings with water weight; the estimate only moves part way toward it. *(Owner's request, Nov 2026)*
+
 **Suggested targets:**
-- **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in.
+- **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in (±300 on that first data-based check-in, so the bigger estimate step isn't cut short).
 - **A warning appears** if the result implies losing more than 1% of bodyweight a week.
 - **Suggestions only appear once the estimate rests on your own data,** never on the starting guess alone.
 
