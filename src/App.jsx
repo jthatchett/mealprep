@@ -1028,6 +1028,17 @@ const CHECKIN_MAX_CHANGE = 250;       // a check-in moves daily calories at most
 // weight, so it moves further. Later check-ins use the steps above.
 const EST_FIRST_STEP = 0.6;
 const EST_FIRST_MAX_STEP = 300;       // also the calorie limit that week, so the move isn't capped again
+// The same bigger step when your last data-based estimate is older than
+// this: after a break it's as stale as a guess. (Owner's choice, Nov 2026)
+const EST_STALE_DAYS = 28;
+// "first": no earlier check-in had a data-based estimate; "return": the
+// latest one is over EST_STALE_DAYS old; null otherwise (or no prior / no data).
+function freshStart(sorted, weekStart, prior, raw) {
+  if (prior == null || raw == null) return null;
+  const lastData = [...sorted].reverse().find((ck) => ck.week_start < weekStart && ck.estimate_raw != null);
+  if (!lastData) return "first";
+  return daysBetween(lastData.week_start, weekStart) > EST_STALE_DAYS ? "return" : null;
+}
 const TREND_ALPHA = 0.1;              // smoothing for the trend-weight line
 const lbToKg = (lb) => lb / 2.2046;
 
@@ -2575,7 +2586,9 @@ export default function App() {
     // no starting guess (example targets): the first real estimate stands as is
     // first data-based estimate replacing a starting guess: a bigger step (EST_FIRST_STEP);
     // otherwise faster when last week's data pointed the same way (EST_STEP_AGREE)
-    const firstData = prior != null && raw.raw != null && !sorted.some((c) => c.week_start < weekStart && c.estimate_raw != null);
+    // after a break, a stale estimate gets the same bigger step (EST_STALE_DAYS)
+    const fresh = freshStart(sorted, weekStart, prior, raw.raw);
+    const firstData = !!fresh;
     const agrees = !firstData && estimateAgrees(last, prior, raw.raw);
     const estimate = prior != null ? nextEstimate(prior, raw.raw, firstData ? "first" : agrees ? "agree" : null) : raw.raw;
     const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
@@ -2598,7 +2611,7 @@ export default function App() {
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
     return {
-      today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct, hold, afterHold,
+      today, weekStart, firstData, fresh, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct, hold, afterHold,
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
       // nothing to check in on until there's an estimate (example targets, no data yet)
       due: !!dietPhase && !!followed && !thisWeek && estimate != null,
@@ -3498,7 +3511,9 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             ? <><span style={{ color: dim }}>{Math.round(c.prior).toLocaleString()} →</span> <b>{Math.round(c.estimate).toLocaleString()} kcal</b> <span style={{ color: dim }}>({signed(c.estimate - c.prior)})</span></>
             : <b>{Math.round(c.estimate).toLocaleString()} kcal</b>}
           <div style={S.ciSub}>From what you ate and how your weight moved over the last 3 weeks. {c.firstData
-            ? "Your first estimate from your own data, so it moves further than usual this week; after this it moves a little each week."
+            ? (c.fresh === "return"
+              ? "Your first estimate from your data in a while, so it moves further than usual this week; after this it moves a little each week."
+              : "Your first estimate from your own data, so it moves further than usual this week; after this it moves a little each week.")
             : c.agrees
             ? "It moved further than usual because last week's data pointed the same way."
             : "It moves a little each week, so one odd stretch (like a water-weight jump) can't swing it."}</div>
