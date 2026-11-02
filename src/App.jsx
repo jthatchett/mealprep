@@ -1114,15 +1114,66 @@ function nextEstimate(prior, raw, step = null) {
   return prior + move;
 }
 // Last week's data and this week's both say the estimate is off the same way.
-// Not right after an Adjust: that estimate is your number, not the data's,
-// and the faster step would pull you straight back from it.
 function estimateAgrees(last, prior, raw) {
-  if (!last || last.action === "adjust" || last.estimate_raw == null || raw == null || prior == null) return false;
+  if (!last || last.estimate_raw == null || raw == null || prior == null) return false;
   const was = Number(last.estimate_raw) - Number(last.estimate), now = raw - prior;
   return Math.abs(was) >= 1 && Math.abs(now) >= 1 && Math.sign(was) === Math.sign(now);
 }
 // Calories above (or below) maintenance that a phase's target pace needs.
 const paceKcal = (ratePctPerWeek, weightLb) => (weightLb ? ((ratePctPerWeek / 100) * weightLb * KCAL_PER_LB) / 7 : 0);
+
+/* ---------- edits on the check-in (owner's choices, Nov 2026) ----------
+   Editing the suggested targets never changes the estimate: it stays what
+   the data says. Instead:
+   - an edit that amounts to a different phase (on maintenance, outside
+     ±0.25%/wk) offers that phase; on a cut or bulk, an edit more than
+     0.25%/wk from the target offers to change the target rate
+   - otherwise the edit holds for HOLD_WEEKS (no new suggestion), then the
+     check-in suggests from the estimate again; if weight moved outside the
+     range over the hold, it offers the matching phase or rate */
+const EDIT_BAND_PCT = 0.25;
+const HOLD_WEEKS = 2;
+// the %/wk a daily calorie target implies against the estimate
+const impliedRatePct = (cal, estimate, weightLb) => (weightLb ? (((cal - estimate) * 7) / KCAL_PER_LB / weightLb) * 100 : 0);
+// The phase a weekly rate amounts to. On a bulk any gain stays a bulk: bulks
+// run slower than the maintenance range (default ≈ +0.23%/wk).
+function rateKind(pct, current) {
+  if (current === "surplus" && pct > 0) return "surplus";
+  return pct < -EDIT_BAND_PCT ? "deficit" : pct > EDIT_BAND_PCT ? "surplus" : "maintenance";
+}
+// What a rate (an edit's, or the actual one over a hold) suggests changing:
+// null, { kind: "phase", phaseType, ratePct } or { kind: "rate", phaseType, ratePct },
+// with limit = checkPhaseRate's verdict for that rate.
+function phaseChangeFor(phaseType, phaseName, targetPct, pct) {
+  if (pct == null || !Number.isFinite(pct)) return null;
+  const kind = rateKind(pct, phaseType);
+  let change = null;
+  if (kind !== phaseType) change = { kind: "phase", phaseType: kind, ratePct: kind === "maintenance" ? 0 : pct };
+  else if (phaseType !== "maintenance" && Math.abs(pct - targetPct) > EDIT_BAND_PCT) change = { kind: "rate", phaseType, ratePct: pct };
+  if (!change) return null;
+  const name = change.kind === "rate" ? phaseName : change.phaseType === "deficit" ? "Cut" : "Bulk";
+  return { ...change, limit: checkPhaseRate(change.phaseType, name, change.ratePct) };
+}
+// "−0.43%/wk", or per month for a bulk
+const rateLabel = (phaseType, pct) => {
+  const m = rateIsMonthly(phaseType);
+  const v = m ? pct * WEEKS_PER_MONTH : pct;
+  return `${v > 0 ? "+" : v < 0 ? "−" : "±"}${Math.abs(v).toFixed(2)}%/${m ? "month" : "wk"}`;
+};
+const PHASE_WORD = { deficit: "cut", surplus: "bulk", maintenance: "maintenance" };
+// Is an edit holding this week? The latest check-in that changed anything
+// was an edit on the same preset and pace: it holds HOLD_WEEKS from its week.
+// holdEnded: this is the first check-in after that (any in between were "keep").
+function holdState(sorted, weekStart, followed, ratePct) {
+  const lastChange = [...sorted].reverse().find((ck) => ck.week_start < weekStart && ck.action !== "keep") || null;
+  const held = !!(lastChange && lastChange.action === "adjust" && followed && lastChange.preset_id === followed.id
+    && lastChange.target_rate_pct != null && Math.abs(Number(lastChange.target_rate_pct) - ratePct) < 1e-3);
+  if (!held) return { hold: null, holdEnded: false };
+  const days = daysBetween(lastChange.week_start, weekStart);
+  if (days < HOLD_WEEKS * 7) return { hold: { since: lastChange.week_start, until: addDaysISO(lastChange.week_start, HOLD_WEEKS * 7) }, holdEnded: false };
+  const seenSince = sorted.some((ck) => ck.week_start > lastChange.week_start && ck.week_start < weekStart && daysBetween(lastChange.week_start, ck.week_start) >= HOLD_WEEKS * 7);
+  return { hold: null, holdEnded: !seenSince };
+}
 
 // Macro split for a calorie target (research basis in the plan):
 //  protein: never cut; raised to the phase floor if below it
@@ -2534,13 +2585,20 @@ export default function App() {
     // suggest new targets only once the estimate rests on your own log and
     // weigh-ins (this week's, or an earlier check-in's), never on a guess
     const grounded = raw.raw != null || sorted.some((c) => c.estimate_raw != null);
-    const suggestion = followed && estimate != null && grounded
+    // An edit that kept the phase and its pace holds for HOLD_WEEKS: no new
+    // suggestion until then. The check-in where it ends may offer a phase or
+    // rate change if weight moved outside the range over the hold.
+    const { hold, holdEnded } = holdState(sorted, weekStart, followed, ratePct);
+    const afterHold = holdEnded && wk.ready
+      ? phaseChangeFor(dietPhase.phase_type, dietPhase.phase_name, ratePct, wk.pctPerWeek)
+      : null;
+    const suggestion = !hold && followed && estimate != null && grounded
       ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: firstData ? EST_FIRST_MAX_STEP : CHECKIN_MAX_CHANGE })
       : null;
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
     return {
-      today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct,
+      today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct, hold, afterHold,
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
       // nothing to check in on until there's an estimate (example targets, no data yet)
       due: !!dietPhase && !!followed && !thisWeek && estimate != null,
@@ -2581,17 +2639,24 @@ export default function App() {
   };
 
   // Record this week's check-in; Apply/Adjust also update the phase's targets
-  // (target history keeps the old values for past days).
-  const completeCheckin = async (action, chosen) => {
+  // (target history keeps the old values for past days). `change` (from
+  // phaseChangeFor) also switches the phase or its target rate, and the
+  // chosen numbers go to the phase you end up on.
+  const completeCheckin = async (action, chosen, change = null) => {
     const c = coaching;
     if (!c || !c.followed) return false;
     const before = { ...c.followed.target };
-    // Adjust: the calories you chose become the estimate (less what the
-    // phase's pace adds), so next week starts from your number instead of
-    // pulling you back toward the old one. (Owner's choice, Oct 2026)
-    const estimate = action === "adjust" && chosen?.cal != null
-      ? chosen.cal - paceKcal(c.ratePct, c.weightLb)
-      : c.estimate;
+    const estimate = c.estimate;
+    const presets = store.phases || [];
+    const newPreset = change?.kind === "phase"
+      ? (change.phaseType === "maintenance" ? maintenancePreset(presets)
+        : presets.find((p) => p.id === (change.phaseType === "deficit" ? "phase-cut" : "phase-bulk"))
+          || presets.find((p) => p.phase_type === change.phaseType && !isMiniCut(p.phase_type, p.name)))
+      : null;
+    if (change?.kind === "phase" && !newPreset) {
+      window.alert(`No ${PHASE_WORD[change.phaseType]} preset to switch to. Add one under Phases first.`);
+      return false;
+    }
     try {
       await sbInsertCheckin(session, {
         week_start: c.weekStart, estimate: Math.round(estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw),
@@ -2606,12 +2671,40 @@ export default function App() {
       window.alert("Couldn't save the check-in — " + e.message);
       return false;
     }
+    setCheckins((prev) => [...prev, {
+      week_start: c.weekStart, estimate: Math.round(estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw), action, chosen,
+      preset_id: c.followed.id, target_rate_pct: roundRate(c.ratePct),
+    }]);
+    try {
+      if (change?.kind === "phase") {
+        // the new phase starts today on your numbers (its protein/fat floors applied)
+        const t = splitMacros({ cal: chosen.cal, current: chosen, phaseType: change.phaseType, weightLb: c.weightLb });
+        setPhases((prev) => prev.map((p) => (p.id === newPreset.id ? { ...p, target: { p: t.p, f: t.f, c: t.c, cal: t.cal }, example: false } : p)));
+        await sbSwitchDietPhase(session, newPreset, dietPhases, presets);
+        if (change.phaseType !== "maintenance") {
+          const rows = await sbLoadDietPhases(session);
+          const row = rows.find((r) => r.start_date === todayISO() && r.phase_id === newPreset.id);
+          if (row) await sbUpdateDietPhase(session, row.id, { target_rate_pct: roundRate(change.ratePct) });
+        }
+        await reloadDietPhases();
+        return true;
+      }
+      if (change?.kind === "rate") {
+        // today's row and any later rows of the same block (as slowCut does)
+        const kind = phaseKind(dietPhase);
+        const sortedRows = [...dietPhases].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+        for (let i = sortedRows.findIndex((r) => r.id === dietPhase.id); i >= 0 && i < sortedRows.length && phaseKind(sortedRows[i]) === kind; i++) {
+          await sbUpdateDietPhase(session, sortedRows[i].id, { target_rate_pct: roundRate(change.ratePct) });
+        }
+        await reloadDietPhases();
+      }
+    } catch (e) {
+      dbg("check-in phase change FAILED: " + e.message);
+      window.alert("The check-in is saved, but changing the phase failed — " + e.message);
+    }
     if (action !== "keep" && chosen) {
       setPhases((prev) => prev.map((p) => (p.id === c.followed.id ? { ...p, target: { p: chosen.p, f: chosen.f, c: chosen.c, cal: chosen.cal } } : p)));
     }
-    setCheckins((prev) => [...prev, {
-      week_start: c.weekStart, estimate: Math.round(estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw), action, chosen,
-    }]);
     return true;
   };
 
@@ -3344,11 +3437,23 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   const [showDays, setShowDays] = useState(false);
   const counted = logged.filter((d) => dayIncluded(d, c.intakeByDate, c.statusByDate)).length;
 
-  const finish = async (action, chosen) => {
+  const finish = async (action, chosen, change = null) => {
     setBusy(true);
-    await onComplete(action, chosen);
+    await onComplete(action, chosen, change);
     setBusy(false);
   };
+  const phaseType = c.followed.phase_type;
+  const curNums = { p: Math.round(cur.p), f: Math.round(cur.f), c: Math.round(cur.c), cal: Math.round(cur.cal) };
+  const base = s || curNums;
+  const edited = adjusting ? { ...edit, cal: editCal } : null;
+  // what the edit amounts to, against the estimate
+  const editPct = adjusting && c.weightLb ? impliedRatePct(editCal, c.estimate, c.weightLb) : null;
+  const editChange = adjusting ? phaseChangeFor(phaseType, c.followed.name, c.ratePct, editPct) : null;
+  const holdUntil = fmtDay(addDaysISO(c.today, HOLD_WEEKS * 7));
+  // button text for taking a change
+  const changeBtn = (ch) => ch.kind === "rate"
+    ? `Change the target to ${rateLabel(ch.phaseType, ch.ratePct)}`
+    : ch.phaseType === "maintenance" ? "Switch to maintenance" : `Start a ${PHASE_WORD[ch.phaseType]} at ${rateLabel(ch.phaseType, ch.ratePct)}`;
 
   return (
     <div style={S.ciCard}>
@@ -3400,11 +3505,35 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
         </div>
       )}
 
-      {s && (
+      {/* 3 — targets */}
+      {c.hold && !adjusting && (
         <>
-          <div style={S.ciStep}>3 · Suggested targets ({c.followed.name})</div>
-          {c.ratePct !== 0 && (
-            <div style={S.ciSub}>Maintenance {signed(s.cal - Math.round(c.estimate))} kcal, to aim for {signed(c.ratePct, 2)}%/wk.</div>
+          <div style={S.ciStep}>3 · Targets ({c.followed.name})</div>
+          <div style={S.ciLine}>Holding your <b>{curNums.cal.toLocaleString()} kcal</b> until {fmtDay(c.hold.until)}.</div>
+          <div style={S.ciSub}>You set these on {fmtDay(c.hold.since)}. After {HOLD_WEEKS} weeks the check-in suggests targets from the estimate again.</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy} onClick={() => finish("keep", null)}>Got it</button>
+            <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => { setEdit({ p: curNums.p, f: curNums.f, c: curNums.c }); setAdjusting(true); }}>Edit</button>
+          </div>
+        </>
+      )}
+
+      {(s || adjusting) && (
+        <>
+          <div style={S.ciStep}>3 · {s && !adjusting ? "Suggested targets" : "Your targets"} ({c.followed.name})</div>
+          {c.afterHold && !adjusting && (
+            <div style={S.ciOffer}>
+              <div>After {HOLD_WEEKS} weeks on your numbers, your weight moved <b>{rateLabel(phaseType, c.actualPct)}</b>{phaseType === "maintenance" ? `, outside the ±${EDIT_BAND_PCT}% maintenance range` : `, against a ${rateLabel(phaseType, c.ratePct)} target`}.</div>
+              {c.afterHold.limit.level === "block"
+                ? <div style={{ color: "#ffb454", marginTop: 4 }}>▲ That's past the limit: {c.afterHold.limit.message}.</div>
+                : <>
+                    <div style={{ color: dim, marginTop: 4 }}>{c.afterHold.kind === "rate" ? "Make that the target, keeping" : `Make it a ${PHASE_WORD[c.afterHold.phaseType]}, keeping`} {curNums.cal.toLocaleString()} kcal?{c.afterHold.limit.level === "warn" ? ` Note: ${c.afterHold.limit.message}` : ""}</div>
+                    <button style={{ ...S.ghostBtn, width: "100%", marginTop: 8 }} disabled={busy} onClick={() => finish("adjust", curNums, c.afterHold)}>{changeBtn(c.afterHold)}</button>
+                  </>}
+            </div>
+          )}
+          {s && !adjusting && c.ratePct !== 0 && (
+            <div style={S.ciSub}>Maintenance {signed(s.cal - Math.round(c.estimate))} kcal, to aim for {rateLabel(phaseType, c.ratePct)}.</div>
           )}
           <div style={S.ciTable}>
             {[["Calories", "cal"], ["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].map(([lab, k]) => (
@@ -3413,37 +3542,63 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
                 {adjusting && k !== "cal" ? (
                   <NumInput type="number" value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: Math.max(0, parseFloat(e.target.value) || 0) })} style={{ ...S.fInput, padding: "4px 6px" }} />
                 ) : (
-                  <div style={{ fontWeight: 700 }}>{(adjusting && k === "cal" ? editCal : s[k]).toLocaleString()}{k === "cal" ? "" : " g"}</div>
+                  <div style={{ fontWeight: 700 }}>{(adjusting && k === "cal" ? editCal : base[k]).toLocaleString()}{k === "cal" ? "" : " g"}</div>
                 )}
                 <div style={{ color: dim, fontSize: 11 }}>now {Math.round(cur[k]).toLocaleString()}</div>
               </div>
             ))}
           </div>
-          <div style={S.ciNotes}>
-            {s.capped && <div>• Capped at ±{s.maxChange} kcal this week (the data points to {s.ideal.toLocaleString()}).</div>}
-            {s.proteinRaised && <div>• Protein raised to the {c.followed.phase_type === "deficit" ? "cut minimum (~2 g/kg bodyweight)" : "minimum (~1.6 g/kg)"}.</div>}
-            {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
-            {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
-            {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
-            {adjusting && <div>• Your calories become the new maintenance estimate{c.ratePct ? " (less what the phase's pace adds)" : ""}, so next week starts from them instead of pulling you back.</div>}
-          </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          {s && !adjusting && (
+            <div style={S.ciNotes}>
+              {s.capped && <div>• Capped at ±{s.maxChange} kcal this week (the data points to {s.ideal.toLocaleString()}).</div>}
+              {s.proteinRaised && <div>• Protein raised to the {phaseType === "deficit" ? "cut minimum (~2 g/kg bodyweight)" : "minimum (~1.6 g/kg)"}.</div>}
+              {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
+              {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
+              {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
+            </div>
+          )}
+          {adjusting && (
+            <div style={S.ciNotes}>
+              {editChange ? (
+                <div style={S.ciOffer}>
+                  <div style={{ color: text }}>
+                    {editChange.kind === "rate"
+                      ? <>{editCal.toLocaleString()} is a <b>{rateLabel(phaseType, editPct)}</b> {PHASE_WORD[phaseType]}; your target is {rateLabel(phaseType, c.ratePct)}.</>
+                      : <>{editCal.toLocaleString()} is {Math.abs(Math.round(editCal - c.estimate))} {editCal < c.estimate ? "below" : "above"} maintenance (≈ <b>{rateLabel(editChange.phaseType, editPct)}</b>). That's {editChange.phaseType === "maintenance" ? "maintenance" : `a ${PHASE_WORD[editChange.phaseType]}`}, not {phaseType === "maintenance" ? "maintenance" : `a ${PHASE_WORD[phaseType]}`}.</>}
+                  </div>
+                  {editChange.limit.level === "block" && <div style={{ color: "#ffb454", marginTop: 4 }}>▲ Too fast to set as a target: {editChange.limit.message}.</div>}
+                  {editChange.limit.level === "warn" && <div style={{ color: "#ffb454", marginTop: 4 }}>▲ {editChange.limit.message}</div>}
+                </div>
+              ) : (
+                <div>• These hold for {HOLD_WEEKS} weeks (until {holdUntil}); then the check-in suggests targets from the estimate again.</div>
+              )}
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
             {!adjusting ? (
               <>
                 <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={() => finish("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal })}>Use {s.cal.toLocaleString()}</button>
                 <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => { setEdit({ p: s.p, f: s.f, c: s.c }); setAdjusting(true); }}>Edit</button>
                 <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => finish("keep", null)}>Keep {Math.round(cur.cal).toLocaleString()}</button>
               </>
+            ) : editChange ? (
+              <>
+                {editChange.limit.level !== "block" && (
+                  <button style={{ ...S.primaryBtn, flex: "1 1 100%" }} disabled={busy} onClick={() => finish("adjust", edited, editChange)}>{changeBtn(editChange)}</button>
+                )}
+                <button style={{ ...(editChange.limit.level === "block" ? S.primaryBtn : S.ghostBtn), flex: 2 }} disabled={busy} onClick={() => finish("adjust", edited)}>Just for {HOLD_WEEKS} weeks</button>
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => setAdjusting(false)}>back</button>
+              </>
             ) : (
               <>
-                <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy} onClick={() => finish("adjust", { ...edit, cal: editCal })}>Apply these</button>
+                <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy} onClick={() => finish("adjust", edited)}>Apply these</button>
                 <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => setAdjusting(false)}>back</button>
               </>
             )}
           </div>
         </>
       )}
-      {!s && (
+      {!s && !c.hold && !adjusting && (
         <>
           {c.raw.raw == null && <div style={S.ciNotes}>Nothing to change yet. New targets come once the estimate is from your own data.</div>}
           <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} disabled={busy} onClick={() => finish("keep", null)}>
@@ -6195,6 +6350,7 @@ const S = {
   ciTable: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 },
   ciCell: { background: panel2, borderRadius: 8, padding: 8, fontSize: 14 },
   ciNotes: { color: dim, fontSize: 12, lineHeight: 1.5, marginTop: 8 },
+  ciOffer: { background: panel2, borderRadius: 8, padding: 10, fontSize: 13, lineHeight: 1.45, margin: "4px 0 8px" },
   dsRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, color: dim, padding: "8px 2px", marginBottom: 10 },
   dsBtn: { background: "transparent", border: `1px solid ${line}`, color: text, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" },
   pcEstimate: { fontSize: 12, marginTop: 10 },

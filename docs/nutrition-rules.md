@@ -112,11 +112,10 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 - **Raw estimate:** average calories on counted days, minus the energy of the weight change (about 3,500 kcal per lb, a standard approximation).
 - **Each check-in moves 30% of the way toward the new raw estimate, and never more than ±150 kcal.** One odd week can't swing your targets.
 - **Except the first one with enough data, when the estimate so far is only a starting guess: it moves 60%, at most ±300 kcal.** A calculator guess is only good to about ±10%, so it shouldn't hold your own data back for weeks; not 100%, because early data is the noisiest (logging habits settling, water shifts from a diet change). Example: guess 2,650, first reading 2,227 → 2,396 in one step (it was 2,523 under the 30% rule). *(Owner's choice, Nov 2026)*
-- **Faster when the data agrees:** after that first one, when last week's check-in and this week's both put your maintenance on the same side of the estimate, the move is 50%, at most ±250 kcal. *Example:* estimate 2,500; last week's data said 2,300 (estimate → 2,440); this week's says 2,250 → 2,345, where 30% would give 2,383. A one-off spike never gets the faster step, and neither does the week after an Adjust (see next). *(Owner's choice, Oct 2026)*
-- **Your Adjust sticks:** choosing Adjust makes the calories you picked the new estimate (less what the phase's target pace adds), so the next check-in starts from your number instead of pulling you back. *Example:* at maintenance with the estimate at 2,500, you Adjust to 2,150; with next week's data at 2,300, it suggests 2,195, not ~2,390. *(Owner's choice, Oct 2026)*
+- **Faster when the data agrees:** after that first one, when last week's check-in and this week's both put your maintenance on the same side of the estimate, the move is 50%, at most ±250 kcal. *Example:* estimate 2,500; last week's data said 2,300 (estimate → 2,440); this week's says 2,250 → 2,345, where 30% would give 2,383. A one-off spike never gets the faster step. *(Owner's choice, Oct 2026)*
 - **Starting point:** your Maintenance target's calories, if you've set them yourself rather than keeping the example.
 
-*(App's choice for the window, minimums, 30% and ±150; owner's choice for 60%/±300, 50%/±250 and Adjust sticking)*
+*(App's choice for the window, minimums, 30% and ±150; owner's choice for 60%/±300 and 50%/±250)*
 
 **Which days count:**
 - A day counts if you logged food.
@@ -137,6 +136,15 @@ The card keeps it short: which days count, the estimate's change this week (old 
 - **Suggestions only appear once the estimate rests on your own data,** never on the starting guess alone.
 
 *(Research-backed for the 1% ceiling; the ±250 cap is the app's choice)*
+
+### Editing the suggestion
+Editing never changes the maintenance estimate: it stays what your data says. What happens depends on what the edit amounts to (its rate against the estimate). *(Owner's choices, Nov 2026)*
+- **On maintenance, outside ±0.25%/wk:** the edit is really a cut or a bulk, so the card offers to start one at that rate, on your numbers, from today. *Example:* estimate 2,500, you edit to 2,150 at 163 lb → −0.43%/wk → **Start a cut at −0.43%/wk** or **Just for 2 weeks**.
+- **On a cut or bulk, more than 0.25%/wk from the target:** it offers to change the target rate. *Example:* cut at −0.7%/wk, estimate 2,400, you edit to 2,100 → −0.37%/wk → **Change the target to −0.37%/wk**. An edit to 1,900 (−0.61%/wk) applies without asking. An edit that crosses into another phase (a cut edited to maintenance calories) offers that phase instead.
+- **The phase limits still apply:** past a phase's limit (a cut faster than −1.5%/wk) there's no phase or rate button, only **Just for 2 weeks**; past its warning, the warning shows.
+- **Any other edit holds for 2 weeks:** no new suggestion until then (the card says "Holding your 2,150 kcal until …"), then the check-in suggests from the estimate again, still at most ±250 kcal a week.
+- **When the hold ends,** if weight moved outside the range over it (the 2-week trend: outside ±0.25%/wk on maintenance, or more than 0.25%/wk from a cut's or bulk's target), the card offers the matching phase or rate, keeping your current calories. *Example:* held at 2,150 on maintenance, weight −0.41%/wk → **Start a cut at −0.41%/wk**.
+- A new phase gets the usual phase defaults (a cut runs 12 weeks, then maintenance), and RepReport sees it like any other phase change, so its training volume follows.
 
 ### Macro split
 For any calorie target:
