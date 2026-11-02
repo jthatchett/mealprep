@@ -67,7 +67,7 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
 |---|---|---|---|
 | **Cut** | −0.7%/week | −1.0%/week | −1.5%/week |
 | **Mini-cut** (a cut named "mini") | −1.0%/week | −1.25%/week | −1.5%/week |
-| **Bulk** | +1%/month | +2%/month | +4%/month |
+| **Bulk** | +1%/month | +2%/month ("faster tends to add more fat") | +4%/month |
 | **Maintenance** | 0 (±0.25%/week counts as on target) | — | — |
 
 *(Research-backed ranges: Helms 2014 for 0.5–1%/week on a cut; Garthe 2011 for the fastest rate studied; Iraki 2019 for bulks. Mini-cut numbers are coaching practice.)*
@@ -83,6 +83,7 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
   *(Coaching practice: RP Diet 2.0, Israetel, McDonald; no trial behind the exact lengths)*
 - **Moving or skipping maintenance is your call.** Starting a cut or bulk without the suggested maintenance shows a one-line note, but never blocks you.
 - **Back-to-back blocks of the same type chain together** for the training-volume effect and RepReport's strength check ([section 7](#7-how-meal-prep-uses-repreport)). A short maintenance between two cuts works as a diet break: the effect pauses rather than resetting. The second cut chains when it starts before the first one's fade runs out (2/3 of its length, so about 6½ weeks after a 10-week cut), even if the scale stalled at the end of the first.
+- **A long cut offers a diet break.** Once the phase card's cut has run **12 weeks**, it adds: "This cut has run 13 weeks. A 1–2 week break at maintenance is an option; studies find about the same fat loss either way. Your next RepReport deload starts Nov 14." The deload part shows only with a running RepReport block. It counts from the current cut's own start, so a cut right after a break starts over; mini-cuts get no note. *(Trials used 2–3 weeks of dieting per break and found fat loss about the same as continuous dieting: MATADOR, Byrne et al. 2018; ICECAP, Peos et al. 2021. No study supports a specific interval, so 12 weeks, about two RepReport blocks, is the owner's choice, Oct 2026)*
 - **A bulk that resumes after a mini-cut is the same bulk.** The mini-cut is there to extend the bulk, so the bulk's clock stops while it runs, however long it lasts, and the bulk picks up its training-volume effect where it stood. Maintenance days around the mini-cut still count against the bulk's 2–4-week fade.
 
 ---
@@ -110,11 +111,12 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 - **Needs:** at least 10 complete logged days, 8 weigh-in days, and 2 weeks of weight data.
 - **Raw estimate:** average calories on counted days, minus the energy of the weight change (about 3,500 kcal per lb, a standard approximation).
 - **Each check-in moves 30% of the way toward the new raw estimate, and never more than ±150 kcal.** One odd week can't swing your targets.
-- **Faster when the data agrees:** when last week's check-in and this week's both put your maintenance on the same side of the estimate, the move is 50%, at most ±250 kcal. *Example:* data at 2,130 then 2,200 against a 2,650 start: 2,650 → 2,500 (30%) → 2,350 (50%), where 30% both weeks would give 2,410. A one-off spike never gets the faster step. *(Owner's choice, Oct 2026)*
+- **Except the first one with enough data, when the estimate so far is only a starting guess: it moves 60%, at most ±300 kcal.** A calculator guess is only good to about ±10%, so it shouldn't hold your own data back for weeks; not 100%, because early data is the noisiest (logging habits settling, water shifts from a diet change). Example: guess 2,650, first reading 2,227 → 2,396 in one step (it was 2,523 under the 30% rule). *(Owner's choice, Nov 2026)*
+- **Faster when the data agrees:** after that first one, when last week's check-in and this week's both put your maintenance on the same side of the estimate, the move is 50%, at most ±250 kcal. *Example:* estimate 2,500; last week's data said 2,300 (estimate → 2,440); this week's says 2,250 → 2,345, where 30% would give 2,383. A one-off spike never gets the faster step, and neither does the week after an Adjust (see next). *(Owner's choice, Oct 2026)*
 - **Your Adjust sticks:** choosing Adjust makes the calories you picked the new estimate (less what the phase's target pace adds), so the next check-in starts from your number instead of pulling you back. *Example:* at maintenance with the estimate at 2,500, you Adjust to 2,150; with next week's data at 2,300, it suggests 2,195, not ~2,390. *(Owner's choice, Oct 2026)*
 - **Starting point:** your Maintenance target's calories, if you've set them yourself rather than keeping the example.
 
-*(App's choice for the window, minimums, 30% and ±150)*
+*(App's choice for the window, minimums, 30% and ±150; owner's choice for 60%/±300, 50%/±250 and Adjust sticking)*
 
 **Which days count:**
 - A day counts if you logged food.
@@ -127,8 +129,10 @@ Shown on Monday, or later that week if you missed it, until you complete it:
 2. **See** the maintenance estimate, your actual rate against the phase target, and suggested targets.
 3. **Choose** Apply, Adjust (edit first) or Keep current. Every decision is saved.
 
+The card keeps it short: which days count, the estimate's change this week (old → new), and the suggested targets. It doesn't show the raw 3-week number on its own, since that single reading swings with water weight; the estimate only moves part way toward it. *(Owner's request, Nov 2026)*
+
 **Suggested targets:**
-- **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in.
+- **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in (±300 on that first data-based check-in, so the bigger estimate step isn't cut short).
 - **A warning appears** if the result implies losing more than 1% of bodyweight a week.
 - **Suggestions only appear once the estimate rests on your own data,** never on the starting guess alone.
 
@@ -162,6 +166,15 @@ RepReport saves a small status with your training data:
 - during a cut, **whether your lifts are holding up** (see [Strength during a cut](#strength-during-a-cut))
 - while a block is running, **its goal**: what it's for, which muscles you're pushing, its main lifts and its dates (see [Your training goal](#your-training-goal-from-repreport))
 
+**The calendar marks the running block:** a line under each of its days, in the accent color for the deload week, so a diet break is easy to line up with a deload or the gap between blocks.
+
+**Meal Prep sends RepReport a protein summary** in return, saved with your Meal Prep data:
+- your average protein over the logged days of the last 7, ending yesterday (today is still being logged);
+- the average of those days' protein targets (the diet phase's targets as they were that day, or the weekday's override, like a refeed);
+- how many days counted.
+
+A day counts if it counts toward the maintenance estimate ([section 5](#5-maintenance-estimate-and-the-weekly-check-in)) and every food has its protein; a calories-only quick add leaves that day out. RepReport shows it in its diet box and on its "Sets −1" note when protein averaged under 80% of target; it needs 4 logged days and never changes training. Saving it doesn't touch your plan or foods, so it can't cause a "changed on another device" conflict. *(Owner's choice, Oct 2026)*
+
 **A block counts as active** while it has sessions left. A finished block that hasn't been archived or replaced yet doesn't count.
 
 | In Meal Prep | Block active | No active block |
@@ -174,6 +187,7 @@ RepReport saves a small status with your training data:
 - A cut's first weeks use your planned pace instead: its first week loses mostly water, and until the cut has its own trend the 14-day trend still reads the phase before. The cut's trend counts from day 20, once its 14 days start after the first week. The planned pace also stands in whenever there are no weigh-ins. The card says so: "assuming you're losing 0.7%/week (your planned pace). From Nov 2, your weigh-ins set it (a cut's first week is mostly water)." Same rule in RepReport.
 - A mini-cut takes 30% off from day 1, even straight after a bulk: a bulk that's still fading doesn't offset it, since a mini-cut's deficit is what calls for the 30%. The weight trend only counts once its 2 weeks of weigh-ins all fall inside the mini-cut, because before that it still reads the phase before (a bulk's gain would hold the cut back). After that it follows the scale (during a gap in weigh-ins, the latest trend made only of mini-cut weigh-ins): the full 30% at the default mini-cut pace of 1% a week or faster, about 22% at 0.75% a week, 15% at 0.5% a week.
 - A flat or slower scale pauses the build-up rather than undoing it: during the phase the effect holds at the highest level the weight trend kept for a full week (one lucky weigh-in can't set it), and the fade afterwards starts from there. *Example:* a 10-week cut at 1% a week whose scale goes flat for the last 2 weeks stays at −15% instead of dropping to 0%. A slowdown you chose holds the same way. The card then says "held at the most this cut has built up (the scale now: −0.5%/week)", or "(your last trend, 5 days ago: …) … Weigh in to update it." when weigh-ins have stopped.
+- A cut whose scale never drops (or a bulk whose scale never rises) stays at 0% (no deficit shows up, so recovery isn't treated as reduced). From week 3, when a cut's own trend starts counting, the card says so: "Volume ceilings are at your normal baseline: your weight hasn't dropped since this cut started 5 weeks ago (now +0.1%/week), so RepReport plans as if you're at maintenance. If you're eating in a deficit, check your logging." A bulk whose scale doesn't rise gets the same from week 3 ("…hasn't risen since this bulk started… If you're eating in a surplus, check your logging."). Before week 3 (a mini-cut or a bulk; a cut's own trend starts in week 3) it keeps "…isn't affecting recovery yet." Same rule in RepReport. *(Owner's choice, Oct 2026)*
 - Effects fade after the phase ends.
 
 *Example:* halfway through a 12-week cut losing 1% a week, the bar reads −10% and chest MRV in RepReport goes from 20 to 18 sets. At the end of that cut it reads −20% (chest 16). At the end of a bulk gaining 0.5% a week it reads +10% (chest 22).
@@ -198,7 +212,7 @@ A warning appears under it when the two pull apart:
 **While planning a phase,** the phase editor runs the same check against your running RepReport block, at the pace you're entering (a blank rate is checked at the default the editor shows: 0.7% a week for a cut, 1% for a mini-cut). The phase running today is checked at the pace the scale has held, the same reading as the card above, so the editor and the card agree. Only the goal warnings show; how to line phases up with training blocks is left to you or your coach. RepReport's block setup runs the same check for a block you're planning.
 
 ### Strength during a cut
-During a cut or mini-cut, the phase card shows a **Strength (from RepReport)** section. RepReport works out whether your lifts are holding up since the cut began: a line through every week of the cut for each exercise, comparing week 1s with week 1s and week 2s with week 2s, and counting the reps in reserve you logged. Its guide has the details. Losing strength steadily on a cut is the clearest sign you may be losing muscle.
+During a cut or mini-cut, the phase card shows a **Strength (from RepReport)** section. RepReport works out whether your lifts are holding up since the cut began: a line through every week of the cut for each exercise, comparing week 1s with week 1s and week 2s with week 2s, scoring each exercise's first 2 sets and counting the reps in reserve you logged. Pull-ups and other bodyweight moves are scored only with at least 3 weigh-ins in the week before the session. Its guide has the details. Losing strength steadily on a cut is the clearest sign you may be losing muscle.
 
 | What RepReport sees | What the phase card shows |
 |---|---|
@@ -206,7 +220,7 @@ During a cut or mini-cut, the phase card shows a **Strength (from RepReport)** s
 | Before the trend line exists (in practice until part of a second block), no crash | "checking. The full comparison starts once you've repeated weeks of an earlier block in this cut." |
 | Lifts holding | "Strength since the cut began: holding (−1%)" |
 | Lifts down, but no heads-up yet | "Strength since the cut began: down about 4%" |
-| Most muscles more than 3% down, two readings in a row | **Heads-up**, e.g. "your lifts are down about 3% across 5 of 7 muscles since the cut began (Bench Press: 225×7 (2 left) → 225×6 (2 left)). Nothing to change yet. Worth watching." |
+| Most muscles more than 3% down, two readings in a row | **Heads-up**, e.g. "your lifts are down about 3% across 5 of 7 muscles since the cut began (Bench Press: 225×7, 225×7 (2 left) → 225×7, 225×5 (2 left)). Nothing to change yet. Worth watching." Both sets RepReport scored are shown; a reading from an older RepReport shows one. |
 | Most muscles more than 5% down (more than 8% before the trend line exists) | **Suggestion**: the same line plus "Losing 1.1% a week may be costing muscle." and two buttons |
 
 A reading more than a week old gets "(as of Oct 10)" added.
@@ -229,7 +243,8 @@ These live in both apps. A change to one must be made in the other:
 - the weight-trend rule ([section 4](#4-weigh-ins-and-your-weight-trend))
 - the diet-phase effect on volume ceilings: the −20% cut and +10% bulk shares, the mini-cut cut, and how blocks chain
 - the 18+ and terms consent, and account export and deletion
-- the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match
+- the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match, including the example's `beforeSets`/`afterSets`
+- the protein summary: Meal Prep computes it (`buildProteinStatus`) and saves it to `app_data.status` (`sbSaveStatus`); RepReport only displays it (`proteinSummary`); the field names in between must match
 - the goal check (`goalCheck`, `goalPhaseOf`, `goalPlanCheck`), wording included: RepReport writes the goal (`buildGoalStatus`), both apps run the same check on it
 
 ---
@@ -246,6 +261,7 @@ These live in both apps. A change to one must be made in the other:
 - **Weight-loss rate and protein on a cut:** Helms et al. 2014, evidence-based recommendations for natural bodybuilding contest preparation.
 - **Fast vs slow weight loss in athletes:** Garthe et al. 2011.
 - **Rate of gain when bulking:** Iraki et al. 2019, nutrition recommendations for bodybuilders in the off-season.
+- **Diet breaks:** Byrne et al. 2018, MATADOR trial (Int J Obes); Peos et al. 2021, ICECAP secondary analysis (PLoS ONE), https://pmc.ncbi.nlm.nih.gov/articles/PMC7906362/
 - **Protein for muscle gain:** Morton et al. 2018, meta-analysis of protein supplementation and resistance training.
 - **Resting energy equations:** Frankenfield et al. 2005 (Mifflin-St Jeor accuracy); Tinsley et al. 2019 (lean-mass equation for athletes).
 - **Energy cost of resistance training:** Compendium of Physical Activities.
