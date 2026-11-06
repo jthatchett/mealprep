@@ -1992,6 +1992,18 @@ export default function App() {
     } catch { /* the targets are saved either way */ }
   };
   const laterCalc = () => { setCalcLater(true); try { localStorage.setItem("mealprep:calc-later", "1"); } catch { /* private mode */ } };
+  // onboarding flags (user_metadata.mealprep_onboarding); null until decided
+  const [ob, setOb] = useState(null);
+  const [dietLoaded, setDietLoaded] = useState(false);
+  const [setup, setSetup] = useState(null); // { step: "phase" | "calc" | "next" | "weigh", type, weight }
+  const saveOb = async (next) => {
+    setOb(next);
+    try {
+      const s2 = await sbUpdateUserMeta(session, { mealprep_onboarding: next });
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ access_token: s2.access_token, refresh_token: s2.refresh_token, user: s2.user }));
+    } catch (e) { dbg("onboarding flags save FAILED: " + e.message); }
+  };
+  const markOb = (group, key) => ob && !ob[group]?.[key] && saveOb({ ...ob, [group]: { ...(ob[group] || {}), [key]: true } });
   const [debugLog, setDebugLog] = useState([]);
   const [session, setSession] = useState(null);     // null = not yet checked
   const [sessionChecked, setSessionChecked] = useState(false);
@@ -2427,6 +2439,7 @@ export default function App() {
         } catch (e) { dbg("overrun switch FAILED: " + e.message); }
         if (cancelled) return;
         setDietPhases(rows);
+        setDietLoaded(true);
       }
       else { failed.push("diet phases"); dbg("diet phase load FAILED: " + phases.reason?.message); }
       if (weights.status === "fulfilled") {
@@ -2447,6 +2460,29 @@ export default function App() {
   }, [loaded, session, sideLoadNonce]);
 
   const reloadDietPhases = async () => setDietPhases(await sbLoadDietPhases(session));
+
+  // Onboarding: decided once the data is in. An account that already has
+  // real targets or a diet phase has been using the app: it skips it all.
+  useEffect(() => {
+    if (ob || !loaded || !store || !dietLoaded || !session) return;
+    const saved = session.user?.user_metadata?.mealprep_onboarding;
+    if (saved) { setOb(saved); return; }
+    const hasHistory = (store.phases || []).some((p) => !p.example) || dietPhases.length > 0;
+    saveOb(hasHistory ? ONBOARDING_ALL_SEEN : { v: 1, tour: false, setup: false, tips: {}, banners: {} });
+  }, [ob, loaded, store, dietLoaded, session, dietPhases]);
+  // setup picks up where it left off (tour seen, setup not finished)
+  useEffect(() => { if (ob && ob.tour && !ob.setup && !setup) setSetup({ step: "phase" }); }, [ob, setup]);
+  const finishTour = () => { saveOb({ ...ob, tour: true }); if (!ob.setup) setSetup({ step: "phase" }); };
+  // setup step 3 saves the targets, then starts the phase they picked from today
+  const applySetup = async (targets, profile) => {
+    await applyCalc(targets, profile);
+    try {
+      const preset = presetForType(phases, setup.type);
+      if (preset) { await sbSwitchDietPhase(session, preset, dietPhases, phases); await reloadDietPhases(); }
+    } catch (e) { dbg("setup phase FAILED: " + e.message); window.alert("Couldn't start your phase — " + e.message); }
+    setSetup({ ...setup, step: "next", weight: profile.weight_lb });
+  };
+  const finishSetup = () => { saveOb({ ...ob, setup: true }); setSetup(null); };
 
   const switchPhase = async (preset) => {
     try {
@@ -2823,7 +2859,19 @@ export default function App() {
   return (
     <div style={S.app}>
       <Style />
-      {showBwModal && <BodyweightModal onSave={saveBodyweight} onSkip={skipBodyweight} />}
+      {showBwModal && ob?.setup && <BodyweightModal onSave={saveBodyweight} onSkip={skipBodyweight} />}
+      {ob && !ob.tour && <MealPrepTour training={training} onDone={finishTour} />}
+      {ob && ob.tour && setup?.step === "phase" && <SetupPhaseChoice onContinue={(type) => setSetup({ step: "calc", type })} />}
+      {ob && setup?.step === "calc" && (
+        <TargetsCalculator presets={phases} bwLog={bwLog} profile={savedProfile || session?.user?.user_metadata?.profile}
+          training={training} setupType={setup.type} onApply={applySetup} onClose={() => {}} />
+      )}
+      {ob && setup?.step === "next" && <SetupWhatsNext phaseType={setup.type} onContinue={() => setSetup({ ...setup, step: "weigh" })} />}
+      {ob && setup?.step === "weigh" && (
+        <BodyweightModal setup initial={setup.weight ?? null}
+          onSave={async (w) => { await saveBodyweight(w); finishSetup(); }}
+          onSkip={() => { skipBodyweight(); finishSetup(); }} />
+      )}
       {calc && (
         <TargetsCalculator
           presets={phases}
@@ -2925,7 +2973,7 @@ export default function App() {
             onSetDayIncluded={setDayIncluded}
             onCompleteCheckin={completeCheckin}
             onOpenMonth={() => setShowMonth(true)}
-            showCalcPrompt={!calcLater && phases.some((p) => p.example)}
+            showCalcPrompt={!!ob?.setup && !calcLater && phases.some((p) => p.example)}
             onOpenCalc={openCalc}
             onCalcLater={laterCalc}
             strengthChoice={strengthChoice}
@@ -5516,8 +5564,9 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
 /* ============================================================
    BODYWEIGHT MODAL — once-daily prompt (no dismiss-outside; save or skip)
    ============================================================ */
-function BodyweightModal({ onSave, onSkip }) {
-  const [val, setVal] = useState("");
+// setup: during onboarding, prefilled from the calculator's weight (owner's design, Nov 2026)
+function BodyweightModal({ onSave, onSkip, initial = null, setup = false }) {
+  const [val, setVal] = useState(initial != null ? String(initial) : "");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -5537,6 +5586,7 @@ function BodyweightModal({ onSave, onSkip }) {
     <div style={S.modalWrap}>
       <div style={{ ...S.modal, maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ padding: 24, textAlign: "center" }}>
+          {setup && <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 14, textAlign: "left" }}>SETUP · STEP 4 / 4</div>}
           <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, letterSpacing: 1, fontSize: 14, marginBottom: 4 }}>
             LOG BODYWEIGHT
           </div>
@@ -5550,6 +5600,7 @@ function BodyweightModal({ onSave, onSkip }) {
             onChange={(e) => { setVal(e.target.value); setErr(""); }}
             style={{ ...S.fInput, width: "100%", textAlign: "center", fontSize: 16, marginBottom: 8 }}
           />
+          {setup && initial != null && String(val) === String(initial) && <div style={{ ...S.calcHint, marginTop: -4, marginBottom: 12 }}>from the calculator · change it if it isn't this morning's weight</div>}
           {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginBottom: 8 }}>{err}</div>}
           <button style={{ ...S.primaryBtn, width: "100%", marginBottom: 8 }} onClick={submit} disabled={saving}>
             {saving ? "saving…" : "save"}
@@ -5560,6 +5611,7 @@ function BodyweightModal({ onSave, onSkip }) {
           >
             skip today
           </button>
+          {setup && <p style={{ ...S.note, fontSize: 12, margin: "10px 0 0" }}>Skip any day. 4 or more a week keeps your trend ready.</p>}
         </div>
       </div>
     </div>
@@ -5655,7 +5707,10 @@ function TargetChanges({ rows }) {
 
 // "Calculate my targets": a short profile -> a starting maintenance -> every
 // phase preset's targets, shown for review before anything is saved.
-function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose }) {
+// setupType: during onboarding setup, the phase they picked ("maintenance",
+// "surplus" or "deficit"): no close button, and the results lead with that
+// phase's targets (owner's design, Nov 2026).
+function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose, setupType = null }) {
   // Prefilled only from a block that's running: with none, lifting days are
   // left for you to enter rather than assumed from the last block.
   const liftDaysFromRR = training?.active ? training.daysPerWeek : null;
@@ -5697,11 +5752,14 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
   const opt = (on) => ({ ...S.ghostBtn, flex: 1, ...(on ? { color: accent, borderColor: accent } : {}) });
 
   return (
-    <div style={S.modalWrap} onClick={onClose}>
+    <div style={S.modalWrap} onClick={setupType ? undefined : onClose}>
       <div style={{ ...S.modal, maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
         <div style={S.modalHead}>
-          <strong style={{ fontSize: 13, letterSpacing: 1 }}>{step === "form" ? "CALCULATE MY TARGETS" : "YOUR STARTING TARGETS"}</strong>
-          <button style={S.xBtn} onClick={onClose}>✕</button>
+          <strong style={{ fontSize: 13, letterSpacing: 1 }}>
+            {setupType ? <span style={{ color: dim, fontWeight: 700, fontSize: 10, letterSpacing: 2, display: "block", marginBottom: 4 }}>SETUP · STEP {step === "form" ? 2 : 3} / 4</span> : null}
+            {step === "form" ? "CALCULATE MY TARGETS" : "YOUR STARTING TARGETS"}
+          </strong>
+          {!setupType && <button style={S.xBtn} onClick={onClose}>✕</button>}
         </div>
         {step === "form" ? (
           <div style={S.editorBody}>
@@ -5748,6 +5806,8 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
             {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 8 }}>{err}</div>}
             <button style={{ ...S.primaryBtn, width: "100%", marginTop: 14 }} onClick={next}>See my targets</button>
           </div>
+        ) : setupType ? (
+          <SetupTargets setupType={setupType} presets={usable} proposed={proposed} est={est} busy={busy} onSave={apply} onBack={() => setStep("form")} />
         ) : (
           <div style={S.editorBody}>
             <div style={{ fontSize: 15 }}>Maintenance ≈ <b>{est.total.toLocaleString()} kcal</b></div>
@@ -5776,6 +5836,331 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// The preset a setup choice starts: maintenance, the (non-mini) cut, or the bulk.
+function presetForType(presets, type) {
+  if (type === "maintenance") return maintenancePreset(presets);
+  return (presets || []).find((p) => p.phase_type === type && !isMiniCut(p.phase_type, p.name)) || null;
+}
+
+// Setup step 3: the targets they'll actually use, from the phase they picked.
+// The other targets (bulk, cut, mini-cut, refeed) are set too, and introduced
+// later, the first time they plan a phase.
+function SetupTargets({ setupType, presets, proposed, est, busy, onSave, onBack }) {
+  const p = presetForType(presets, setupType);
+  const t = p ? proposed[p.id] : null;
+  const name = { maintenance: "maintenance", surplus: "a bulk", deficit: "a cut" }[setupType];
+  return (
+    <div style={S.editorBody}>
+      <div style={{ fontSize: 13, color: dim, marginBottom: 12 }}>
+        For <span style={{ color: PHASE_COLORS[setupType], fontWeight: 700 }}>{name}</span>, every day
+      </div>
+      {t && (
+        <div style={{ ...S.dash, margin: 0, padding: 14 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
+            <span style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 34, color: text }}>{t.cal.toLocaleString()}</span>
+            <span style={{ color: dim, fontSize: 14 }}>kcal a day</span>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[["Protein", t.p, "#46e6a0"], ["Fat", t.f, "#ffb454"], ["Carbs", t.c, "#5db4ff"]].map(([l, g, c]) => (
+              <div key={l} style={{ flex: 1, border: `1px solid ${line}`, borderRadius: 8, padding: "8px 10px" }}>
+                <div style={{ fontSize: 11, color: dim }}>{l}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: c }}>{g} g</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{ ...S.calcHint, marginTop: 8 }}>
+        Your maintenance is about {est.total.toLocaleString()} kcal: a starting estimate from your answers. Your weekly check-ins correct it from what you log.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy} onClick={onSave}>{busy ? "saving…" : "SAVE MY TARGETS →"}</button>
+        <button style={{ ...S.ghostBtn, flex: 1 }} onClick={onBack}>back</button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ONBOARDING — tour, setup and one-time tips (owner's design, Nov 2026;
+   docs/proposals/onboarding.md in RepReport). Flags live on the account's
+   user_metadata (mealprep_onboarding), so they follow the account across
+   devices; accounts that already had data are marked as having seen it all.
+   ============================================================ */
+const ONBOARDING_ALL_SEEN = {
+  v: 1, tour: true, setup: true,
+  tips: { checkin: true, copyMeal: true, pace: true, firstTargets: true, planPhase: true, cut: true },
+  banners: { pace: true, maintenance: true },
+};
+const PACE_HINT = "Starts at Meal Prep's default pace. Already have a pace in mind? Change it on the calendar";
+
+// One-time tip overlay: the frame RepReport's TipSequence uses, in Meal Prep's colors.
+function TipCard({ kicker = "HOW IT WORKS", title, caption, body, children, button = "GOT IT", onDone, step = null, total = null, onSkip = null }) {
+  return (
+    <div style={{ ...S.modalWrap, zIndex: 60 }}>
+      <div style={{ ...S.modal, maxWidth: 380, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 16 }}>
+            <span>{step ? `STEP ${step} / ${total}` : kicker}</span>
+            {onSkip && <button style={{ background: "none", border: "none", color: dim, fontSize: 10, letterSpacing: 2, fontWeight: 700, cursor: "pointer", padding: 0 }} onClick={onSkip}>SKIP</button>}
+          </div>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 22, lineHeight: 1.15, color: text, marginBottom: 14 }}>{title}</div>
+          {children && <div style={{ pointerEvents: "none" }}>{children}</div>}
+          {caption && <div style={{ ...S.calcHint, marginTop: 8 }}>{caption}</div>}
+          {body && <p style={{ color: text, fontSize: 14, lineHeight: 1.55, margin: "14px 0 0" }}>{body}</p>}
+          {step && (
+            <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 20 }}>
+              {Array.from({ length: total }, (_, i) => (
+                <div key={i} style={{ height: 4, borderRadius: 4, width: i === step - 1 ? 22 : 6, background: i === step - 1 ? accent : line }} />
+              ))}
+            </div>
+          )}
+          <button style={{ ...S.primaryBtn, width: "100%", marginTop: 18 }} onClick={onDone}>{button}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// a looping two-state demo: false, then true, then back
+function useFlip(ms = 1800) {
+  const [on, setOn] = useState(false);
+  useEffect(() => { const t = setInterval(() => setOn((v) => !v), ms); return () => clearInterval(t); }, [ms]);
+  return on;
+}
+
+const TOUR_TARGET = { p: 131, f: 79, c: 401, cal: 2840 }; // the calculator for 180 lb, 20 y, 5'10", some walking, 4 lifting days
+const TOUR_BEFORE = { p: 40, f: 31, c: 109, cal: 875 };   // breakfast logged
+const TOUR_AFTER = { p: 85, f: 40, c: 190, cal: 1460 };   // + lunch: 6 oz chicken, 1.5 cups rice (45 P, 9 F, 81 C, 585 kcal)
+
+function TourTargetsDemo() {
+  return (
+    <div style={{ ...S.dash, margin: 0 }}>
+      <div style={S.dashHead}><span style={S.dashLabel}>TARGETS</span><span style={{ fontSize: 13, color: text }}>Maintenance (diet phase)</span></div>
+      <MacroBars total={TOUR_AFTER} target={TOUR_TARGET} />
+    </div>
+  );
+}
+
+function TourLogDemo() {
+  const done = useFlip(2000);
+  return (
+    <>
+      <div style={{ ...S.dash, margin: "0 0 10px" }}><MacroBars total={done ? TOUR_AFTER : TOUR_BEFORE} target={TOUR_TARGET} /></div>
+      <div style={{ ...S.slot, ...(done ? S.slotLogged : {}), marginBottom: 0 }}>
+        <div style={S.slotHead}>
+          <span style={{ ...S.checkBtn, ...(done ? S.checkBtnOn : {}), display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{done ? "✓" : ""}</span>
+          <span style={{ ...S.slotName, borderBottom: "none" }}>Lunch</span>
+          <span style={S.slotMacros}>585 kcal · 45P · 9F · 81C</span>
+        </div>
+        {[["6", "oz", "Chicken breast", "210 · 39P"], ["1.5", "cup", "White rice", "375 · 6P"]].map(([q, u, n, m]) => (
+          <div key={n} style={S.entry}>
+            <span style={{ ...S.qty, display: "inline-block" }}>{q}</span>
+            <span style={S.entryUnit}>{u}</span>
+            <span style={S.entryName}>{n}</span>
+            <span style={S.entryMacros}>{m}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// 14 mornings at maintenance (±0.8 lb of water around 180); the heavy morning
+// is 182.0. The line is the trend Meal Prep actually fits (weightTrend).
+const TOUR_WEIGHTS = [180.4, 179.4, 180.8, 179.8, 180.1, 179.2, 180.5, 179.7, 180.6, 179.5, 180.2, 179.3, 180.3];
+function TourTrendDemo() {
+  const heavy = useFlip(2200);
+  const pts = [...TOUR_WEIGHTS, heavy ? 182.0 : 180.2];
+  const today = todayISO();
+  const t = weightTrend(pts.map((w, i) => ({ date: addDaysISO(today, i - 13), weight: w })), today);
+  const perDay = t.ready ? ((t.pctPerWeek / 100) * t.avg) / 7 : 0;
+  const fit = (i) => (t.ready ? t.avg : 180) + perDay * (i - 6.5);
+  const W = 300, H = 90, lo = 178.5, hi = 182.5;
+  const x = (i) => 10 + i * ((W - 20) / 13), y = (w) => H - 8 - ((w - lo) / (hi - lo)) * (H - 16);
+  const row = (k, v, sub) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "7px 0", borderTop: `1px solid ${line}` }}>
+      <span style={{ fontSize: 12, color: dim }}>{k}</span>
+      <span style={{ fontSize: 14, color: text, fontWeight: 600 }}>{v}{sub && <span style={{ color: dim, fontWeight: 400 }}> {sub}</span>}</span>
+    </div>
+  );
+  return (
+    <div style={{ ...S.dash, margin: 0, padding: "12px 14px" }}>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+        <line x1={x(0)} x2={x(13)} y1={y(fit(0))} y2={y(fit(13))} stroke={PHASE_COLORS.maintenance} strokeWidth="2" strokeDasharray="5 4" opacity="0.8" />
+        {pts.map((w, i) => <circle key={i} cx={x(i)} cy={y(w)} r={i === 13 ? 5 : 3.5} fill={i === 13 ? "#ffb454" : dim} />)}
+      </svg>
+      {row("Today's weigh-in", heavy ? "182.0 lb" : "180.2 lb", heavy ? "(+1.7 overnight)" : "")}
+      {row("Trend, last 2 weeks", "Holding steady")}
+      {row("Your targets", "2,840 kcal", "· no change")}
+    </div>
+  );
+}
+
+// Card 4, connected: the real goal line for their own block at each phase's default pace.
+function TourGoalDemo({ goal }) {
+  const PH = [
+    ["Maintenance", "maintenance", { type: "maintenance", kind: "maintenance", targetPct: null, pacePct: null }],
+    ["Bulk", "surplus", { type: "surplus", kind: "surplus", targetPct: 1 / WEEKS_PER_MONTH, pacePct: null }],
+    ["Cut", "deficit", { type: "deficit", kind: "deficit", targetPct: -0.7, pacePct: 0.7 }],
+  ];
+  const [i, setI] = useState(0);
+  useEffect(() => { const t = setInterval(() => setI((n) => (n + 1) % PH.length), 2200); return () => clearInterval(t); }, []);
+  const [, , phase] = PH[i];
+  const line1 = goalCheck(goal, phase)?.summary;
+  return (
+    <div style={{ ...S.dash, margin: 0, padding: "12px 14px" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {PH.map(([n, t], k) => (
+          <div key={n} style={{ flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8, fontSize: 13, fontWeight: 600,
+            border: `1px solid ${k === i ? PHASE_COLORS[t] : line}`, color: k === i ? PHASE_COLORS[t] : dim }}>{n}</div>
+        ))}
+      </div>
+      <div style={{ fontSize: 14, lineHeight: 1.5, color: text }}>{line1} <span style={{ color: dim }}>(your RepReport block)</span></div>
+    </div>
+  );
+}
+
+function TourSetsPicture() {
+  const big = (from, to, label, color) => (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 6 }}>
+      <span style={{ fontSize: 22, fontWeight: 800, color: dim, textDecoration: "line-through" }}>{from}</span>
+      <span style={{ color: dim }}>→</span>
+      <span style={{ fontSize: 30, fontWeight: 800, color }}>{to}</span>
+      <span style={{ fontSize: 10, letterSpacing: 1.5, color: dim, fontWeight: 700 }}>{label}</span>
+    </div>
+  );
+  return (
+    <div style={{ ...S.dash, margin: 0, padding: "12px 14px" }}>
+      <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700 }}>MOST CHEST SETS A WEEK</div>
+      {big(20, 18, "CUT", PHASE_COLORS.deficit)}
+      {big(20, 21, "BULK", PHASE_COLORS.surplus)}
+    </div>
+  );
+}
+
+// The 4-card tour. training: RepReport's status (null = no RepReport data).
+function MealPrepTour({ training, onDone }) {
+  const [step, setStep] = useState(1);
+  const next = () => (step < 4 ? setStep(step + 1) : onDone());
+  const common = { step, total: 4, onSkip: onDone, onDone: next, button: step < 4 ? "NEXT →" : "SET UP →" };
+  if (step === 1) return (
+    <TipCard {...common} title="Targets that follow the scale." caption="Example targets, partway through the day."
+      body="Meal Prep sets your daily targets from a few quick questions about you and your training, then adjusts them to what your weight actually does.">
+      <TourTargetsDemo />
+    </TipCard>
+  );
+  if (step === 2) return (
+    <TipCard {...common} title="Check off a meal to log it." caption="One tap logs the whole meal."
+      body="Plan your usual meals once, then check each one off as you eat it. Next week, copy a meal over from its ⋮ menu.">
+      <TourLogDemo />
+    </TipCard>
+  );
+  if (step === 3) return (
+    <TipCard {...common} title="Reads your trend, not one weigh-in." caption="A heavy morning: one dot jumps, the trend barely moves, and your targets stay put."
+      body="Your weight bounces day to day with water and food. Meal Prep follows the trend across two weeks of weigh-ins, so one heavy morning doesn't change your plan. Weigh in most mornings, 4 or more a week.">
+      <TourTrendDemo />
+    </TipCard>
+  );
+  if (training) return (
+    <TipCard {...common} title="Connected to RepReport." caption={training.goal ? "What each diet phase means for your current RepReport block." : null}
+      body="Your diet phase goes to RepReport, which plans your sets around it. Meal Prep gets your lifting days, your light weeks on the calendar, and, on a cut, whether your lifts are holding up.">
+      {training.goal ? <TourGoalDemo goal={training.goal} /> : null}
+    </TipCard>
+  );
+  return (
+    <TipCard {...common} title="Lift with RepReport?" caption="Chest at 180 lb: week 12 of a 12-week cut losing about 1 lb a week, or week 16 of a 16-week bulk gaining about 1.8 lb a month."
+      body={<>RepReport is our training app. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email. On a cut, it adds new sets slower and lowers the most sets each muscle can get. On a bulk, it raises them. Meal Prep works fully on its own.</>}>
+      <TourSetsPicture />
+    </TipCard>
+  );
+}
+
+// The three phase choices, shared by setup and the "What's next?" card. The
+// pace hint shows under Gaining or Losing once tapped, every time.
+function PhaseChoices({ options, picked, onPick, hintSuffix = " after setup." }) {
+  return options.map(([t, label, sub]) => {
+    const on = picked === t;
+    return (
+      <button key={t} onClick={() => onPick(t)}
+        style={{ display: "block", width: "100%", textAlign: "left", background: on ? "rgba(255,255,255,0.03)" : "transparent", cursor: "pointer",
+          border: `1px solid ${on ? PHASE_COLORS[t] : line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 8, color: text, fontFamily: "inherit" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ width: 18, height: 18, borderRadius: "50%", border: `2px solid ${on ? PHASE_COLORS[t] : dim}`, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            {on && <span style={{ width: 8, height: 8, borderRadius: "50%", background: PHASE_COLORS[t] }} />}
+          </span>
+          <span style={{ fontSize: 15, fontWeight: 600 }}>{label}</span>
+          <span style={{ fontSize: 13, color: dim }}>{sub}</span>
+        </div>
+        {on && t !== "maintenance" && <div style={{ ...S.calcHint, marginTop: 8, marginLeft: 30, fontSize: 12 }}>{PACE_HINT}{hintSuffix}</div>}
+      </button>
+    );
+  });
+}
+const SETUP_OPTIONS = [["maintenance", "Holding my weight", "maintenance"], ["surplus", "Gaining", "a bulk"], ["deficit", "Losing", "a cut"]];
+
+// Setup step 1: required, nothing preselected, no numbers.
+function SetupPhaseChoice({ onContinue }) {
+  const [picked, setPicked] = useState(null);
+  return (
+    <div style={{ ...S.modalWrap, zIndex: 60 }}>
+      <div style={{ ...S.modal, maxWidth: 380, width: "100%" }}>
+        <div style={{ padding: 22 }}>
+          <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 18 }}>SETUP · STEP 1 / 4</div>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 22, lineHeight: 1.15, color: text, marginBottom: 16 }}>What are you doing right now?</div>
+          <PhaseChoices options={SETUP_OPTIONS} picked={picked} onPick={setPicked} />
+          <p style={{ ...S.note, fontSize: 12, margin: "14px 0 0" }}>
+            You can change the pace and length any time on the calendar. Cutting is optional. Meal Prep is not medical advice. If you have a history of disordered eating, talk to a professional before changing how you eat.
+          </p>
+          <button style={{ ...S.primaryBtn, width: "100%", marginTop: 18, opacity: picked ? 1 : 0.4 }} disabled={!picked} onClick={() => onContinue(picked)}>CONTINUE →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// After setup's targets: what to expect, then the first weigh-in. The pace
+// line follows their phase: about 2 weeks at maintenance, 3 on a cut (day
+// 20), 4 on a bulk (its monthly trend).
+function SetupWhatsNext({ phaseType, onContinue }) {
+  const paceWhen = phaseType === "deficit" ? "In about 3 weeks" : phaseType === "surplus" ? "In about 4 weeks" : "In about 2 weeks";
+  const stops = [
+    ["Today", "Your starting targets"],
+    ["Every Monday", "A quick check-in: tick the days you fully logged"],
+    [paceWhen, "Your pace, from your weigh-ins"],
+    ["In 2–3 weeks", "Your real maintenance, and your first suggested targets"],
+  ];
+  return (
+    <div style={{ ...S.modalWrap, zIndex: 60 }}>
+      <div style={{ ...S.modal, maxWidth: 380, width: "100%" }}>
+        <div style={{ padding: 22 }}>
+          <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 18 }}>ALMOST DONE</div>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 22, color: text, marginBottom: 16 }}>What comes next</div>
+          <div style={{ ...S.dash, margin: 0, padding: "14px 14px 4px" }}>
+            {stops.map(([when, what], i) => (
+              <div key={when + i} style={{ display: "flex", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                  <span style={{ width: 12, height: 12, borderRadius: "50%", marginTop: 3, background: i === 0 ? accent : "transparent", border: `2px solid ${i === 0 ? accent : dim}` }} />
+                  {i < stops.length - 1 && <span style={{ flex: 1, width: 2, background: line, margin: "3px 0" }} />}
+                </div>
+                <div style={{ paddingBottom: 14 }}>
+                  <div style={{ fontSize: 10, letterSpacing: 1.5, color: i === 0 ? accent : dim, fontWeight: 700 }}>{when.toUpperCase()}</div>
+                  <div style={{ fontSize: 14, color: text, marginTop: 2, lineHeight: 1.4 }}>{what}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ ...S.calcHint, marginTop: 8 }}>If you log and weigh in most days.</div>
+          <p style={{ color: text, fontSize: 14, lineHeight: 1.55, margin: "14px 0 0" }}>
+            Calorie formulas can be off by a couple hundred calories a day. Meal Prep learns what you actually burn from your food logs and weigh-ins, and sets your targets from that.
+          </p>
+          <button style={{ ...S.primaryBtn, width: "100%", marginTop: 18 }} onClick={onContinue}>LOG TODAY'S WEIGH-IN →</button>
+        </div>
       </div>
     </div>
   );
