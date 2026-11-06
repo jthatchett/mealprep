@@ -111,12 +111,12 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 - **Needs:** at least 10 complete logged days, 8 weigh-in days, and 2 weeks of weight data.
 - **Raw estimate:** average calories on counted days, minus the energy of the weight change (about 3,500 kcal per lb, a standard approximation).
 - **Each check-in moves 30% of the way toward the new raw estimate, and never more than ±150 kcal.** One odd week can't swing your targets.
-- **Except the first one with enough data, when the estimate so far is only a starting guess: it moves 60%, at most ±300 kcal.** A calculator guess is only good to about ±10%, so it shouldn't hold your own data back for weeks; not 100%, because early data is the noisiest (logging habits settling, water shifts from a diet change). Example: guess 2,650, first reading 2,227 → 2,396 in one step (it was 2,523 under the 30% rule). *(Owner's choice, Nov 2026)*
+- **Except the first one with enough data, when the estimate so far is only a starting guess: your own data replaces the guess outright.** A calculator guess is only good to about ±10%, so it shouldn't hold you back from your real maintenance for weeks. That week's calories still move at most ±300 kcal; later check-ins close any rest. *Example:* guess 2,840, first reading 3,050 → estimate 3,050, calories +210. *(Owner's choice, Nov 2026, over a 60% step that left the guess pulling for several more weeks)*
 - **Faster when the data agrees:** after that first one, when last week's check-in and this week's both put your maintenance on the same side of the estimate, the move is 50%, at most ±250 kcal. *Example:* estimate 2,500; last week's data said 2,300 (estimate → 2,440); this week's says 2,250 → 2,345, where 30% would give 2,383. A one-off spike never gets the faster step, and neither does the week after an Adjust (see next). *(Owner's choice, Oct 2026)*
 - **Your Adjust sticks:** choosing Adjust makes the calories you picked the new estimate (less what the phase's target pace adds), so the next check-in starts from your number instead of pulling you back. *Example:* at maintenance with the estimate at 2,500, you Adjust to 2,150; with next week's data at 2,300, it suggests 2,195, not ~2,390. *(Owner's choice, Oct 2026)*
 - **Starting point:** your Maintenance target's calories, if you've set them yourself rather than keeping the example.
 
-*(App's choice for the window, minimums, 30% and ±150; owner's choice for 60%/±300, 50%/±250 and Adjust sticking)*
+*(App's choice for the window, minimums, 30% and ±150; owner's choice for replacing the first guess, 50%/±250 and Adjust sticking)*
 
 **Which days count:**
 - A day counts if you logged food.
@@ -132,7 +132,7 @@ Shown on Monday, or later that week if you missed it, until you complete it:
 The card keeps it short: which days count, the estimate's change this week (old → new), and the suggested targets. It doesn't show the raw 3-week number on its own, since that single reading swings with water weight; the estimate only moves part way toward it. *(Owner's request, Nov 2026)*
 
 **Suggested targets:**
-- **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in (±300 on that first data-based check-in, so the bigger estimate step isn't cut short).
+- **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in (±300 on that first data-based check-in, when the estimate jumps to your own data).
 - **A warning appears** if the result implies losing more than 1% of bodyweight a week.
 - **Suggestions only appear once the estimate rests on your own data,** never on the starting guess alone.
 

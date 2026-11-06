@@ -829,14 +829,33 @@ async function sbAddMaintenanceAfter(session, rows, row, presets, weeks) {
   const start = addDaysISO(row.planned_end_date, 1);
   const prev = precedingBlock([...(rows || []).filter((r) => r.id !== row.id), { ...row, end_date: row.planned_end_date }], start);
   const len = weeks || prev?.maintenanceWeeks;
-  if (!len) return;
   const next = (rows || [])
     .filter((r) => r.id !== row.id && r.start_date > row.start_date)
     .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0];
   if (next && next.start_date <= start) return;
-  let planned = addDaysISO(start, len * 7 - 1);
-  if (next && planned >= next.start_date) planned = addDaysISO(next.start_date, -1);
+  // A mini-cut gets no planned maintenance (it goes back into the bulk), but
+  // with nothing planned after it, it mustn't stay a deficit: maintenance
+  // until the next phase is chosen (owner's call, Nov 2026).
+  let planned = len ? addDaysISO(start, len * 7 - 1) : null;
+  if (next && (!planned || planned >= next.start_date)) planned = addDaysISO(next.start_date, -1);
+  if (!len && next) return; // the bulk (or another phase) is already planned after the mini-cut
   await sbInsertDietPhase(session, { preset: maint, start_date: start, planned_end_date: planned });
+}
+
+// A cut, mini-cut or bulk past its planned end with nothing after it (its
+// maintenance deleted, say) switches to maintenance: ended yesterday, open-ended
+// maintenance from today. Checked when the app opens. Returns true if it changed
+// anything. (Owner's call, Nov 2026)
+async function sbEndOverrunningPhase(session, rows, presets) {
+  const today = todayISO();
+  const cur = phaseOnDate(rows, today);
+  if (!cur || cur.phase_type === "maintenance" || !cur.planned_end_date || cur.planned_end_date >= today) return false;
+  const maint = maintenancePreset(presets);
+  if (!maint) return false;
+  const start = addDaysISO(cur.planned_end_date, 1) > today ? addDaysISO(cur.planned_end_date, 1) : today;
+  await sbUpdateDietPhase(session, cur.id, { end_date: addDaysISO(start, -1) });
+  await sbInsertDietPhase(session, { preset: maint, start_date: start, planned_end_date: null });
+  return true;
 }
 
 // The maintenance phase planned right after `row` (start = its planned end
@@ -881,9 +900,7 @@ async function sbSwitchDietPhase(session, preset, rows, presets) {
     if (current) await sbUpdateDietPhase(session, current.id, { end_date: addDaysISO(today, -1) });
     await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
   }
-  if (!isMiniCut(preset.phase_type, preset.name)) {
-    await sbAddMaintenanceAfter(session, rows.filter((r) => r !== current || current.start_date !== today), { id: null, ...fields }, presets);
-  }
+  await sbAddMaintenanceAfter(session, rows.filter((r) => r !== current || current.start_date !== today), { id: null, ...fields }, presets);
 }
 
 // fetch every weigh-in, oldest first — today's prompt check, the two-week
@@ -1024,10 +1041,12 @@ const EST_STEP_AGREE = 0.5;
 const EST_MAX_STEP_AGREE = 250;
 const CHECKIN_MAX_CHANGE = 250;       // a check-in moves daily calories at most ±250
 // The first check-in with enough data, when the estimate so far is only a
-// starting guess (calculator or typed in, ~±10%): the guess deserves little
-// weight, so it moves further. Later check-ins use the steps above.
-const EST_FIRST_STEP = 0.6;
-const EST_FIRST_MAX_STEP = 300;       // also the calorie limit that week, so the move isn't capped again
+// starting guess (calculator or typed in, ~±10%): your own data replaces the
+// guess outright, so the guess can't hold you back for weeks (owner's call,
+// Nov 2026, over a 60% step). Later check-ins use the steps above.
+const EST_FIRST_STEP = 1;
+const EST_FIRST_MAX_STEP = Infinity;
+const FIRST_CHECKIN_MAX_CHANGE = 300; // that week's calories still move at most ±300
 const TREND_ALPHA = 0.1;              // smoothing for the trend-weight line
 const lbToKg = (lb) => lb / 2.2046;
 
@@ -1936,6 +1955,8 @@ function ConsentScreen({ session, onConfirmed, onSignOut }) {
 export default function App() {
   const [tab, setTab] = useState("plan");
   const [store, setStore] = useState(null); // { foods, phases, week } — atomic
+  const storeRef = useRef(null); // the latest store, for async checks outside render
+  storeRef.current = store;
   const [loaded, setLoaded] = useState(false);
   // The date being viewed in Plan. Each week has its own Mon–Sun plan (see
   // planFor), so a date resolves to its weekday in that week's plan; the
@@ -2393,7 +2414,16 @@ export default function App() {
       if (trainingStatus.status === "fulfilled") setTraining(trainingStatus.value);
       else dbg("training status load FAILED: " + trainingStatus.reason?.message);
       const failed = [];
-      if (phases.status === "fulfilled") setDietPhases(phases.value);
+      if (phases.status === "fulfilled") {
+        let rows = phases.value;
+        // a cut, mini-cut or bulk past its planned end with nothing after it
+        // switches to maintenance (owner's call, Nov 2026)
+        try {
+          if (await sbEndOverrunningPhase(session, rows, storeRef.current?.phases || [])) rows = await sbLoadDietPhases(session);
+        } catch (e) { dbg("overrun switch FAILED: " + e.message); }
+        if (cancelled) return;
+        setDietPhases(rows);
+      }
       else { failed.push("diet phases"); dbg("diet phase load FAILED: " + phases.reason?.message); }
       if (weights.status === "fulfilled") {
         dailyCheckDayRef.current = day;
@@ -2535,7 +2565,7 @@ export default function App() {
     // weigh-ins (this week's, or an earlier check-in's), never on a guess
     const grounded = raw.raw != null || sorted.some((c) => c.estimate_raw != null);
     const suggestion = followed && estimate != null && grounded
-      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: firstData ? EST_FIRST_MAX_STEP : CHECKIN_MAX_CHANGE })
+      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: firstData ? FIRST_CHECKIN_MAX_CHANGE : CHECKIN_MAX_CHANGE })
       : null;
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
@@ -3393,7 +3423,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             ? <><span style={{ color: dim }}>{Math.round(c.prior).toLocaleString()} →</span> <b>{Math.round(c.estimate).toLocaleString()} kcal</b> <span style={{ color: dim }}>({signed(c.estimate - c.prior)})</span></>
             : <b>{Math.round(c.estimate).toLocaleString()} kcal</b>}
           <div style={S.ciSub}>From what you ate and how your weight moved over the last 3 weeks. {c.firstData
-            ? "Your first estimate from your own data, so it moves further than usual this week; after this it moves a little each week."
+            ? "Your first estimate from your own data, so it replaces the starting guess; after this it moves a little each week."
             : c.agrees
             ? "It moved further than usual because last week's data pointed the same way."
             : "It moves a little each week, so one odd stretch (like a water-weight jump) can't swing it."}</div>
@@ -3655,6 +3685,25 @@ function dietBreakNote({ phase, today, deload, trainingGoal }) {
   return `This cut has run ${weeks} weeks. A 1–2 week break at maintenance is an option; studies find about the same fat loss either way.${when}`;
 }
 
+// The first day the phase card shows a pace for the phase covering today, or
+// null when it needn't wait: day 20 of the phase (its trend then starts after
+// the first week's water swing), day 28 for a bulk's monthly trend. Waits on
+// any cut, and on any phase that follows a different one. A run of back-to-back
+// rows of the same type counts from the first.
+function paceStartsOn(rows, phase, monthly) {
+  if (!phase) return null;
+  const sorted = [...(rows || [])].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+  let start = phase.start_date;
+  let prev = null;
+  for (let i = sorted.indexOf(phase) - 1; i >= 0; i--) {
+    const r = sorted[i];
+    if (r.phase_type === phase.phase_type && addDaysISO(r.end_date || r.planned_end_date || addDaysISO(start, -1), 1) >= start) { start = r.start_date; continue; }
+    prev = r; break;
+  }
+  if (!prev && phase.phase_type !== "deficit") return null;
+  return addDaysISO(start, monthly ? 27 : 19);
+}
+
 function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
@@ -3693,7 +3742,12 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   // weekly phases keep the last trend through a gap in weigh-ins, as the
   // volume note does, so the two never disagree
   const last = !monthly && !trend.ready ? latestTrendRate(bwLog, today) : null;
-  const actual = trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
+  // After a change of phase (and on any cut), the first week's water swing
+  // would read as a pace: the verdict waits until this phase has its own
+  // trend, day 20 (a bulk's monthly trend: day 28). (Owner's call, Nov 2026)
+  const paceFrom = paceStartsOn(dietPhases, phase, monthly);
+  const paceWaiting = !!paceFrom && today < paceFrom;
+  const actual = paceWaiting ? null : trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
   const actualAge = trend.ready ? 0 : last?.age ?? null;
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
@@ -3727,7 +3781,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const targetShort = phase.phase_type === "maintenance" ? "hold ±0.25%" : `${sign(targetPct, 2)}%`;
   // what's still needed before there's a pace to show
   let weighPrompt = null;
-  if (actual == null) {
+  if (paceWaiting) {
+    weighPrompt = `Your pace shows from ${shortDate(paceFrom)}, once this ${phase.phase_type === "deficit" ? (isMiniCut(phase.phase_type, phase.phase_name) ? "mini-cut" : "cut") : phase.phase_type === "surplus" ? "bulk" : "phase"} has its own weigh-ins (the first week after a change is mostly water).`;
+  } else if (actual == null) {
     const now = Math.min(trend.recentCount, TREND_MIN_WEIGHINS);
     const before = Math.min(monthly ? trend.oldCount : trend.priorCount, TREND_MIN_WEIGHINS);
     const more = TREND_MIN_WEIGHINS - now;
@@ -4072,7 +4128,13 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
   // the maintenance a cut/bulk gets after it, and the phase (other than
   // that maintenance) already planned to start by then, if any
   const typedBlock = preset && (preset.phase_type === "deficit" || preset.phase_type === "surplus") && !isMiniCut(preset.phase_type, preset.name);
-  const plannedEnd = form.openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
+  // every cut has an end date: open-ended is for maintenance and bulks (owner's call, Nov 2026)
+  const canOpenEnd = !preset || preset.phase_type !== "deficit";
+  const openEnded = form.openEnded && canOpenEnd;
+  const plannedEnd = openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
+  // a mini-cut with nothing planned after it switches to maintenance at its end
+  const miniThenMaint = preset && isMiniCut(preset.phase_type, preset.name) && plannedEnd
+    && !dietPhases.some((r) => r.id !== editingId && r.start_date > form.start && r.start_date <= addDaysISO(plannedEnd, 1));
   const autoMaint = typedBlock && plannedEnd ? suggestedMaintenanceWeeks(preset.phase_type, preset.name, weeksValue) : null;
   const ownMaint = mode === "edit" ? followingMaintenance(dietPhases, covering) : null;
   const blockedBy = autoMaint
@@ -4208,16 +4270,18 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
         <label style={{ fontSize: 12, color: dim, width: 64 }}>weeks</label>
         <input
           type="number" min="1" inputMode="numeric"
-          disabled={form.openEnded}
+          disabled={openEnded}
           placeholder={defaultWeeks ? String(defaultWeeks) : "—"}
           value={form.weeks}
           onChange={(e) => setForm({ ...form, weeks: e.target.value })}
           style={{ ...S.fInput, flex: 1 }}
         />
-        <label style={{ fontSize: 12, color: dim, display: "flex", gap: 4, alignItems: "center" }}>
-          <input type="checkbox" checked={form.openEnded} onChange={(e) => setForm({ ...form, openEnded: e.target.checked })} />
-          open-ended
-        </label>
+        {canOpenEnd && (
+          <label style={{ fontSize: 12, color: dim, display: "flex", gap: 4, alignItems: "center" }}>
+            <input type="checkbox" checked={form.openEnded} onChange={(e) => setForm({ ...form, openEnded: e.target.checked })} />
+            open-ended
+          </label>
+        )}
       </div>
       <div style={{ fontSize: 12, color: dim, marginBottom: 10 }}>
         {plannedEnd ? `planned end: ${plannedEnd}` : "no planned end — runs until the next phase starts"}
@@ -4225,7 +4289,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
           ? blockedBy
             ? ` · ${blockedBy.phase_name} is already planned right after, so no maintenance is added (suggested: ~${autoMaint} wk)`
             : ` · then ~${autoMaint} wk maintenance is added after it`
-          : ""}
+          : miniThenMaint ? " · then maintenance until you pick what's next" : ""}
       </div>
       {planItems.map((it) => (
         <div key={`${it.id}-${it.start}`} style={{ fontSize: 12, color: "#ffb454", marginBottom: 8 }}>▲ {it.text}</div>
