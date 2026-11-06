@@ -73,14 +73,15 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
 *(Research-backed ranges: Helms 2014 for 0.5–1%/week on a cut; Garthe 2011 for the fastest rate studied; Iraki 2019 for bulks. Mini-cut numbers are coaching practice.)*
 
 ### Planned length
-- **Defaults:** mini-cut 4 weeks, cut 12, bulk 16, maintenance open-ended. You can change each one. *(Coaching practice: RP norms)*
+- **Defaults:** mini-cut 4 weeks, cut 12, bulk 16, maintenance open-ended. You can change each one. *(Coaching practice: RP norms)* Only maintenance and bulks can be open-ended: every cut and mini-cut has an end date. *(Owner's choice, Nov 2026)*
 - **Maintenance after a block is added for you** when you plan a cut or bulk with an end date:
   - after a cut: about ⅔ of the cut's length
   - after a bulk: 2, 3 or 4 weeks, for bulks up to 8, up to 16, or longer
-  - after a mini-cut: none, because it goes straight back into the bulk
+  - after a mini-cut: none planned, because it goes straight back into the bulk. If nothing is planned after it, open-ended maintenance follows it, so it never stays a deficit by accident. *(Owner's choice, Nov 2026)*
   - after a cut or bulk that continues an earlier one (below), the length counts the whole run: 4 weeks after a 9-week bulk, a 4-week mini-cut and an 8-week bulk (17 weeks of bulk); about 11 after a 10-week cut, a 2-week diet break and a 6-week cut (16 weeks of cut). That's the length the training effect fades over, so the two always agree. *(Owner's choice, Oct 2026)*
 
   *(Coaching practice: RP Diet 2.0, Israetel, McDonald; no trial behind the exact lengths)*
+- **A plan never leaves you in a cut or bulk.** A cut, mini-cut or bulk found past its planned end with nothing after it (its maintenance deleted, say) is ended and followed by open-ended maintenance when the app opens. *(Owner's choice, Nov 2026)*
 - **Moving or skipping maintenance is your call.** Starting a cut or bulk without the suggested maintenance shows a one-line note, but never blocks you.
 - **Back-to-back blocks of the same type chain together** for the training-volume effect and RepReport's strength check ([section 7](#7-how-meal-prep-uses-repreport)). A short maintenance between two cuts works as a diet break: the effect pauses rather than resetting. The second cut chains when it starts before the first one's fade runs out (2/3 of its length, so about 6½ weeks after a 10-week cut), even if the scale stalled at the end of the first.
 - **A long cut offers a diet break.** Once the phase card's cut has run **12 weeks**, it adds: "This cut has run 13 weeks. A 1–2 week break at maintenance is an option; studies find about the same fat loss either way. Your next RepReport deload starts Nov 14." The deload part shows only with a running RepReport block. It counts from the current cut's own start, so a cut right after a break starts over; mini-cuts get no note. *(Trials used 2–3 weeks of dieting per break and found fat loss about the same as continuous dieting: MATADOR, Byrne et al. 2018; ICECAP, Peos et al. 2021. No study supports a specific interval, so 12 weeks, about two RepReport blocks, is the owner's choice, Oct 2026)*
@@ -92,6 +93,7 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
 
 - **Trend:** a straight line fitted through every weigh-in in the last **2 weeks**. It's ready only when each of those weeks has **4 or more weigh-ins**, since a single weigh-in swings 1–2% on water alone. RepReport uses the same rule. *(Coaching practice; 4 is the app's choice)*
 - **Bulks use 4 weeks:** the last 7 days and days 22–28 ago each need 4+ weigh-ins, and the rate is scaled to a month.
+- **After a change of phase, the pace waits for the new phase's own trend:** no verdict until day 20 (day 28 for a bulk's monthly trend), on any cut and on any phase that follows a different one. The first week after a change swings with water (lost starting a cut, regained coming off one), and the 2-week trend would also still read the phase before. Until then the card says when the pace will show. *Example:* coming off a cut at 172 lb, with 1.5 lb of water back in the first week and then flat, day 14 would read "Drifting up" (+0.42%/week); day 20 reads "Holding steady". *(Owner's choice, Nov 2026)*
 - **Pace on the phase card:**
   - **On pace:** within ±0.2%/week of target on a cut, or ±0.25%/month on a bulk.
   - **Off pace:** otherwise, shown as "Losing slower than target", "Not gaining yet", and similar.
