@@ -256,10 +256,13 @@ function phaseOnDate(rows, iso) {
 function phaseProgress(row, iso) {
   if (!row) return null;
   const week = Math.floor(daysBetween(row.start_date, iso) / 7) + 1;
-  const plannedWeeks = row.planned_end_date
+  // maintenance that runs past its planned end is just open-ended maintenance
+  // (owner's call, Nov 2026); a cut or bulk is switched to maintenance instead
+  const past = !!row.planned_end_date && iso > row.planned_end_date;
+  const plannedWeeks = row.planned_end_date && !(past && row.phase_type === "maintenance")
     ? Math.max(1, Math.round((daysBetween(row.start_date, row.planned_end_date) + 1) / 7))
     : null;
-  return { week, plannedWeeks, overrun: !!row.planned_end_date && iso > row.planned_end_date };
+  return { week, plannedWeeks, overrun: past && row.phase_type !== "maintenance" };
 }
 
 // default planned length by phase kind (RP-style norms, editable per phase):
@@ -322,6 +325,7 @@ const rateIsMonthly = (phaseType) => phaseType === "surplus";
 const roundRate = (n) => Math.round(n * 1e4) / 1e4;
 
 const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46e6a0" };
+const REPREPORT_AMBER = "#fbbf24"; // RepReport's accent, wherever its data shows in Meal Prep
 
 /* ---------- training volume impact (mirrors RepReport) ----------
    How much the diet phase is moving RepReport's recovery ceilings (MRV),
@@ -2573,7 +2577,9 @@ export default function App() {
       today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct,
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
       // nothing to check in on until there's an estimate (example targets, no data yet)
-      due: !!dietPhase && !!followed && !thisWeek && estimate != null,
+      // not until there's a logged day before today: a brand-new account's
+      // first check-in would have nothing to tick (owner's call, Nov 2026)
+      due: !!dietPhase && !!followed && !thisWeek && estimate != null && Object.entries(intakeByDate).some(([d, k]) => d < today && k > 0),
       card: shown ? { kcal: Number(shown.estimate), estimated: shown.estimate_raw != null || sorted.some((c) => c.estimate_raw != null) } : startingGuess ? { kcal: startingGuess, estimated: false } : null,
     };
   }, [store, rangeIntake, intake, dayStatus, checkins, bwLog, dietPhase]);
@@ -3091,7 +3097,7 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)}
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
         strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
         trainingGoal={training?.active ? training.goal || null : null} />
 
@@ -3451,7 +3457,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
           </div>
           <div style={S.ciNotes}>
             {s.capped && <div>• Capped at ±{s.maxChange} kcal this week (the data points to {s.ideal.toLocaleString()}).</div>}
-            {s.proteinRaised && <div>• Protein raised to the {c.followed.phase_type === "deficit" ? "cut minimum (~2 g/kg bodyweight)" : "minimum (~1.6 g/kg)"}.</div>}
+            {s.proteinRaised && <div>• Protein raised to the {c.followed.phase_type === "deficit" ? "cut minimum (about 0.9 g per pound of bodyweight)" : "minimum (about 0.7 g per pound)"}.</div>}
             {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
             {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
             {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
@@ -3704,7 +3710,7 @@ function paceStartsOn(rows, phase, monthly) {
   return addDaysISO(start, monthly ? 27 : 19);
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -3862,6 +3868,8 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
       )}
       {projection && <div style={S.pcProj}>{projection}</div>}
 
+      {/* Training volume only means something with RepReport (owner's call, Nov 2026). */}
+      {hasRepReport && (<>
       {/* In a deload week the deload is what's happening to training, so it
           takes the place of the diet's percentage and explanation. */}
       <div style={S.viHead}>
@@ -3883,6 +3891,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
           {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
         </div>
       )}
+      </>)}
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
       {sv && (
         <div style={S.stBox}>
@@ -3910,9 +3919,15 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
           )}
         </div>
       )}
-      {trainingActive === false && (
-        <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>
+      {!hasRepReport && phase.phase_type === "deficit" && (
+        <div style={S.stBox}>
+          <div style={S.stHead}>Lifting during this cut?</div>
+          <div style={S.viNote}>RepReport plans your sets around it and shows whether your lifts are holding up, the clearest sign you're keeping muscle. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email.</div>
+        </div>
       )}
+      {hasRepReport && trainingActive === false && (phase.phase_type === "deficit"
+        ? <div style={{ ...S.viNote, color: text }}>No active RepReport block. Start one so your sets follow this cut and RepReport can check that your lifts hold up.</div>
+        : <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>)}
     </div>
   );
 }
@@ -4032,29 +4047,37 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
               const inMonth = iso.slice(0, 7) === cursor.slice(0, 7);
               const ph = phaseOnDate(dietPhases, iso);
               const color = ph ? PHASE_COLORS[ph.phase_type] : null;
-              const future = iso > today;
-              const overrun = ph && ph.planned_end_date && iso > ph.planned_end_date;
               const on = iso === (editMode ? editDay : selectedDate);
-              // the running RepReport block (from its goal status), deload in the accent color
+              // the running (or planned) RepReport block, from its goal status: an amber
+              // underline and the week of the block (DL for the light week)
               const blk = trainingGoal?.block;
               const inBlock = !!blk && iso >= blk.start && iso <= blk.end;
               const inDeload = inBlock && !!blk.deloadStart && iso >= blk.deloadStart;
+              const blockWeek = inBlock ? Math.floor(daysBetween(blk.start, iso) / 7) + 1 : null;
+              // past days dimmed, today onward bright (owner's call, Nov 2026)
+              const past = iso < today;
               return (
                 <button
                   key={iso}
                   onClick={() => (editMode ? setEditDay(iso) : onSelectDate(iso))}
                   style={{
                     ...S.monthCell,
+                    position: "relative",
                     opacity: inMonth ? 1 : 0.35,
-                    background: color ? color + (future ? "22" : "44") : panel2,
-                    border: overrun ? `1px dashed ${color}` : on ? `1px solid ${text}` : `1px solid transparent`,
+                    background: color ? color + (past ? "18" : "55") : panel2,
+                    border: on ? `1px solid ${text}` : `1px solid transparent`,
                     boxShadow: iso === today ? `inset 0 0 0 2px ${accent}` : "none",
                     color: on ? text : inMonth ? text : dim,
                     fontWeight: on ? 800 : 500,
                   }}
                 >
                   {parseISO(iso).getDate()}
-                  {inBlock && <span style={{ display: "block", height: 2, width: "60%", margin: "2px auto 0", background: inDeload ? accent : text, opacity: inDeload ? 1 : 0.45 }} />}
+                  {inBlock && (
+                    <>
+                      <span style={{ position: "absolute", top: 3, right: 4, fontSize: 8, fontWeight: 800, color: REPREPORT_AMBER, letterSpacing: 0.2 }}>{inDeload ? "DL" : `W${blockWeek}`}</span>
+                      <span style={{ display: "block", height: 3, width: "70%", margin: "2px auto 0", borderRadius: 2, background: REPREPORT_AMBER, opacity: inDeload ? 1 : 0.6 }} />
+                    </>
+                  )}
                 </button>
               );
             })}
@@ -4064,8 +4087,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
             {[["deficit", "cut"], ["maintenance", "maintenance"], ["surplus", "bulk"]].map(([k, lab]) => (
               <span key={k}><span style={{ color: PHASE_COLORS[k] }}>■</span> {lab}</span>
             ))}
-            <span>lighter = planned · dashed = past planned end</span>
-            {trainingGoal?.block && <span><span style={{ color: text, opacity: 0.45 }}>▬</span> RepReport block · <span style={{ color: accent }}>▬</span> deload</span>}
+            {trainingGoal?.block && <span><span style={{ color: REPREPORT_AMBER }}>▬</span> <span style={{ color: REPREPORT_AMBER, fontWeight: 600 }}>RepReport</span> block · DL = light week (deload)</span>}
           </div>
 
           <button
@@ -5747,7 +5769,7 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
                 </label>
               );
             })}
-            <div style={S.calcHint}>Protein ~2 g/kg on a cut, 1.6 g/kg otherwise; fat 20–25% of calories; carbs the rest. Untick any you want to keep as they are.</div>
+            <div style={S.calcHint}>Protein about 0.9 g per pound on a cut, 0.7 g per pound otherwise; fat 20–25% of calories; carbs the rest. Untick any you want to keep as they are.</div>
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy || !chosen.size} onClick={apply}>Save these targets</button>
               <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => setStep("form")}>back</button>
