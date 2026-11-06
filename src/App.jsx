@@ -256,10 +256,13 @@ function phaseOnDate(rows, iso) {
 function phaseProgress(row, iso) {
   if (!row) return null;
   const week = Math.floor(daysBetween(row.start_date, iso) / 7) + 1;
-  const plannedWeeks = row.planned_end_date
+  // maintenance that runs past its planned end is just open-ended maintenance
+  // (owner's call, Nov 2026); a cut or bulk is switched to maintenance instead
+  const past = !!row.planned_end_date && iso > row.planned_end_date;
+  const plannedWeeks = row.planned_end_date && !(past && row.phase_type === "maintenance")
     ? Math.max(1, Math.round((daysBetween(row.start_date, row.planned_end_date) + 1) / 7))
     : null;
-  return { week, plannedWeeks, overrun: !!row.planned_end_date && iso > row.planned_end_date };
+  return { week, plannedWeeks, overrun: past && row.phase_type !== "maintenance" };
 }
 
 // default planned length by phase kind (RP-style norms, editable per phase):
@@ -322,6 +325,7 @@ const rateIsMonthly = (phaseType) => phaseType === "surplus";
 const roundRate = (n) => Math.round(n * 1e4) / 1e4;
 
 const PHASE_COLORS = { deficit: "#ff8a5c", maintenance: "#7aa7ff", surplus: "#46e6a0" };
+const REPREPORT_AMBER = "#fbbf24"; // RepReport's accent, wherever its data shows in Meal Prep
 
 /* ---------- training volume impact (mirrors RepReport) ----------
    How much the diet phase is moving RepReport's recovery ceilings (MRV),
@@ -829,14 +833,33 @@ async function sbAddMaintenanceAfter(session, rows, row, presets, weeks) {
   const start = addDaysISO(row.planned_end_date, 1);
   const prev = precedingBlock([...(rows || []).filter((r) => r.id !== row.id), { ...row, end_date: row.planned_end_date }], start);
   const len = weeks || prev?.maintenanceWeeks;
-  if (!len) return;
   const next = (rows || [])
     .filter((r) => r.id !== row.id && r.start_date > row.start_date)
     .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0];
   if (next && next.start_date <= start) return;
-  let planned = addDaysISO(start, len * 7 - 1);
-  if (next && planned >= next.start_date) planned = addDaysISO(next.start_date, -1);
+  // A mini-cut gets no planned maintenance (it goes back into the bulk), but
+  // with nothing planned after it, it mustn't stay a deficit: maintenance
+  // until the next phase is chosen (owner's call, Nov 2026).
+  let planned = len ? addDaysISO(start, len * 7 - 1) : null;
+  if (next && (!planned || planned >= next.start_date)) planned = addDaysISO(next.start_date, -1);
+  if (!len && next) return; // the bulk (or another phase) is already planned after the mini-cut
   await sbInsertDietPhase(session, { preset: maint, start_date: start, planned_end_date: planned });
+}
+
+// A cut, mini-cut or bulk past its planned end with nothing after it (its
+// maintenance deleted, say) switches to maintenance: ended yesterday, open-ended
+// maintenance from today. Checked when the app opens. Returns true if it changed
+// anything. (Owner's call, Nov 2026)
+async function sbEndOverrunningPhase(session, rows, presets) {
+  const today = todayISO();
+  const cur = phaseOnDate(rows, today);
+  if (!cur || cur.phase_type === "maintenance" || !cur.planned_end_date || cur.planned_end_date >= today) return false;
+  const maint = maintenancePreset(presets);
+  if (!maint) return false;
+  const start = addDaysISO(cur.planned_end_date, 1) > today ? addDaysISO(cur.planned_end_date, 1) : today;
+  await sbUpdateDietPhase(session, cur.id, { end_date: addDaysISO(start, -1) });
+  await sbInsertDietPhase(session, { preset: maint, start_date: start, planned_end_date: null });
+  return true;
 }
 
 // The maintenance phase planned right after `row` (start = its planned end
@@ -881,9 +904,7 @@ async function sbSwitchDietPhase(session, preset, rows, presets) {
     if (current) await sbUpdateDietPhase(session, current.id, { end_date: addDaysISO(today, -1) });
     await sbInsertDietPhase(session, { preset, start_date: today, planned_end_date: planned });
   }
-  if (!isMiniCut(preset.phase_type, preset.name)) {
-    await sbAddMaintenanceAfter(session, rows.filter((r) => r !== current || current.start_date !== today), { id: null, ...fields }, presets);
-  }
+  await sbAddMaintenanceAfter(session, rows.filter((r) => r !== current || current.start_date !== today), { id: null, ...fields }, presets);
 }
 
 // fetch every weigh-in, oldest first — today's prompt check, the two-week
@@ -1024,10 +1045,12 @@ const EST_STEP_AGREE = 0.5;
 const EST_MAX_STEP_AGREE = 250;
 const CHECKIN_MAX_CHANGE = 250;       // a check-in moves daily calories at most ±250
 // The first check-in with enough data, when the estimate so far is only a
-// starting guess (calculator or typed in, ~±10%): the guess deserves little
-// weight, so it moves further. Later check-ins use the steps above.
-const EST_FIRST_STEP = 0.6;
-const EST_FIRST_MAX_STEP = 300;       // also the calorie limit that week, so the move isn't capped again
+// starting guess (calculator or typed in, ~±10%): your own data replaces the
+// guess outright, so the guess can't hold you back for weeks (owner's call,
+// Nov 2026, over a 60% step). Later check-ins use the steps above.
+const EST_FIRST_STEP = 1;
+const EST_FIRST_MAX_STEP = Infinity;
+const FIRST_CHECKIN_MAX_CHANGE = 300; // that week's calories still move at most ±300
 const TREND_ALPHA = 0.1;              // smoothing for the trend-weight line
 const lbToKg = (lb) => lb / 2.2046;
 
@@ -1936,6 +1959,8 @@ function ConsentScreen({ session, onConfirmed, onSignOut }) {
 export default function App() {
   const [tab, setTab] = useState("plan");
   const [store, setStore] = useState(null); // { foods, phases, week } — atomic
+  const storeRef = useRef(null); // the latest store, for async checks outside render
+  storeRef.current = store;
   const [loaded, setLoaded] = useState(false);
   // The date being viewed in Plan. Each week has its own Mon–Sun plan (see
   // planFor), so a date resolves to its weekday in that week's plan; the
@@ -1967,6 +1992,30 @@ export default function App() {
     } catch { /* the targets are saved either way */ }
   };
   const laterCalc = () => { setCalcLater(true); try { localStorage.setItem("mealprep:calc-later", "1"); } catch { /* private mode */ } };
+  // onboarding flags (user_metadata.mealprep_onboarding); null until decided
+  const [ob, setOb] = useState(null);
+  const [dietLoaded, setDietLoaded] = useState(false);
+  const [setup, setSetup] = useState(null); // { step: "phase" | "calc" | "next" | "weigh", type, weight }
+  const obRef = useRef(null); // the latest flags, so quick successive saves don't drop one another
+  const [tipOpen, setTipOpen] = useState(null);           // "pace" | "firstTargets", opened from a banner
+  const [whatsNextLater, setWhatsNextLater] = useState(false); // "later" on the What's next card, this visit
+  const cutStartedRef = useRef(false); // a cut started this visit: its tip waits for the next app open
+  const saveOb = async (next) => {
+    obRef.current = next;
+    setOb(next);
+    try {
+      const s2 = await sbUpdateUserMeta(session, { mealprep_onboarding: next });
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ access_token: s2.access_token, refresh_token: s2.refresh_token, user: s2.user }));
+    } catch (e) { dbg("onboarding flags save FAILED: " + e.message); }
+  };
+  // mark one or more flags seen: markOb(["tips", "pace"], ["banners", "pace"])
+  const markOb = (...pairs) => {
+    const cur = obRef.current;
+    if (!cur) return;
+    const next = { ...cur };
+    for (const [group, key] of pairs) next[group] = { ...(next[group] || {}), [key]: true };
+    saveOb(next);
+  };
   const [debugLog, setDebugLog] = useState([]);
   const [session, setSession] = useState(null);     // null = not yet checked
   const [sessionChecked, setSessionChecked] = useState(false);
@@ -2393,7 +2442,17 @@ export default function App() {
       if (trainingStatus.status === "fulfilled") setTraining(trainingStatus.value);
       else dbg("training status load FAILED: " + trainingStatus.reason?.message);
       const failed = [];
-      if (phases.status === "fulfilled") setDietPhases(phases.value);
+      if (phases.status === "fulfilled") {
+        let rows = phases.value;
+        // a cut, mini-cut or bulk past its planned end with nothing after it
+        // switches to maintenance (owner's call, Nov 2026)
+        try {
+          if (await sbEndOverrunningPhase(session, rows, storeRef.current?.phases || [])) rows = await sbLoadDietPhases(session);
+        } catch (e) { dbg("overrun switch FAILED: " + e.message); }
+        if (cancelled) return;
+        setDietPhases(rows);
+        setDietLoaded(true);
+      }
       else { failed.push("diet phases"); dbg("diet phase load FAILED: " + phases.reason?.message); }
       if (weights.status === "fulfilled") {
         dailyCheckDayRef.current = day;
@@ -2413,6 +2472,30 @@ export default function App() {
   }, [loaded, session, sideLoadNonce]);
 
   const reloadDietPhases = async () => setDietPhases(await sbLoadDietPhases(session));
+
+  // Onboarding: decided once the data is in. An account that already has
+  // real targets or a diet phase has been using the app: it skips it all.
+  useEffect(() => {
+    if (ob || !loaded || !store || !dietLoaded || !session) return;
+    const saved = session.user?.user_metadata?.mealprep_onboarding;
+    if (saved) { obRef.current = saved; setOb(saved); return; }
+    const hasHistory = (store.phases || []).some((p) => !p.example) || dietPhases.length > 0;
+    saveOb(hasHistory ? ONBOARDING_ALL_SEEN : { v: 1, tour: false, setup: false, tips: {}, banners: {} });
+  }, [ob, loaded, store, dietLoaded, session, dietPhases]);
+  // setup picks up where it left off (tour seen, setup not finished)
+  useEffect(() => { if (ob && ob.tour && !ob.setup && !setup) setSetup({ step: "phase" }); }, [ob, setup]);
+  const finishTour = () => { saveOb({ ...obRef.current, tour: true }); if (!obRef.current.setup) setSetup({ step: "phase" }); };
+  // setup step 3 saves the targets, then starts the phase they picked from today
+  const applySetup = async (targets, profile) => {
+    await applyCalc(targets, profile);
+    try {
+      const preset = presetForType(phases, setup.type);
+      if (preset) { await sbSwitchDietPhase(session, preset, dietPhases, phases); await reloadDietPhases(); }
+      if (setup.type === "deficit") cutStartedRef.current = true;
+    } catch (e) { dbg("setup phase FAILED: " + e.message); window.alert("Couldn't start your phase — " + e.message); }
+    setSetup({ ...setup, step: "next", weight: profile.weight_lb });
+  };
+  const finishSetup = () => { saveOb({ ...obRef.current, setup: true }); setSetup(null); };
 
   const switchPhase = async (preset) => {
     try {
@@ -2535,7 +2618,7 @@ export default function App() {
     // weigh-ins (this week's, or an earlier check-in's), never on a guess
     const grounded = raw.raw != null || sorted.some((c) => c.estimate_raw != null);
     const suggestion = followed && estimate != null && grounded
-      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: firstData ? EST_FIRST_MAX_STEP : CHECKIN_MAX_CHANGE })
+      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: firstData ? FIRST_CHECKIN_MAX_CHANGE : CHECKIN_MAX_CHANGE })
       : null;
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
@@ -2543,7 +2626,9 @@ export default function App() {
       today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct,
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
       // nothing to check in on until there's an estimate (example targets, no data yet)
-      due: !!dietPhase && !!followed && !thisWeek && estimate != null,
+      // not until there's a logged day before today: a brand-new account's
+      // first check-in would have nothing to tick (owner's call, Nov 2026)
+      due: !!dietPhase && !!followed && !thisWeek && estimate != null && Object.entries(intakeByDate).some(([d, k]) => d < today && k > 0),
       card: shown ? { kcal: Number(shown.estimate), estimated: shown.estimate_raw != null || sorted.some((c) => c.estimate_raw != null) } : startingGuess ? { kcal: startingGuess, estimated: false } : null,
     };
   }, [store, rangeIntake, intake, dayStatus, checkins, bwLog, dietPhase]);
@@ -2784,10 +2869,98 @@ export default function App() {
     );
   }
 
+  /* ---------- onboarding: what shows today (after setup) ---------- */
+  const obReady = !!ob?.setup;
+  const todayIso = todayISO();
+  const pace = obReady ? paceReading(dietPhases, bwLog, todayIso) : { ready: false };
+  const planDone = obReady ? planDoneInfo(dietPhases, todayIso) : null;
+  const showWhatsNext = !!planDone && !whatsNextLater && ob?.dismissed?.whatsNext !== planDone.key;
+  const baselineNote = showWhatsNext && planDone.kind === "plan" && training && (planDone.prevType === "deficit" || planDone.prevType === "surplus")
+    && Math.round(volumeImpactPct(dietPhaseContext(dietPhases, todayIso, bwLog))) === 0
+    ? `Your training is back to baseline: the most sets each muscle can get is back to normal after your ${planDone.prevType === "deficit" ? "cut" : "bulk"}.`
+    : null;
+  const pickNext = async (type) => {
+    if (type !== "maintenance") {
+      const preset = presetForType(phases, type);
+      if (preset) {
+        try { await sbSwitchDietPhase(session, preset, dietPhases, phases); await reloadDietPhases(); }
+        catch (e) { window.alert("Couldn't start it — " + e.message); return; }
+        if (type === "deficit") cutStartedRef.current = true;
+      }
+    }
+    saveOb({ ...obRef.current, dismissed: { ...(obRef.current?.dismissed || {}), whatsNext: planDone.key } });
+  };
+  // an open-ended maintenance or bulk running 8+ weeks with nothing planned after
+  const nudge = (() => {
+    if (!obReady || showWhatsNext || ob?.dismissed?.nudge || !dietPhase || dietPhase.phase_type === "deficit" || dietPhase.planned_end_date) return false;
+    if (dietPhases.some((r) => r.start_date > todayIso)) return false;
+    return daysBetween(dietPhase.start_date, todayIso) >= 56;
+  })();
+  const dismissNudge = () => saveOb({ ...obRef.current, dismissed: { ...(obRef.current?.dismissed || {}), nudge: true } });
+  const checkinTipDue = obReady && !!coaching?.due && !ob.tips?.checkin;
+  const maintBanner = obReady && !!coaching?.due && coaching.firstData && !!coaching.suggestion && !!ob.tips?.checkin && !ob.banners?.maintenance;
+  const paceBanner = obReady && pace.ready && !ob.banners?.pace && !maintBanner;
+  const cutTipDue = obReady && !checkinTipDue && dietPhase?.phase_type === "deficit" && !ob.tips?.cut && !cutStartedRef.current;
+  const topCards = obReady ? (
+    <>
+      {showWhatsNext && <WhatsNextCard info={planDone} baselineNote={baselineNote} onPick={pickNext} onLater={() => setWhatsNextLater(true)} />}
+      {maintBanner && (
+        <UnlockedBanner title="Your real maintenance is in" dots={coaching.raw?.includedDays || 0}
+          sub={`${coaching.raw?.includedDays || 0} fully logged days and ${coaching.raw?.weighInDays || 0} weigh-ins. Meal Prep now sets your targets from what you actually burn, not a formula.`}
+          onSee={() => { markOb(["banners", "maintenance"]); setTipOpen("firstTargets"); }}
+          onClose={() => markOb(["banners", "maintenance"], ["tips", "firstTargets"])} />
+      )}
+      {paceBanner && (
+        <UnlockedBanner title="Your pace is in" dots={pace.weighIns}
+          sub={`${pace.weighIns} weigh-ins over two weeks. That's enough for Meal Prep to read your real trend, not just one morning.`}
+          onSee={() => { markOb(["banners", "pace"]); setTipOpen("pace"); }}
+          onClose={() => markOb(["banners", "pace"], ["tips", "pace"])} />
+      )}
+    </>
+  ) : null;
+  const followedNow = dietPhase ? phases.find((p) => p.id === dietPhase.phase_id) || null : null;
+  const laterTip = !obReady ? null
+    : checkinTipDue ? (
+      <TipCard title="A quick check-in: tick the days you fully logged" caption="Saturday was half-logged, so it's left out."
+        body="Once a week, tick the days you logged everything you ate. Meal Prep learns your maintenance from those days, so untick any day you missed a meal. Your first suggested targets come in 2–3 weeks."
+        onDone={() => markOb(["tips", "checkin"])}><CheckinTicksDemo /></TipCard>
+    ) : cutTipDue && followedNow ? (
+      <TipCard title="Your cut" caption="Your cut on day 1, for your weight."
+        body={`Protein rises to 0.9 g/lb. Meal Prep warns you if your cut would lose more than 1% of your bodyweight per week (${coaching?.weightLb ? `${(coaching.weightLb / 100).toFixed(1)} lb at ${Math.round(coaching.weightLb)} lb` : "1.8 lb at 180 lb"}), the top of the range for keeping muscle.${training?.active ? " RepReport now plans your sets around this cut, and the Strength section shows how your lifts hold up." : ""}`}
+        onDone={() => markOb(["tips", "cut"])}>
+        <CutSummary cut={followedNow} maint={maintenancePreset(phases)} ratePct={phaseRatePct(dietPhase)} training={training} />
+      </TipCard>
+    ) : tipOpen === "pace" && pace.ready ? (
+      <TipCard title="Your pace, from your weigh-ins"
+        body={`${paceSentence(pace.phase.phase_type, pace.pctPerWeek, pace.avg, phaseRatePct(pace.phase))} Keep weighing in most mornings to keep it accurate.`}
+        onDone={() => { markOb(["tips", "pace"]); setTipOpen(null); }}>
+        <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={() => {}} presets={phases} week={todayWeek} estimate={coaching?.card}
+          trainingActive={training?.active} hasRepReport={!!training} deload={false} strength={null} strengthChoice={null} weightLb={coaching?.weightLb ?? null}
+          canSlow={false} onSlowCut={() => {}} onKeepStrength={() => {}} trainingGoal={null} />
+      </TipCard>
+    ) : tipOpen === "firstTargets" && coaching?.suggestion ? (
+      <TipCard title="Your real maintenance, and your first suggested targets" caption="The first check-in with enough of your data."
+        body="Meal Prep now estimates your maintenance from your own logs and weigh-ins, and suggests targets from it. You choose: Apply, Adjust or Keep."
+        onDone={() => { markOb(["tips", "firstTargets"]); setTipOpen(null); }}><FirstTargetsDemo c={coaching} /></TipCard>
+    ) : null;
+
   return (
     <div style={S.app}>
       <Style />
-      {showBwModal && <BodyweightModal onSave={saveBodyweight} onSkip={skipBodyweight} />}
+      {showBwModal && ob?.setup && <BodyweightModal onSave={saveBodyweight} onSkip={skipBodyweight} />}
+      {ob && !ob.tour && <MealPrepTour training={training} onDone={finishTour} />}
+      {ob && ob.tour && setup?.step === "phase" && <SetupPhaseChoice onContinue={(type) => setSetup({ step: "calc", type })} />}
+      {ob && setup?.step === "calc" && (
+        <TargetsCalculator presets={phases} bwLog={bwLog} profile={savedProfile || session?.user?.user_metadata?.profile}
+          training={training} setupType={setup.type} onApply={applySetup} onClose={() => {}} />
+      )}
+      {ob && setup?.step === "next" && <SetupWhatsNext phaseType={setup.type} onContinue={() => setSetup({ ...setup, step: "weigh" })} />}
+      {ob && setup?.step === "weigh" && (
+        <BodyweightModal setup initial={setup.weight ?? null}
+          onSave={async (w) => { await saveBodyweight(w); finishSetup(); }}
+          onSkip={() => { skipBodyweight(); finishSetup(); }} />
+      )}
+      {laterTip}
       {calc && (
         <TargetsCalculator
           presets={phases}
@@ -2806,6 +2979,8 @@ export default function App() {
           onSelectDate={(iso) => { setSelectedDate(iso); setShowMonth(false); }}
           onEdit={editDietPhases}
           onClose={() => setShowMonth(false)}
+          planTip={obReady && !ob.tips?.planPhase}
+          onPlanTipDone={() => markOb(["tips", "planPhase"])}
           trainingGoal={training?.active ? training.goal || null : null}
           goalLive={training?.active && training.goal ? goalLiveOf(dietPhaseContext(dietPhases, todayISO(), bwLog), todayISO()) : null}
         />
@@ -2889,12 +3064,17 @@ export default function App() {
             onSetDayIncluded={setDayIncluded}
             onCompleteCheckin={completeCheckin}
             onOpenMonth={() => setShowMonth(true)}
-            showCalcPrompt={!calcLater && phases.some((p) => p.example)}
+            showCalcPrompt={!!ob?.setup && !calcLater && phases.some((p) => p.example)}
             onOpenCalc={openCalc}
             onCalcLater={laterCalc}
             strengthChoice={strengthChoice}
             onSlowCut={slowCut}
             onKeepStrength={(changePct) => rememberStrengthChoice("keep", changePct)}
+            topCards={topCards}
+            nudge={nudge}
+            onDismissNudge={dismissNudge}
+            copyTipAllowed={obReady && !ob.tips?.copyMeal && !laterTip}
+            onCopyTipDone={() => markOb(["tips", "copyMeal"])}
           />
         )}
         {tab === "foods" && (
@@ -2936,7 +3116,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -3045,8 +3225,18 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
     });
   };
 
+  // first time an empty meal can be copied from an earlier week: one tip
+  const copyTipDue = copyTipAllowed && planFoodsKept && day.slots.some((slot) => !slot.entries.length && !!lastPlannedMeal(planStore, planMonday, activeDay, slot));
+
   return (
     <div>
+      {topCards}
+      {copyTipDue && (
+        <TipCard title="New week, same meals" caption="An empty meal's ⋮ menu." onDone={onCopyTipDone}
+          body={'Each week starts with empty meals. Tap a meal\'s ⋮ and choose "copy from last week" to bring its foods back in one tap.'}>
+          <CopyMenuPicture />
+        </TipCard>
+      )}
       {showCalcPrompt && (
         <div style={S.calcPrompt}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>Set your starting targets</div>
@@ -3061,9 +3251,9 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
         <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} deload={!!(training?.active && training.deload)}
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
         strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
-        trainingGoal={training?.active ? training.goal || null : null} />
+        trainingGoal={training?.active ? training.goal || null : null} nudge={nudge} onDismissNudge={onDismissNudge} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -3393,7 +3583,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             ? <><span style={{ color: dim }}>{Math.round(c.prior).toLocaleString()} →</span> <b>{Math.round(c.estimate).toLocaleString()} kcal</b> <span style={{ color: dim }}>({signed(c.estimate - c.prior)})</span></>
             : <b>{Math.round(c.estimate).toLocaleString()} kcal</b>}
           <div style={S.ciSub}>From what you ate and how your weight moved over the last 3 weeks. {c.firstData
-            ? "Your first estimate from your own data, so it moves further than usual this week; after this it moves a little each week."
+            ? "Your first estimate from your own data, so it replaces the starting guess; after this it moves a little each week."
             : c.agrees
             ? "It moved further than usual because last week's data pointed the same way."
             : "It moves a little each week, so one odd stretch (like a water-weight jump) can't swing it."}</div>
@@ -3421,7 +3611,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
           </div>
           <div style={S.ciNotes}>
             {s.capped && <div>• Capped at ±{s.maxChange} kcal this week (the data points to {s.ideal.toLocaleString()}).</div>}
-            {s.proteinRaised && <div>• Protein raised to the {c.followed.phase_type === "deficit" ? "cut minimum (~2 g/kg bodyweight)" : "minimum (~1.6 g/kg)"}.</div>}
+            {s.proteinRaised && <div>• Protein raised to the {c.followed.phase_type === "deficit" ? "cut minimum (about 0.9 g per pound of bodyweight)" : "minimum (about 0.7 g per pound)"}.</div>}
             {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
             {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
             {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
@@ -3655,7 +3845,26 @@ function dietBreakNote({ phase, today, deload, trainingGoal }) {
   return `This cut has run ${weeks} weeks. A 1–2 week break at maintenance is an option; studies find about the same fat loss either way.${when}`;
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
+// The first day the phase card shows a pace for the phase covering today, or
+// null when it needn't wait: day 20 of the phase (its trend then starts after
+// the first week's water swing), day 28 for a bulk's monthly trend. Waits on
+// any cut, and on any phase that follows a different one. A run of back-to-back
+// rows of the same type counts from the first.
+function paceStartsOn(rows, phase, monthly) {
+  if (!phase) return null;
+  const sorted = [...(rows || [])].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+  let start = phase.start_date;
+  let prev = null;
+  for (let i = sorted.indexOf(phase) - 1; i >= 0; i--) {
+    const r = sorted[i];
+    if (r.phase_type === phase.phase_type && addDaysISO(r.end_date || r.planned_end_date || addDaysISO(start, -1), 1) >= start) { start = r.start_date; continue; }
+    prev = r; break;
+  }
+  if (!prev && phase.phase_type !== "deficit") return null;
+  return addDaysISO(start, monthly ? 27 : 19);
+}
+
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null, nudge = false, onDismissNudge }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -3693,7 +3902,12 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   // weekly phases keep the last trend through a gap in weigh-ins, as the
   // volume note does, so the two never disagree
   const last = !monthly && !trend.ready ? latestTrendRate(bwLog, today) : null;
-  const actual = trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
+  // After a change of phase (and on any cut), the first week's water swing
+  // would read as a pace: the verdict waits until this phase has its own
+  // trend, day 20 (a bulk's monthly trend: day 28). (Owner's call, Nov 2026)
+  const paceFrom = paceStartsOn(dietPhases, phase, monthly);
+  const paceWaiting = !!paceFrom && today < paceFrom;
+  const actual = paceWaiting ? null : trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
   const actualAge = trend.ready ? 0 : last?.age ?? null;
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
@@ -3727,7 +3941,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const targetShort = phase.phase_type === "maintenance" ? "hold ±0.25%" : `${sign(targetPct, 2)}%`;
   // what's still needed before there's a pace to show
   let weighPrompt = null;
-  if (actual == null) {
+  if (paceWaiting) {
+    weighPrompt = `Your pace shows from ${shortDate(paceFrom)}, once this ${phase.phase_type === "deficit" ? (isMiniCut(phase.phase_type, phase.phase_name) ? "mini-cut" : "cut") : phase.phase_type === "surplus" ? "bulk" : "phase"} has its own weigh-ins (the first week after a change is mostly water).`;
+  } else if (actual == null) {
     const now = Math.min(trend.recentCount, TREND_MIN_WEIGHINS);
     const before = Math.min(monthly ? trend.oldCount : trend.priorCount, TREND_MIN_WEIGHINS);
     const more = TREND_MIN_WEIGHINS - now;
@@ -3798,6 +4014,12 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
         </div>
       )}
       {weighPrompt && <div style={S.pcNeed}>{weighPrompt}</div>}
+      {nudge && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 13 }}>
+          <button style={{ ...S.pcLink, flex: 1, textAlign: "left", padding: 0 }} onClick={onOpenMonth}>Planning a bulk or cut next? Set it up on the calendar ›</button>
+          <button style={{ background: "none", border: "none", color: dim, cursor: "pointer", fontSize: 14, padding: 0 }} onClick={onDismissNudge} aria-label="dismiss">✕</button>
+        </div>
+      )}
       {estimate?.estimated && (
         <div style={S.pcEstimate}>
           Maintenance ≈ <b>{Math.round(estimate.kcal).toLocaleString()} kcal</b>
@@ -3806,6 +4028,8 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
       )}
       {projection && <div style={S.pcProj}>{projection}</div>}
 
+      {/* Training volume only means something with RepReport (owner's call, Nov 2026). */}
+      {hasRepReport && (<>
       {/* In a deload week the deload is what's happening to training, so it
           takes the place of the diet's percentage and explanation. */}
       <div style={S.viHead}>
@@ -3827,6 +4051,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
           {ctx?.fading ? ` The last ${KIND_LABEL[ctx.fading.type]} is still fading out (~${ctx.fading.weeksLeft} wk left).` : ""}
         </div>
       )}
+      </>)}
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
       {sv && (
         <div style={S.stBox}>
@@ -3854,9 +4079,15 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
           )}
         </div>
       )}
-      {trainingActive === false && (
-        <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>
+      {!hasRepReport && phase.phase_type === "deficit" && (
+        <div style={S.stBox}>
+          <div style={S.stHead}>Lifting during this cut?</div>
+          <div style={S.viNote}>RepReport plans your sets around it and shows whether your lifts are holding up, the clearest sign you're keeping muscle. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email.</div>
+        </div>
       )}
+      {hasRepReport && trainingActive === false && (phase.phase_type === "deficit"
+        ? <div style={{ ...S.viNote, color: text }}>No active RepReport block. Start one so your sets follow this cut and RepReport can check that your lifts hold up.</div>
+        : <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>)}
     </div>
   );
 }
@@ -3943,7 +4174,7 @@ function DateStrip({ selectedDate, setSelectedDate, dietPhases, onOpenMonth, onC
    EDIT PHASES mode turns a tap into "what phase is this day in / start a
    new one here".
    ============================================================ */
-function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, onClose, trainingGoal = null, goalLive = null }) {
+function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, onClose, trainingGoal = null, goalLive = null, planTip = false, onPlanTipDone }) {
   const today = todayISO();
   const [cursor, setCursor] = useState(() => selectedDate.slice(0, 8) + "01");
   const [editMode, setEditMode] = useState(false);
@@ -3968,6 +4199,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
           <button style={S.dateNavBtn} onClick={() => shiftMonth(1)} aria-label="next month">›</button>
         </div>
         <div style={{ padding: 12 }}>
+          {planTip && <PlanPhaseTip block={trainingGoal?.block || null} onDone={onPlanTipDone} />}
           <div style={S.monthGrid}>
             {DAYS.map((d) => (
               <div key={d} style={{ textAlign: "center", fontSize: 11, color: dim, paddingBottom: 4 }}>{d}</div>
@@ -3976,29 +4208,37 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
               const inMonth = iso.slice(0, 7) === cursor.slice(0, 7);
               const ph = phaseOnDate(dietPhases, iso);
               const color = ph ? PHASE_COLORS[ph.phase_type] : null;
-              const future = iso > today;
-              const overrun = ph && ph.planned_end_date && iso > ph.planned_end_date;
               const on = iso === (editMode ? editDay : selectedDate);
-              // the running RepReport block (from its goal status), deload in the accent color
+              // the running (or planned) RepReport block, from its goal status: an amber
+              // underline and the week of the block (DL for the light week)
               const blk = trainingGoal?.block;
               const inBlock = !!blk && iso >= blk.start && iso <= blk.end;
               const inDeload = inBlock && !!blk.deloadStart && iso >= blk.deloadStart;
+              const blockWeek = inBlock ? Math.floor(daysBetween(blk.start, iso) / 7) + 1 : null;
+              // past days dimmed, today onward bright (owner's call, Nov 2026)
+              const past = iso < today;
               return (
                 <button
                   key={iso}
                   onClick={() => (editMode ? setEditDay(iso) : onSelectDate(iso))}
                   style={{
                     ...S.monthCell,
+                    position: "relative",
                     opacity: inMonth ? 1 : 0.35,
-                    background: color ? color + (future ? "22" : "44") : panel2,
-                    border: overrun ? `1px dashed ${color}` : on ? `1px solid ${text}` : `1px solid transparent`,
+                    background: color ? color + (past ? "18" : "55") : panel2,
+                    border: on ? `1px solid ${text}` : `1px solid transparent`,
                     boxShadow: iso === today ? `inset 0 0 0 2px ${accent}` : "none",
                     color: on ? text : inMonth ? text : dim,
                     fontWeight: on ? 800 : 500,
                   }}
                 >
                   {parseISO(iso).getDate()}
-                  {inBlock && <span style={{ display: "block", height: 2, width: "60%", margin: "2px auto 0", background: inDeload ? accent : text, opacity: inDeload ? 1 : 0.45 }} />}
+                  {inBlock && (
+                    <>
+                      <span style={{ position: "absolute", top: 3, right: 4, fontSize: 8, fontWeight: 800, color: REPREPORT_AMBER, letterSpacing: 0.2 }}>{inDeload ? "DL" : `W${blockWeek}`}</span>
+                      <span style={{ display: "block", height: 3, width: "70%", margin: "2px auto 0", borderRadius: 2, background: REPREPORT_AMBER, opacity: inDeload ? 1 : 0.6 }} />
+                    </>
+                  )}
                 </button>
               );
             })}
@@ -4008,8 +4248,7 @@ function MonthSheet({ selectedDate, dietPhases, presets, onSelectDate, onEdit, o
             {[["deficit", "cut"], ["maintenance", "maintenance"], ["surplus", "bulk"]].map(([k, lab]) => (
               <span key={k}><span style={{ color: PHASE_COLORS[k] }}>■</span> {lab}</span>
             ))}
-            <span>lighter = planned · dashed = past planned end</span>
-            {trainingGoal?.block && <span><span style={{ color: text, opacity: 0.45 }}>▬</span> RepReport block · <span style={{ color: accent }}>▬</span> deload</span>}
+            {trainingGoal?.block && <span><span style={{ color: REPREPORT_AMBER }}>▬</span> <span style={{ color: REPREPORT_AMBER, fontWeight: 600 }}>RepReport</span> block · DL = light week (deload)</span>}
           </div>
 
           <button
@@ -4072,7 +4311,13 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
   // the maintenance a cut/bulk gets after it, and the phase (other than
   // that maintenance) already planned to start by then, if any
   const typedBlock = preset && (preset.phase_type === "deficit" || preset.phase_type === "surplus") && !isMiniCut(preset.phase_type, preset.name);
-  const plannedEnd = form.openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
+  // every cut has an end date: open-ended is for maintenance and bulks (owner's call, Nov 2026)
+  const canOpenEnd = !preset || preset.phase_type !== "deficit";
+  const openEnded = form.openEnded && canOpenEnd;
+  const plannedEnd = openEnded || !weeksValue ? null : addDaysISO(form.start, weeksValue * 7 - 1);
+  // a mini-cut with nothing planned after it switches to maintenance at its end
+  const miniThenMaint = preset && isMiniCut(preset.phase_type, preset.name) && plannedEnd
+    && !dietPhases.some((r) => r.id !== editingId && r.start_date > form.start && r.start_date <= addDaysISO(plannedEnd, 1));
   const autoMaint = typedBlock && plannedEnd ? suggestedMaintenanceWeeks(preset.phase_type, preset.name, weeksValue) : null;
   const ownMaint = mode === "edit" ? followingMaintenance(dietPhases, covering) : null;
   const blockedBy = autoMaint
@@ -4208,16 +4453,18 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
         <label style={{ fontSize: 12, color: dim, width: 64 }}>weeks</label>
         <input
           type="number" min="1" inputMode="numeric"
-          disabled={form.openEnded}
+          disabled={openEnded}
           placeholder={defaultWeeks ? String(defaultWeeks) : "—"}
           value={form.weeks}
           onChange={(e) => setForm({ ...form, weeks: e.target.value })}
           style={{ ...S.fInput, flex: 1 }}
         />
-        <label style={{ fontSize: 12, color: dim, display: "flex", gap: 4, alignItems: "center" }}>
-          <input type="checkbox" checked={form.openEnded} onChange={(e) => setForm({ ...form, openEnded: e.target.checked })} />
-          open-ended
-        </label>
+        {canOpenEnd && (
+          <label style={{ fontSize: 12, color: dim, display: "flex", gap: 4, alignItems: "center" }}>
+            <input type="checkbox" checked={form.openEnded} onChange={(e) => setForm({ ...form, openEnded: e.target.checked })} />
+            open-ended
+          </label>
+        )}
       </div>
       <div style={{ fontSize: 12, color: dim, marginBottom: 10 }}>
         {plannedEnd ? `planned end: ${plannedEnd}` : "no planned end — runs until the next phase starts"}
@@ -4225,7 +4472,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
           ? blockedBy
             ? ` · ${blockedBy.phase_name} is already planned right after, so no maintenance is added (suggested: ~${autoMaint} wk)`
             : ` · then ~${autoMaint} wk maintenance is added after it`
-          : ""}
+          : miniThenMaint ? " · then maintenance until you pick what's next" : ""}
       </div>
       {planItems.map((it) => (
         <div key={`${it.id}-${it.start}`} style={{ fontSize: 12, color: "#ffb454", marginBottom: 8 }}>▲ {it.text}</div>
@@ -5430,8 +5677,9 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
 /* ============================================================
    BODYWEIGHT MODAL — once-daily prompt (no dismiss-outside; save or skip)
    ============================================================ */
-function BodyweightModal({ onSave, onSkip }) {
-  const [val, setVal] = useState("");
+// setup: during onboarding, prefilled from the calculator's weight (owner's design, Nov 2026)
+function BodyweightModal({ onSave, onSkip, initial = null, setup = false }) {
+  const [val, setVal] = useState(initial != null ? String(initial) : "");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -5451,6 +5699,7 @@ function BodyweightModal({ onSave, onSkip }) {
     <div style={S.modalWrap}>
       <div style={{ ...S.modal, maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ padding: 24, textAlign: "center" }}>
+          {setup && <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 14, textAlign: "left" }}>SETUP · STEP 4 / 4</div>}
           <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, letterSpacing: 1, fontSize: 14, marginBottom: 4 }}>
             LOG BODYWEIGHT
           </div>
@@ -5464,6 +5713,7 @@ function BodyweightModal({ onSave, onSkip }) {
             onChange={(e) => { setVal(e.target.value); setErr(""); }}
             style={{ ...S.fInput, width: "100%", textAlign: "center", fontSize: 16, marginBottom: 8 }}
           />
+          {setup && initial != null && String(val) === String(initial) && <div style={{ ...S.calcHint, marginTop: -4, marginBottom: 12 }}>from the calculator · change it if it isn't this morning's weight</div>}
           {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginBottom: 8 }}>{err}</div>}
           <button style={{ ...S.primaryBtn, width: "100%", marginBottom: 8 }} onClick={submit} disabled={saving}>
             {saving ? "saving…" : "save"}
@@ -5474,6 +5724,7 @@ function BodyweightModal({ onSave, onSkip }) {
           >
             skip today
           </button>
+          {setup && <p style={{ ...S.note, fontSize: 12, margin: "10px 0 0" }}>Skip any day. 4 or more a week keeps your trend ready.</p>}
         </div>
       </div>
     </div>
@@ -5569,7 +5820,10 @@ function TargetChanges({ rows }) {
 
 // "Calculate my targets": a short profile -> a starting maintenance -> every
 // phase preset's targets, shown for review before anything is saved.
-function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose }) {
+// setupType: during onboarding setup, the phase they picked ("maintenance",
+// "surplus" or "deficit"): no close button, and the results lead with that
+// phase's targets (owner's design, Nov 2026).
+function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose, setupType = null }) {
   // Prefilled only from a block that's running: with none, lifting days are
   // left for you to enter rather than assumed from the last block.
   const liftDaysFromRR = training?.active ? training.daysPerWeek : null;
@@ -5611,11 +5865,14 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
   const opt = (on) => ({ ...S.ghostBtn, flex: 1, ...(on ? { color: accent, borderColor: accent } : {}) });
 
   return (
-    <div style={S.modalWrap} onClick={onClose}>
+    <div style={S.modalWrap} onClick={setupType ? undefined : onClose}>
       <div style={{ ...S.modal, maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
         <div style={S.modalHead}>
-          <strong style={{ fontSize: 13, letterSpacing: 1 }}>{step === "form" ? "CALCULATE MY TARGETS" : "YOUR STARTING TARGETS"}</strong>
-          <button style={S.xBtn} onClick={onClose}>✕</button>
+          <strong style={{ fontSize: 13, letterSpacing: 1 }}>
+            {setupType ? <span style={{ color: dim, fontWeight: 700, fontSize: 10, letterSpacing: 2, display: "block", marginBottom: 4 }}>SETUP · STEP {step === "form" ? 2 : 3} / 4</span> : null}
+            {step === "form" ? "CALCULATE MY TARGETS" : "YOUR STARTING TARGETS"}
+          </strong>
+          {!setupType && <button style={S.xBtn} onClick={onClose}>✕</button>}
         </div>
         {step === "form" ? (
           <div style={S.editorBody}>
@@ -5662,6 +5919,8 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
             {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 8 }}>{err}</div>}
             <button style={{ ...S.primaryBtn, width: "100%", marginTop: 14 }} onClick={next}>See my targets</button>
           </div>
+        ) : setupType ? (
+          <SetupTargets setupType={setupType} presets={usable} proposed={proposed} est={est} busy={busy} onSave={apply} onBack={() => setStep("form")} />
         ) : (
           <div style={S.editorBody}>
             <div style={{ fontSize: 15 }}>Maintenance ≈ <b>{est.total.toLocaleString()} kcal</b></div>
@@ -5683,7 +5942,7 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
                 </label>
               );
             })}
-            <div style={S.calcHint}>Protein ~2 g/kg on a cut, 1.6 g/kg otherwise; fat 20–25% of calories; carbs the rest. Untick any you want to keep as they are.</div>
+            <div style={S.calcHint}>Protein about 0.9 g per pound on a cut, 0.7 g per pound otherwise; fat 20–25% of calories; carbs the rest. Untick any you want to keep as they are.</div>
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy || !chosen.size} onClick={apply}>Save these targets</button>
               <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => setStep("form")}>back</button>
@@ -5694,6 +5953,560 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
     </div>
   );
 }
+
+// The preset a setup choice starts: maintenance, the (non-mini) cut, or the bulk.
+function presetForType(presets, type) {
+  if (type === "maintenance") return maintenancePreset(presets);
+  return (presets || []).find((p) => p.phase_type === type && !isMiniCut(p.phase_type, p.name)) || null;
+}
+
+// Setup step 3: the targets they'll actually use, from the phase they picked.
+// The other targets (bulk, cut, mini-cut, refeed) are set too, and introduced
+// later, the first time they plan a phase.
+function SetupTargets({ setupType, presets, proposed, est, busy, onSave, onBack }) {
+  const p = presetForType(presets, setupType);
+  const t = p ? proposed[p.id] : null;
+  const name = { maintenance: "maintenance", surplus: "a bulk", deficit: "a cut" }[setupType];
+  return (
+    <div style={S.editorBody}>
+      <div style={{ fontSize: 13, color: dim, marginBottom: 12 }}>
+        For <span style={{ color: PHASE_COLORS[setupType], fontWeight: 700 }}>{name}</span>, every day
+      </div>
+      {t && (
+        <div style={{ ...S.dash, margin: 0, padding: 14 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
+            <span style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 34, color: text }}>{t.cal.toLocaleString()}</span>
+            <span style={{ color: dim, fontSize: 14 }}>kcal a day</span>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[["Protein", t.p, "#46e6a0"], ["Fat", t.f, "#ffb454"], ["Carbs", t.c, "#5db4ff"]].map(([l, g, c]) => (
+              <div key={l} style={{ flex: 1, border: `1px solid ${line}`, borderRadius: 8, padding: "8px 10px" }}>
+                <div style={{ fontSize: 11, color: dim }}>{l}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: c }}>{g} g</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{ ...S.calcHint, marginTop: 8 }}>
+        Your maintenance is about {est.total.toLocaleString()} kcal: a starting estimate from your answers. Your weekly check-ins correct it from what you log.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy} onClick={onSave}>{busy ? "saving…" : "SAVE MY TARGETS →"}</button>
+        <button style={{ ...S.ghostBtn, flex: 1 }} onClick={onBack}>back</button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ONBOARDING — tour, setup and one-time tips (owner's design, Nov 2026;
+   docs/proposals/onboarding.md in RepReport). Flags live on the account's
+   user_metadata (mealprep_onboarding), so they follow the account across
+   devices; accounts that already had data are marked as having seen it all.
+   ============================================================ */
+const ONBOARDING_ALL_SEEN = {
+  v: 1, tour: true, setup: true,
+  tips: { checkin: true, copyMeal: true, pace: true, firstTargets: true, planPhase: true, cut: true },
+  banners: { pace: true, maintenance: true },
+};
+const PACE_HINT = "Starts at Meal Prep's default pace. Already have a pace in mind? Change it on the calendar";
+
+// One-time tip overlay: the frame RepReport's TipSequence uses, in Meal Prep's colors.
+function TipCard({ kicker = "HOW IT WORKS", title, caption, body, children, button = "GOT IT", onDone, step = null, total = null, onSkip = null }) {
+  return (
+    <div style={{ ...S.modalWrap, zIndex: 60 }}>
+      <div style={{ ...S.modal, maxWidth: 380, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 16 }}>
+            <span>{step ? `STEP ${step} / ${total}` : kicker}</span>
+            {onSkip && <button style={{ background: "none", border: "none", color: dim, fontSize: 10, letterSpacing: 2, fontWeight: 700, cursor: "pointer", padding: 0 }} onClick={onSkip}>SKIP</button>}
+          </div>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 22, lineHeight: 1.15, color: text, marginBottom: 14 }}>{title}</div>
+          {children && <div style={{ pointerEvents: "none" }}>{children}</div>}
+          {caption && <div style={{ ...S.calcHint, marginTop: 8 }}>{caption}</div>}
+          {body && <p style={{ color: text, fontSize: 14, lineHeight: 1.55, margin: "14px 0 0" }}>{body}</p>}
+          {step && (
+            <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 20 }}>
+              {Array.from({ length: total }, (_, i) => (
+                <div key={i} style={{ height: 4, borderRadius: 4, width: i === step - 1 ? 22 : 6, background: i === step - 1 ? accent : line }} />
+              ))}
+            </div>
+          )}
+          <button style={{ ...S.primaryBtn, width: "100%", marginTop: 18 }} onClick={onDone}>{button}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// a looping two-state demo: false, then true, then back
+function useFlip(ms = 1800) {
+  const [on, setOn] = useState(false);
+  useEffect(() => { const t = setInterval(() => setOn((v) => !v), ms); return () => clearInterval(t); }, [ms]);
+  return on;
+}
+
+const TOUR_TARGET = { p: 131, f: 79, c: 401, cal: 2840 }; // the calculator for 180 lb, 20 y, 5'10", some walking, 4 lifting days
+const TOUR_BEFORE = { p: 40, f: 31, c: 109, cal: 875 };   // breakfast logged
+const TOUR_AFTER = { p: 85, f: 40, c: 190, cal: 1460 };   // + lunch: 6 oz chicken, 1.5 cups rice (45 P, 9 F, 81 C, 585 kcal)
+
+function TourTargetsDemo() {
+  return (
+    <div style={{ ...S.dash, margin: 0 }}>
+      <div style={S.dashHead}><span style={S.dashLabel}>TARGETS</span><span style={{ fontSize: 13, color: text }}>Maintenance (diet phase)</span></div>
+      <MacroBars total={TOUR_AFTER} target={TOUR_TARGET} />
+    </div>
+  );
+}
+
+function TourLogDemo() {
+  const done = useFlip(2000);
+  return (
+    <>
+      <div style={{ ...S.dash, margin: "0 0 10px" }}><MacroBars total={done ? TOUR_AFTER : TOUR_BEFORE} target={TOUR_TARGET} /></div>
+      <div style={{ ...S.slot, ...(done ? S.slotLogged : {}), marginBottom: 0 }}>
+        <div style={S.slotHead}>
+          <span style={{ ...S.checkBtn, ...(done ? S.checkBtnOn : {}), display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{done ? "✓" : ""}</span>
+          <span style={{ ...S.slotName, borderBottom: "none" }}>Lunch</span>
+          <span style={S.slotMacros}>585 kcal · 45P · 9F · 81C</span>
+        </div>
+        {[["6", "oz", "Chicken breast", "210 · 39P"], ["1.5", "cup", "White rice", "375 · 6P"]].map(([q, u, n, m]) => (
+          <div key={n} style={S.entry}>
+            <span style={{ ...S.qty, display: "inline-block" }}>{q}</span>
+            <span style={S.entryUnit}>{u}</span>
+            <span style={S.entryName}>{n}</span>
+            <span style={S.entryMacros}>{m}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// 14 mornings at maintenance (±0.8 lb of water around 180); the heavy morning
+// is 182.0. The line is the trend Meal Prep actually fits (weightTrend).
+const TOUR_WEIGHTS = [180.4, 179.4, 180.8, 179.8, 180.1, 179.2, 180.5, 179.7, 180.6, 179.5, 180.2, 179.3, 180.3];
+function TourTrendDemo() {
+  const heavy = useFlip(2200);
+  const pts = [...TOUR_WEIGHTS, heavy ? 182.0 : 180.2];
+  const today = todayISO();
+  const t = weightTrend(pts.map((w, i) => ({ date: addDaysISO(today, i - 13), weight: w })), today);
+  const perDay = t.ready ? ((t.pctPerWeek / 100) * t.avg) / 7 : 0;
+  const fit = (i) => (t.ready ? t.avg : 180) + perDay * (i - 6.5);
+  const W = 300, H = 90, lo = 178.5, hi = 182.5;
+  const x = (i) => 10 + i * ((W - 20) / 13), y = (w) => H - 8 - ((w - lo) / (hi - lo)) * (H - 16);
+  const row = (k, v, sub) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "7px 0", borderTop: `1px solid ${line}` }}>
+      <span style={{ fontSize: 12, color: dim }}>{k}</span>
+      <span style={{ fontSize: 14, color: text, fontWeight: 600 }}>{v}{sub && <span style={{ color: dim, fontWeight: 400 }}> {sub}</span>}</span>
+    </div>
+  );
+  return (
+    <div style={{ ...S.dash, margin: 0, padding: "12px 14px" }}>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+        <line x1={x(0)} x2={x(13)} y1={y(fit(0))} y2={y(fit(13))} stroke={PHASE_COLORS.maintenance} strokeWidth="2" strokeDasharray="5 4" opacity="0.8" />
+        {pts.map((w, i) => <circle key={i} cx={x(i)} cy={y(w)} r={i === 13 ? 5 : 3.5} fill={i === 13 ? "#ffb454" : dim} />)}
+      </svg>
+      {row("Today's weigh-in", heavy ? "182.0 lb" : "180.2 lb", heavy ? "(+1.7 overnight)" : "")}
+      {row("Trend, last 2 weeks", "Holding steady")}
+      {row("Your targets", "2,840 kcal", "· no change")}
+    </div>
+  );
+}
+
+// Card 4, connected: the real goal line for their own block at each phase's default pace.
+function TourGoalDemo({ goal }) {
+  const PH = [
+    ["Maintenance", "maintenance", { type: "maintenance", kind: "maintenance", targetPct: null, pacePct: null }],
+    ["Bulk", "surplus", { type: "surplus", kind: "surplus", targetPct: 1 / WEEKS_PER_MONTH, pacePct: null }],
+    ["Cut", "deficit", { type: "deficit", kind: "deficit", targetPct: -0.7, pacePct: 0.7 }],
+  ];
+  const [i, setI] = useState(0);
+  useEffect(() => { const t = setInterval(() => setI((n) => (n + 1) % PH.length), 2200); return () => clearInterval(t); }, []);
+  const [, , phase] = PH[i];
+  const line1 = goalCheck(goal, phase)?.summary;
+  return (
+    <div style={{ ...S.dash, margin: 0, padding: "12px 14px" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {PH.map(([n, t], k) => (
+          <div key={n} style={{ flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8, fontSize: 13, fontWeight: 600,
+            border: `1px solid ${k === i ? PHASE_COLORS[t] : line}`, color: k === i ? PHASE_COLORS[t] : dim }}>{n}</div>
+        ))}
+      </div>
+      <div style={{ fontSize: 14, lineHeight: 1.5, color: text }}>{line1} <span style={{ color: dim }}>(your RepReport block)</span></div>
+    </div>
+  );
+}
+
+function TourSetsPicture() {
+  const big = (from, to, label, color) => (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 6 }}>
+      <span style={{ fontSize: 22, fontWeight: 800, color: dim, textDecoration: "line-through" }}>{from}</span>
+      <span style={{ color: dim }}>→</span>
+      <span style={{ fontSize: 30, fontWeight: 800, color }}>{to}</span>
+      <span style={{ fontSize: 10, letterSpacing: 1.5, color: dim, fontWeight: 700 }}>{label}</span>
+    </div>
+  );
+  return (
+    <div style={{ ...S.dash, margin: 0, padding: "12px 14px" }}>
+      <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700 }}>MOST CHEST SETS A WEEK</div>
+      {big(20, 18, "CUT", PHASE_COLORS.deficit)}
+      {big(20, 21, "BULK", PHASE_COLORS.surplus)}
+    </div>
+  );
+}
+
+// The 4-card tour. training: RepReport's status (null = no RepReport data).
+function MealPrepTour({ training, onDone }) {
+  const [step, setStep] = useState(1);
+  const next = () => (step < 4 ? setStep(step + 1) : onDone());
+  const common = { step, total: 4, onSkip: onDone, onDone: next, button: step < 4 ? "NEXT →" : "SET UP →" };
+  if (step === 1) return (
+    <TipCard {...common} title="Targets that follow the scale." caption="Example targets, partway through the day."
+      body="Meal Prep sets your daily targets from a few quick questions about you and your training, then adjusts them to what your weight actually does.">
+      <TourTargetsDemo />
+    </TipCard>
+  );
+  if (step === 2) return (
+    <TipCard {...common} title="Check off a meal to log it." caption="One tap logs the whole meal."
+      body="Plan your usual meals once, then check each one off as you eat it. Next week, copy a meal over from its ⋮ menu.">
+      <TourLogDemo />
+    </TipCard>
+  );
+  if (step === 3) return (
+    <TipCard {...common} title="Reads your trend, not one weigh-in." caption="A heavy morning: one dot jumps, the trend barely moves, and your targets stay put."
+      body="Your weight bounces day to day with water and food. Meal Prep follows the trend across two weeks of weigh-ins, so one heavy morning doesn't change your plan. Weigh in most mornings, 4 or more a week.">
+      <TourTrendDemo />
+    </TipCard>
+  );
+  if (training) return (
+    <TipCard {...common} title="Connected to RepReport." caption={training.goal ? "What each diet phase means for your current RepReport block." : null}
+      body="Your diet phase goes to RepReport, which plans your sets around it. Meal Prep gets your lifting days, your light weeks on the calendar, and, on a cut, whether your lifts are holding up.">
+      {training.goal ? <TourGoalDemo goal={training.goal} /> : null}
+    </TipCard>
+  );
+  return (
+    <TipCard {...common} title="Lift with RepReport?" caption="Chest at 180 lb: week 12 of a 12-week cut losing about 1 lb a week, or week 16 of a 16-week bulk gaining about 1.8 lb a month."
+      body={<>RepReport is our training app. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email. On a cut, it adds new sets slower and lowers the most sets each muscle can get. On a bulk, it raises them. Meal Prep works fully on its own.</>}>
+      <TourSetsPicture />
+    </TipCard>
+  );
+}
+
+// The three phase choices, shared by setup and the "What's next?" card. The
+// pace hint shows under Gaining or Losing once tapped, every time.
+function PhaseChoices({ options, picked, onPick, hintSuffix = " after setup." }) {
+  return options.map(([t, label, sub]) => {
+    const on = picked === t;
+    return (
+      <button key={t} onClick={() => onPick(t)}
+        style={{ display: "block", width: "100%", textAlign: "left", background: on ? "rgba(255,255,255,0.03)" : "transparent", cursor: "pointer",
+          border: `1px solid ${on ? PHASE_COLORS[t] : line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 8, color: text, fontFamily: "inherit" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ width: 18, height: 18, borderRadius: "50%", border: `2px solid ${on ? PHASE_COLORS[t] : dim}`, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            {on && <span style={{ width: 8, height: 8, borderRadius: "50%", background: PHASE_COLORS[t] }} />}
+          </span>
+          <span style={{ fontSize: 15, fontWeight: 600 }}>{label}</span>
+          <span style={{ fontSize: 13, color: dim }}>{sub}</span>
+        </div>
+        {on && t !== "maintenance" && <div style={{ ...S.calcHint, marginTop: 8, marginLeft: 30, fontSize: 12 }}>{PACE_HINT}{hintSuffix}</div>}
+      </button>
+    );
+  });
+}
+const SETUP_OPTIONS = [["maintenance", "Holding my weight", "maintenance"], ["surplus", "Gaining", "a bulk"], ["deficit", "Losing", "a cut"]];
+
+// Setup step 1: required, nothing preselected, no numbers.
+function SetupPhaseChoice({ onContinue }) {
+  const [picked, setPicked] = useState(null);
+  return (
+    <div style={{ ...S.modalWrap, zIndex: 60 }}>
+      <div style={{ ...S.modal, maxWidth: 380, width: "100%" }}>
+        <div style={{ padding: 22 }}>
+          <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 18 }}>SETUP · STEP 1 / 4</div>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 22, lineHeight: 1.15, color: text, marginBottom: 16 }}>What are you doing right now?</div>
+          <PhaseChoices options={SETUP_OPTIONS} picked={picked} onPick={setPicked} />
+          <p style={{ ...S.note, fontSize: 12, margin: "14px 0 0" }}>
+            You can change the pace and length any time on the calendar. Cutting is optional. Meal Prep is not medical advice. If you have a history of disordered eating, talk to a professional before changing how you eat.
+          </p>
+          <button style={{ ...S.primaryBtn, width: "100%", marginTop: 18, opacity: picked ? 1 : 0.4 }} disabled={!picked} onClick={() => onContinue(picked)}>CONTINUE →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// After setup's targets: what to expect, then the first weigh-in. The pace
+// line follows their phase: about 2 weeks at maintenance, 3 on a cut (day
+// 20), 4 on a bulk (its monthly trend).
+function SetupWhatsNext({ phaseType, onContinue }) {
+  const paceWhen = phaseType === "deficit" ? "In about 3 weeks" : phaseType === "surplus" ? "In about 4 weeks" : "In about 2 weeks";
+  const stops = [
+    ["Today", "Your starting targets"],
+    ["Every Monday", "A quick check-in: tick the days you fully logged"],
+    [paceWhen, "Your pace, from your weigh-ins"],
+    ["In 2–3 weeks", "Your real maintenance, and your first suggested targets"],
+  ];
+  return (
+    <div style={{ ...S.modalWrap, zIndex: 60 }}>
+      <div style={{ ...S.modal, maxWidth: 380, width: "100%" }}>
+        <div style={{ padding: 22 }}>
+          <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 18 }}>ALMOST DONE</div>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 22, color: text, marginBottom: 16 }}>What comes next</div>
+          <div style={{ ...S.dash, margin: 0, padding: "14px 14px 4px" }}>
+            {stops.map(([when, what], i) => (
+              <div key={when + i} style={{ display: "flex", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                  <span style={{ width: 12, height: 12, borderRadius: "50%", marginTop: 3, background: i === 0 ? accent : "transparent", border: `2px solid ${i === 0 ? accent : dim}` }} />
+                  {i < stops.length - 1 && <span style={{ flex: 1, width: 2, background: line, margin: "3px 0" }} />}
+                </div>
+                <div style={{ paddingBottom: 14 }}>
+                  <div style={{ fontSize: 10, letterSpacing: 1.5, color: i === 0 ? accent : dim, fontWeight: 700 }}>{when.toUpperCase()}</div>
+                  <div style={{ fontSize: 14, color: text, marginTop: 2, lineHeight: 1.4 }}>{what}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ ...S.calcHint, marginTop: 8 }}>If you log and weigh in most days.</div>
+          <p style={{ color: text, fontSize: 14, lineHeight: 1.55, margin: "14px 0 0" }}>
+            Calorie formulas can be off by a couple hundred calories a day. Meal Prep learns what you actually burn from your food logs and weigh-ins, and sets your targets from that.
+          </p>
+          <button style={{ ...S.primaryBtn, width: "100%", marginTop: 18 }} onClick={onContinue}>LOG TODAY'S WEIGH-IN →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- onboarding: later moments ---------- */
+// The pace the phase card shows today, or { ready: false }. Same trend and
+// waiting rule as the card (paceStartsOn).
+function paceReading(rows, bwLog, today) {
+  const phase = phaseOnDate(rows, today);
+  if (!phase) return { ready: false };
+  const monthly = rateIsMonthly(phase.phase_type);
+  const from = paceStartsOn(rows, phase, monthly);
+  if (from && today < from) return { ready: false, phase };
+  const t = monthly ? monthlyWeightTrend(bwLog, today) : weightTrend(bwLog, today);
+  if (!t.ready) return { ready: false, phase };
+  const weighIns = (bwLog || []).filter((r) => r.date > addDaysISO(today, -14) && r.date <= today).length;
+  return { ready: true, phase, monthly, pctPerWeek: monthly ? t.pctPerMonth / WEEKS_PER_MONTH : t.pctPerWeek, avg: t.avg, weighIns };
+}
+
+// "about 1¼ lb a week"
+function lbPerWeekText(lb) {
+  if (lb < 0.25) return "less than ¼ lb a week";
+  const q = Math.round(lb * 4), whole = Math.floor(q / 4), frac = ["", "¼", "½", "¾"][q % 4];
+  return `about ${whole ? whole : ""}${frac || (whole ? "" : "0")} lb a week`;
+}
+
+// The pace tip's first sentence, from their own trend: leads with what's going
+// right; off target, it states the facts and points to the check-in.
+function paceSentence(type, pctPerWeek, weight, targetPctPerWeek) {
+  const lb = Math.abs((pctPerWeek / 100) * weight), dir = pctPerWeek < 0 ? "losing" : "gaining";
+  if (type === "maintenance") {
+    if (Math.abs(pctPerWeek) <= 0.25) return lb < 0.25
+      ? `You're holding your weight steady, right on your maintenance goal: it's moved ${lbPerWeekText(lb)}.`
+      : "You're holding your weight steady, right on your maintenance goal.";
+    return `You're ${dir} ${lbPerWeekText(lb)} at maintenance. Your next check-in will suggest targets to hold you steady.${pctPerWeek > 0 ? " If you meant to bulk, switch your phase on the calendar." : " If you meant to cut, switch your phase on the calendar."}`;
+  }
+  const losing = type === "deficit";
+  const tol = losing ? 0.2 : 0.25 / WEEKS_PER_MONTH;
+  if (Math.abs(pctPerWeek - targetPctPerWeek) <= tol) return `You're right on your ${losing ? "cut" : "bulk"}'s target: ${dir} ${lbPerWeekText(lb)}.`;
+  if (losing ? pctPerWeek >= 0 : pctPerWeek <= 0) return `Your weight hasn't ${losing ? "dropped" : "risen"} yet. Your next check-in will suggest new targets from it.`;
+  const slower = Math.abs(pctPerWeek) < Math.abs(targetPctPerWeek);
+  return `You're ${dir} ${lbPerWeekText(lb)}, ${slower ? "slower" : "faster"} than your target of ${lbPerWeekText(Math.abs((targetPctPerWeek / 100) * weight))}. Your next check-in will suggest new targets from it.`;
+}
+
+// The day their planned phases run out: maintenance past the end of its plan
+// with nothing after it ("plan"), or the maintenance a mini-cut switched them
+// to ("minicut", with the days left to continue the bulk as the same bulk).
+function planDoneInfo(rows, today) {
+  const cur = phaseOnDate(rows, today);
+  if (!cur || cur.phase_type !== "maintenance") return null;
+  if ((rows || []).some((r) => r.start_date > today)) return null;
+  const sorted = [...rows].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+  const prev = sorted[sorted.indexOf(cur) - 1] || null;
+  if (prev && isMiniCut(prev.phase_type, prev.phase_name) && !cur.planned_end_date) {
+    // the bulk before the mini-cut continues if restarted within its fade
+    // window (2–4 weeks by the bulk's length), counting maintenance before and
+    // after the mini-cut (chainGap in dietPhaseContext)
+    const i = sorted.indexOf(prev);
+    const lastBulk = sorted.slice(0, i).reverse().find((r) => r.phase_type === "surplus") || null;
+    let windowDays = null;
+    if (lastBulk) {
+      const after = sorted[sorted.indexOf(lastBulk) + 1];
+      const bulkEnd = lastBulk.end_date || addDaysISO(after.start_date, -1);
+      const bulk = precedingBlock(rows, addDaysISO(bulkEnd, 1));
+      if (bulk && bulk.type === "surplus") {
+        const before = Math.max(0, daysBetween(bulkEnd, prev.start_date) - 1);
+        windowDays = bulkMaintenanceWeeks(bulk.weeks) * 7 - before - daysBetween(cur.start_date, today);
+      }
+    }
+    return { kind: "minicut", key: `${cur.id}`, prevType: prev.phase_type, miniWeeks: phaseProgress(prev, prev.planned_end_date || cur.start_date).plannedWeeks, windowDays };
+  }
+  if (cur.planned_end_date && today > cur.planned_end_date && prev && prev.phase_type !== "maintenance") {
+    return { kind: "plan", key: `${cur.id}:${cur.planned_end_date}`, prevType: prev.phase_type };
+  }
+  return null;
+}
+
+const continueWindowText = (days) => (days >= 14 ? `${Math.floor(days / 7)} weeks` : `${days} day${days === 1 ? "" : "s"}`);
+
+function UnlockedBanner({ title, sub, dots = 0, onSee, onClose }) {
+  return (
+    <div style={{ border: `1px solid ${accent}`, borderRadius: 12, padding: 14, marginBottom: 14, background: "linear-gradient(135deg, rgba(70,230,160,0.14), rgba(70,230,160,0.02))" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 11, letterSpacing: 1.5, color: accent, fontWeight: 800 }}>✓ UNLOCKED</span>
+        <button style={{ background: "none", border: "none", color: dim, fontSize: 16, cursor: "pointer" }} onClick={onClose} aria-label="dismiss">✕</button>
+      </div>
+      <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 20, color: text, marginTop: 6 }}>{title}</div>
+      <div style={{ fontSize: 13, color: dim, marginTop: 4, lineHeight: 1.45 }}>{sub}</div>
+      {dots > 0 && (
+        <div style={{ display: "flex", gap: 4, marginTop: 10 }}>
+          {Array.from({ length: Math.min(dots, 21) }, (_, i) => <span key={i} style={{ flex: 1, height: 6, borderRadius: 3, background: accent, opacity: 0.35 + (0.65 * (i + 1)) / Math.min(dots, 21) }} />)}
+        </div>
+      )}
+      <button style={{ ...S.primaryBtn, width: "100%", marginTop: 12 }} onClick={onSee}>SEE IT →</button>
+    </div>
+  );
+}
+
+const MINICUT_OPTIONS = [["maintenance", "Holding my weight", "stay at maintenance"], ["surplus", "Gaining", "back to a bulk"]];
+const PLAN_OPTIONS = [["maintenance", "Holding my weight", "stay at maintenance"], ["surplus", "Gaining", "a bulk"], ["deficit", "Losing", "a cut"]];
+
+// "What's next?" on the Plan screen when their planned phases run out.
+function WhatsNextCard({ info, baselineNote, onPick, onLater }) {
+  const [picked, setPicked] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const mini = info.kind === "minicut";
+  return (
+    <div style={{ border: `1px solid ${accent}`, borderRadius: 12, padding: 14, marginBottom: 14, background: "rgba(70,230,160,0.05)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 11, letterSpacing: 1.5, color: accent, fontWeight: 800 }}>WHAT'S NEXT?</span>
+        <button style={{ background: "none", border: "none", color: dim, fontSize: 13, cursor: "pointer" }} onClick={onLater}>later</button>
+      </div>
+      <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 19, color: text, marginTop: 6 }}>
+        {mini ? `Your mini-cut's planned ${info.miniWeeks || 4} weeks are up. What's next?` : "Your plan is done. What's next?"}
+      </div>
+      <div style={{ fontSize: 13, color: dim, marginTop: 4, marginBottom: 12, lineHeight: 1.45 }}>
+        {mini
+          ? <>Nothing was planned after it, so Meal Prep switched you to maintenance until you pick your next phase.{info.windowDays > 0 ? ` Continue your bulk within ${continueWindowText(info.windowDays)} to pick up where it left off.` : ""}</>
+          : "Meal Prep is keeping you at maintenance until you pick your next phase."}
+      </div>
+      {baselineNote && (
+        <div style={{ border: `1px solid ${REPREPORT_AMBER}`, borderRadius: 8, padding: "8px 10px", marginBottom: 12, background: "rgba(251,191,36,0.07)" }}>
+          <div style={{ fontSize: 10, letterSpacing: 1.8, fontWeight: 800, color: REPREPORT_AMBER }}>⇄ FROM REPREPORT</div>
+          <div style={{ fontSize: 13, color: text, marginTop: 4, lineHeight: 1.45 }}>{baselineNote}</div>
+        </div>
+      )}
+      <PhaseChoices options={mini ? MINICUT_OPTIONS : PLAN_OPTIONS} picked={picked} onPick={setPicked} hintSuffix="." />
+      {!mini && <div style={{ fontSize: 12, color: dim, marginTop: 4 }}>Cutting is optional.</div>}
+      <button style={{ ...S.primaryBtn, width: "100%", marginTop: 8, opacity: picked ? 1 : 0.4 }} disabled={!picked || busy}
+        onClick={async () => { setBusy(true); await onPick(picked); setBusy(false); }}>{busy ? "saving…" : "CONTINUE →"}</button>
+    </div>
+  );
+}
+
+// tip pictures
+function CheckinTicksDemo() {
+  const days = [["Sun", "2,790", true], ["Sat", "1,150", false], ["Fri", "2,910", true]];
+  return (
+    <div style={S.ciCard}>
+      <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
+      <div style={S.ciStep}>Which days last week were fully logged?</div>
+      {days.map(([d, k, on]) => (
+        <div key={d} style={S.ciDay}><input type="checkbox" readOnly checked={on} /><span style={{ flex: 1, color: on ? text : dim }}>{d}</span><span style={{ color: dim }}>{k} kcal</span></div>
+      ))}
+    </div>
+  );
+}
+
+function FirstTargetsDemo({ c }) {
+  return (
+    <div style={S.ciCard}>
+      <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
+      <div style={S.ciLine}>Maintenance ≈ <b>{Math.round(c.estimate).toLocaleString()} kcal</b>
+        {c.prior != null && <div style={S.ciSub}>From your log and weigh-ins (your starting estimate was {Math.round(c.prior).toLocaleString()}).</div>}</div>
+      <div style={S.ciStep}>Suggested daily calories</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <span style={{ fontSize: 18, color: dim, textDecoration: "line-through" }}>{Math.round(c.followed.target.cal).toLocaleString()}</span>
+        <span style={{ color: dim }}>→</span>
+        <span style={{ fontSize: 28, fontWeight: 800, color: text }}>{c.suggestion.cal.toLocaleString()}</span>
+        <span style={{ fontSize: 13, color: dim }}>kcal a day</span>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <span style={{ ...S.primaryBtn, flex: 1, textAlign: "center" }}>Apply</span>
+        <span style={{ ...S.ghostBtn, flex: 1, textAlign: "center" }}>Adjust</span>
+        <span style={{ ...S.ghostBtn, flex: 1, textAlign: "center" }}>Keep current</span>
+      </div>
+    </div>
+  );
+}
+
+// "Your cut": what changes (a summary, not the phase card), then one line
+// that depends on RepReport.
+function CutSummary({ cut, maint, ratePct, training }) {
+  const stat = (l, n, sub) => (<div><div style={S.pcStatL}>{l}</div><div style={S.pcStatN}>{n}</div><div style={{ ...S.pcStatSub, color: dim }}>{sub}</div></div>);
+  return (
+    <div style={{ ...S.pcCard, borderLeft: `4px solid ${PHASE_COLORS.deficit}`, marginBottom: 0 }}>
+      <div style={S.pcKicker}>WHAT CHANGES</div>
+      <div style={{ ...S.pcName, color: PHASE_COLORS.deficit }}>CUT · WEEK 1</div>
+      <div style={S.pcStats}>
+        {stat("Calories", Math.round(cut.target.cal).toLocaleString(), maint ? `was ${Math.round(maint.target.cal).toLocaleString()}` : "")}
+        {stat("Protein", `${Math.round(cut.target.p)} g`, maint ? `was ${Math.round(maint.target.p)} g` : "")}
+        {stat("Target pace", `−${Math.abs(ratePct).toFixed(1)}%`, "a week")}
+      </div>
+      {!training ? (
+        <div style={S.stBox}><div style={S.stHead}>Lifting during this cut?</div>
+          <div style={S.viNote}>RepReport plans your sets around it and shows whether your lifts are holding up, the clearest sign you're keeping muscle. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email.</div></div>
+      ) : !training.active ? (
+        <div style={{ ...S.viNote, color: text, marginTop: 12 }}>No active RepReport block. Start one so your sets follow this cut and RepReport can check that your lifts hold up.</div>
+      ) : (
+        <div style={S.stBox}><div style={S.stHead}>Strength (from RepReport)</div><div style={S.viNote}>Strength since the cut began: not enough sessions yet to compare.</div></div>
+      )}
+    </div>
+  );
+}
+
+// the copy-meal tip's picture: a meal's ⋮ menu, open
+function CopyMenuPicture() {
+  const item = { padding: "8px 12px", fontSize: 13, color: text, borderTop: `1px solid ${line}` };
+  return (
+    <div style={{ ...S.dash, margin: 0, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, marginBottom: 8 }}>
+        <span>Lunch</span><span style={{ color: dim }}>⋮</span>
+      </div>
+      <div style={{ border: `1px solid ${line}`, borderRadius: 8, overflow: "hidden", marginLeft: "auto", width: "75%" }}>
+        <div style={{ ...item, borderTop: "none", color: dim }}>⧉ copy to next day</div>
+        <div style={{ ...item, color: accent, fontWeight: 700 }}>⧉ copy from last week</div>
+        <div style={{ ...item, color: "#ff5d7a", opacity: 0.6 }}>✕ delete meal</div>
+      </div>
+    </div>
+  );
+}
+
+// the calendar's first-open tip, inside the sheet above the real calendar
+function PlanPhaseTip({ block, onDone }) {
+  return (
+    <div style={{ border: `1px solid ${accent}`, borderRadius: 10, padding: 12, marginBottom: 12 }}>
+      <div style={{ fontSize: 10, letterSpacing: 2, color: dim, fontWeight: 700, marginBottom: 6 }}>HOW IT WORKS</div>
+      <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 6 }}>Plan your next phase</div>
+      <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+        Plan your cuts, bulks and maintenance ahead of time{block ? ", lined up with your training" : ""}. To plan one, tap "edit phases", the day it should start, then "new phase here".
+      </div>
+      {block && (
+        <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: REPREPORT_AMBER + "14", fontSize: 12, lineHeight: 1.5 }}>
+          <div style={{ color: REPREPORT_AMBER, fontWeight: 800, letterSpacing: 1, fontSize: 10, marginBottom: 2 }}>⇄ FROM REPREPORT · synced</div>
+          Your current block runs {shortDate(block.start)} – {shortDate(block.end)}{block.deloadStart ? `, light week (deload) from ${shortDate(block.deloadStart)}` : ""}. It's marked below.
+        </div>
+      )}
+      <button style={{ ...S.primaryBtn, width: "100%", marginTop: 10 }} onClick={onDone}>GOT IT</button>
+    </div>
+  );
+}
+
 
 function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, onSwitchPhase, onOpenCalendar, onOpenCalc }) {
   const prog = phaseProgress(dietPhase, todayISO());
