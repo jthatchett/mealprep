@@ -1971,6 +1971,8 @@ export default function App() {
   const setActiveDay = (dayKey) =>
     setSelectedDate(addDaysISO(mondayOf(selectedDate), DAYS.indexOf(dayKey)));
   const [showMonth, setShowMonth] = useState(false);
+  // a copied meal { name, day, entries }: kept until another copy or the app closes
+  const [mealClip, setMealClip] = useState(null);
   // starting-targets calculator: open state, and RepReport's block status (null = none)
   const [calc, setCalc] = useState(null);
   const [savedProfile, setSavedProfile] = useState(null); // this session's save; else user_metadata
@@ -2788,6 +2790,15 @@ export default function App() {
       intakeWrite("slot:" + slotId, (s, date) => sbDeleteIntake(s, `date=eq.${date}&slot_id=eq.${encodeURIComponent(slotId)}`)),
     addFood: ({ slotId, slotName, food, qty, source }) =>
       intakeWrite("add:" + uid(), (s, date) => sbInsertIntake(s, [intakeRow(date, { slotId, slotName, food, foods, qty, source })])),
+    // several foods at once (a pasted meal), into one meal of this day's log
+    addFoods: ({ slotId, slotName, items, source }) =>
+      intakeWrite("add:" + uid(), (s, date) => {
+        const rows = items
+          .map((e) => ({ e, food: foods.find((x) => x.id === e.foodId) }))
+          .filter(({ food }) => food)
+          .map(({ e, food }) => intakeRow(date, { slotId, slotName, food, foods, qty: e.qty, source }));
+        return rows.length ? sbInsertIntake(s, rows) : null;
+      }),
     // Quick Add: a one-off entry logged straight to the day. p/f/c null =
     // unknown (calories-only). With saveFood it also becomes a library food.
     addQuick: ({ slotId, slotName, name, p, f, c, cal, saveFood }) => {
@@ -3071,6 +3082,8 @@ export default function App() {
             onSlowCut={slowCut}
             onKeepStrength={(changePct) => rememberStrengthChoice("keep", changePct)}
             topCards={topCards}
+            mealClip={mealClip}
+            setMealClip={setMealClip}
             nudge={nudge}
             onDismissNudge={dismissNudge}
             copyTipAllowed={obReady && !ob.tips?.copyMeal && !laterTip}
@@ -3116,7 +3129,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, mealClip = null, setMealClip, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -3233,7 +3246,7 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
       {topCards}
       {copyTipDue && (
         <TipCard title="New week, same meals" caption="An empty meal's ⋮ menu." onDone={onCopyTipDone}
-          body={'Each week starts with empty meals. Tap a meal\'s ⋮ and choose "copy from last week" to bring its foods back in one tap.'}>
+          body={'Each week starts with empty meals. Tap a meal\'s ⋮ and choose "copy from last week" to bring its foods back in one tap, or copy any meal and paste it into another day.'}>
           <CopyMenuPicture />
         </TipCard>
       )}
@@ -3328,6 +3341,29 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
           }
           onCopyNext={() => copySlotToNextDay(slot)}
           canCopyNext={!!nextDayKey}
+          {...(() => {
+            // copy meal: what was eaten if it's checked off, otherwise the plan
+            // (library foods only; one-off quick adds aren't copied)
+            const logged = loggedBySlot[slot.id];
+            const entries = logged
+              ? logged.filter((r) => r.food_id && foods.some((x) => x.id === r.food_id)).map((r) => ({ foodId: r.food_id, qty: Number(r.qty) || 1 }))
+              : slot.entries.filter((e) => foods.some((x) => x.id === e.foodId)).map((e) => ({ foodId: e.foodId, qty: e.qty }));
+            const dayLabel = parseISO(selectedDate).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+            // paste adds to what's there: into the log if this meal is checked off
+            // (or this week's plan no longer keeps foods), otherwise into the plan
+            const toLog = !!logged || !planFoodsKept;
+            return {
+              canCopyMeal: entries.length > 0,
+              onCopyMeal: () => setMealClip({ name: slot.name, day: dayLabel, entries: JSON.parse(JSON.stringify(entries)) }),
+              pasteLabel: mealClip ? `${mealClip.name} (${mealClip.day})` : null,
+              onPaste: () => {
+                if (!mealClip) return;
+                const items = JSON.parse(JSON.stringify(mealClip.entries));
+                if (toLog) intakeOps.addFoods({ slotId: slot.id, slotName: slot.name, items, source: "manual" });
+                else update((d) => { d.slots[si].entries.push(...items); });
+              },
+            };
+          })()}
           {...(() => {
             // ⋮ "copy from last week": this meal's foods from the latest
             // earlier week it had any, on this weekday; only into an empty meal
@@ -4575,6 +4611,10 @@ function Slot({
   onCopyPrev,
   canCopyPrev,
   copyPrevLabel,
+  canCopyMeal,
+  onCopyMeal,
+  pasteLabel,   // the copied meal, or null before anything is copied
+  onPaste,
   onAdd,
   onScan,
   onQty,
@@ -4663,6 +4703,27 @@ function Slot({
                 >
                   ⧉ copy from {copyPrevLabel}
                 </button>
+                <button
+                  style={{ ...S.slotMenuItem, opacity: canCopyMeal ? 1 : 0.4 }}
+                  disabled={!canCopyMeal}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onCopyMeal();
+                  }}
+                >
+                  ⧉ copy meal
+                </button>
+                {pasteLabel && (
+                  <button
+                    style={S.slotMenuItem}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onPaste();
+                    }}
+                  >
+                    ⧉ paste {pasteLabel}
+                  </button>
+                )}
                 <button
                   style={{ ...S.slotMenuItem, color: "#ff5d7a" }}
                   onClick={() => {
@@ -6481,6 +6542,8 @@ function CopyMenuPicture() {
       <div style={{ border: `1px solid ${line}`, borderRadius: 8, overflow: "hidden", marginLeft: "auto", width: "75%" }}>
         <div style={{ ...item, borderTop: "none", color: dim }}>⧉ copy to next day</div>
         <div style={{ ...item, color: accent, fontWeight: 700 }}>⧉ copy from last week</div>
+        <div style={{ ...item, color: dim }}>⧉ copy meal</div>
+        <div style={{ ...item, color: dim }}>⧉ paste Lunch (Wed, Nov 4)</div>
         <div style={{ ...item, color: "#ff5d7a", opacity: 0.6 }}>✕ delete meal</div>
       </div>
     </div>
