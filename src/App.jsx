@@ -4700,12 +4700,11 @@ function Slot({
               onChange={(ev) => onQty(ei, parseFloat(ev.target.value) || 0)}
               style={S.qty}
             />
-            <span style={S.entryUnit}>{food.unit}</span>
-            <span style={S.entryName}>
+            <EntryText unit={food.unit}>
               {food.name}
               {food.verify && <span style={S.verifyDot} title="verify macros">●</span>}
               {food.type === "recipe" && <span style={S.recipeTag}>recipe</span>}
-            </span>
+            </EntryText>
             <span style={S.entryMacros}>
               {r0(m.cal)} · {r1(m.p)}P
             </span>
@@ -4774,6 +4773,17 @@ function NumInput({ value, onChange, onFocus, onBlur, ...rest }) {
   );
 }
 
+// a food row's name with its unit underneath, so a long unit ("2 Clementines
+// (168g)") gets the row's full width instead of spilling into the name
+function EntryText({ unit, children }) {
+  return (
+    <span style={S.entryText}>
+      <span style={S.entryName}>{children}</span>
+      {unit && <span style={S.entryUnit}>{unit}</span>}
+    </span>
+  );
+}
+
 function LogEntry({ row, onQty, onRemove }) {
   const [qty, setQty] = useState(String(row.qty));
   useEffect(() => setQty(String(row.qty)), [row.qty]);
@@ -4796,11 +4806,10 @@ function LogEntry({ row, onQty, onRemove }) {
         onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
         style={S.qty}
       />
-      <span style={S.entryUnit}>{row.unit}</span>
-      <span style={S.entryName}>
+      <EntryText unit={row.unit}>
         {row.food_name}
         {row.source === "quick" && <span style={S.recipeTag}>quick</span>}
-      </span>
+      </EntryText>
       <span style={S.entryMacros}>{r0(m.cal)} · {calOnly ? "cal only" : `${r1(m.p)}P`}</span>
       <button style={S.xBtnSm} onClick={onRemove} aria-label={`remove ${row.food_name} from log`}>✕</button>
     </div>
@@ -5586,10 +5595,9 @@ function FoodEditor({ food, foods, onSave, onDelete, onClose }) {
                       }}
                       style={S.qty}
                     />
-                    <span style={S.entryUnit}>{base ? base.unit : "?"}</span>
-                    <span style={S.entryName}>
+                    <EntryText unit={base ? base.unit : "?"}>
                       {base ? base.name : "(deleted food)"}
-                    </span>
+                    </EntryText>
                     <button
                       style={S.xBtnSm}
                       onClick={() =>
@@ -6074,8 +6082,7 @@ function TourLogDemo() {
         {[["6", "oz", "Chicken breast", "210 · 39P"], ["1.5", "cup", "White rice", "375 · 6P"]].map(([q, u, n, m]) => (
           <div key={n} style={S.entry}>
             <span style={{ ...S.qty, display: "inline-block" }}>{q}</span>
-            <span style={S.entryUnit}>{u}</span>
-            <span style={S.entryName}>{n}</span>
+            <EntryText unit={u}>{n}</EntryText>
             <span style={S.entryMacros}>{m}</span>
           </div>
         ))}
@@ -7137,9 +7144,10 @@ const S = {
     fontSize: 13,
     fontFamily: "inherit",
   },
-  entryUnit: { fontSize: 11, color: dim, width: 46 },
-  entryName: { fontSize: 13, flex: 1, display: "flex", alignItems: "center", gap: 6 },
-  entryMacros: { fontSize: 11, color: dim, fontFamily: "'Archivo', sans-serif" },
+  entryText: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 },
+  entryName: { fontSize: 13, display: "flex", alignItems: "center", gap: 6 },
+  entryUnit: { fontSize: 11, color: dim, lineHeight: 1.3 },
+  entryMacros: { fontSize: 11, color: dim, fontFamily: "'Archivo', sans-serif", whiteSpace: "nowrap", flexShrink: 0 },
   verifyDot: { color: "#ffb454", fontSize: 8, marginLeft: 5 },
   recipeTag: {
     fontSize: 9,
