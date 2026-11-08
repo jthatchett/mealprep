@@ -1160,7 +1160,8 @@ function catchUpCopy(hold, cal = null) {
   return {
     title: `You're ${lb} lb ${under ? "under" : "over"} your maintenance weight`,
     context: `You started maintenance at ${hold.anchor.toFixed(1)} lb${hold.anchorDate ? ` on ${shortDate(hold.anchorDate)}` : ""} and you're at ${hold.now.toFixed(1)} now.`,
-    body: `To get back, calories ${cal != null ? `go to ${Math.round(cal).toLocaleString("en-US")} this week, ` : ""}about ${kcal} ${under ? "over" : "under"} your maintenance (≈${lbWeek} lb a week).`,
+    // this week's number can sit short of the pace while the ±250 weekly step gets there
+    body: `To get back, calories ${cal != null ? `go to ${Math.round(cal).toLocaleString("en-US")} this week and settle` : "settle"} about ${kcal} ${under ? "over" : "under"} your maintenance (≈${lbWeek} lb a week).`,
   };
 }
 const catchUpStarting = (hold) => !!hold?.ratePct && hold.weeksRun === 0;
