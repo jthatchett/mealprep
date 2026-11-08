@@ -1146,6 +1146,20 @@ function resolveCheckinReason(reason, { ck, row, weightLb, today, half = false }
   }
   return null;
 }
+// About how many weeks a catch-up takes: a quarter of the gap per week until
+// within HOLD_DONE_PCT.
+const catchUpWeeks = (gapPct) => (Math.abs(gapPct) <= HOLD_DONE_PCT ? 0 : Math.ceil(Math.log(HOLD_DONE_PCT / Math.abs(gapPct)) / Math.log(1 - 1 / HOLD_WEEKS)));
+// The week a catch-up starts it's explained once, with the choice to hold
+// where they are instead (owner's design, Nov 2026).
+function catchUpCopy(hold, cal) {
+  const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1), weeks = catchUpWeeks(hold.gapPct);
+  return {
+    title: `You're ${lb} lb ${under ? "under" : "over"} the ${hold.anchor.toFixed(1)} lb you're holding`,
+    body: `To get you back, calories go to ${Math.round(cal).toLocaleString("en-US")} this week, then ease off. Expect the scale to ${under ? "rise" : "drop"} about ${lb} lb over the next ${weeks} weeks, then hold.`,
+  };
+}
+const catchUpStarting = (hold) => !!hold?.ratePct && hold.weeksRun === 0;
+
 // lb a week the scale moves eating `cal` against a maintenance estimate
 const driftLbPerWeek = (cal, estimate) => ((cal - estimate) * 7) / KCAL_PER_LB;
 
@@ -3105,10 +3119,26 @@ export default function App() {
     if (!c || !c.due || !c.suggestion || !c.grounded || dietPhase?.phase_type !== "maintenance") return;
     if (!checkinsLoaded || !dietLoaded || !bwLoaded || !historyReady || loadError) return;
     if (autoCheckinRef.current === c.weekStart) return;
+    // a catch-up's first week is explained and confirmed first (CatchUpProposal)
+    if (catchUpStarting(c.hold)) return;
     autoCheckinRef.current = c.weekStart;
     const s = c.suggestion;
     completeCheckin("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal, auto: true });
   }, [coaching, dietPhase, checkinsLoaded, dietLoaded, bwLoaded, historyReady, loadError]);
+
+  // The first week of a catch-up, from its explanation: OK applies it (as an
+  // automatic check-in); "Hold … instead" makes today's weight the one to hold,
+  // and the check-in then applies itself at plain maintenance.
+  const acceptCatchUp = async () => {
+    const s = coaching?.suggestion;
+    if (!s) return;
+    autoCheckinRef.current = coaching.weekStart;
+    await completeCheckin("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal, auto: true });
+  };
+  const holdCurrentWeight = () => {
+    if (!dietPhase) return;
+    setPhases((prev) => prev.map((p) => (p.id === dietPhase.phase_id ? { ...p, holdFrom: { rowId: dietPhase.id, date: todayISO() } } : p)));
+  };
 
   // "Something off?" on an automatic maintenance check-in: each reason's fix
   // (resolveCheckinReason). The target goes back only if you haven't changed it since.
@@ -3557,6 +3587,8 @@ export default function App() {
             onSetDayIncluded={setDayIncluded}
             onCompleteCheckin={completeCheckin}
             onCheckinReason={resolveAutoCheckin}
+            onAcceptCatchUp={acceptCatchUp}
+            onHoldCurrent={holdCurrentWeight}
             reviewDays={reviewDays}
             onOpenMonth={() => setShowMonth(true)}
             showCalcPrompt={!!ob?.setup && !calcLater && phases.some((p) => p.example)}
@@ -3616,7 +3648,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, onAcceptCatchUp, onHoldCurrent, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -3748,13 +3780,15 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
         </div>
       )}
       {selectedDate === coaching?.today && coaching?.due && (
-        <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} startShowDays={reviewDays} />
+        coaching.suggestion && !reviewDays && dietPhases && phaseOnDate(dietPhases, coaching.today)?.phase_type === "maintenance" && catchUpStarting(coaching.hold)
+          ? <CatchUpProposal c={coaching} onAccept={onAcceptCatchUp} onHoldCurrent={onHoldCurrent} />
+          : <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} startShowDays={reviewDays} />
       )}
       {selectedDate === coaching?.today && coaching?.thisWeek?.chosen?.auto && (
         <AutoCheckinNotice c={coaching} phases={phases} onReason={onCheckinReason} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} hold={coaching?.hold} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
         strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
         trainingGoal={training?.active ? training.goal || null : null} nudge={nudge} onDismissNudge={onDismissNudge} />
 
@@ -4020,6 +4054,24 @@ function DayStatusRow({ included, onChange }) {
    vs the phase's target, and the suggested targets; 3) Apply, Adjust
    (edit first) or Keep current. Every decision is saved.
    ============================================================ */
+// The week a maintenance catch-up would start: what it is and what to
+// expect, before anything changes. OK applies it; or hold where you are.
+function CatchUpProposal({ c, onAccept, onHoldCurrent }) {
+  const [busy, setBusy] = useState(false);
+  const copy = catchUpCopy(c.hold, c.suggestion.cal);
+  return (
+    <div style={S.ciCard}>
+      <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
+      <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{copy.title}</div>
+      <div style={S.ciSub}>{copy.body}</div>
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={async () => { setBusy(true); await onAccept(); setBusy(false); }}>OK</button>
+        <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={onHoldCurrent}>Hold {c.hold.now.toFixed(1)} lb instead</button>
+      </div>
+    </div>
+  );
+}
+
 // This week's maintenance check-in, applied for you: what changed and why,
 // with "Something off?" for the reasons to change it (resolveCheckinReason).
 function AutoCheckinNotice({ c, phases = [], onReason }) {
@@ -4070,12 +4122,17 @@ function AutoCheckinNotice({ c, phases = [], onReason }) {
       <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
       {outcome ? (
         <div style={{ ...S.ciLine, marginTop: 8 }}>{outcome}</div>
+      ) : catchUpStarting(hold) ? (
+        <>
+          <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{catchUpCopy(hold, now).title}</div>
+          <div style={S.ciSub}>{catchUpCopy(hold, now).body}</div>
+        </>
       ) : (
         <>
           {lead}
           <div style={S.ciSub}>
             Your maintenance from the last 3 weeks of logging and weigh-ins is {fmt(est)} kcal.
-            {hold?.ratePct ? ` This week includes ${Math.abs(Math.round(paceKcal(hold.ratePct, c.weightLb)))} kcal/day ${hold.ratePct > 0 ? "extra" : "less"} to get back to ${hold.anchor.toFixed(1)} lb (you're ${Math.abs(hold.gapLb).toFixed(1)} lb ${hold.gapLb < 0 ? "under" : "over"}).` : ""}
+            {hold?.ratePct ? ` This week includes ${Math.abs(Math.round(paceKcal(hold.ratePct, c.weightLb)))} kcal/day ${hold.ratePct > 0 ? "extra" : "less"} to get back to ${hold.anchor.toFixed(1)} lb, ${Math.abs(hold.gapLb).toFixed(1)} lb to go.` : ""}
           </div>
           {open === "reasons" && (
             <div style={{ marginTop: 10 }}>
@@ -4103,7 +4160,7 @@ function AutoCheckinNotice({ c, phases = [], onReason }) {
       )}
       <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
         <button style={{ ...S.primaryBtn, flex: 1 }} onClick={close}>{open && !outcome ? `Use ${fmt(now)}` : "OK"}</button>
-        {!outcome && !open && reasons.length > 0 && <button style={{ ...S.linkBtn, color: dim }} onClick={() => setOpen("reasons")}>Something off?</button>}
+        {!outcome && !open && reasons.length > 0 && !catchUpStarting(hold) && <button style={{ ...S.linkBtn, color: dim }} onClick={() => setOpen("reasons")}>Something off?</button>}
         {!outcome && open && <button style={{ ...S.linkBtn, color: dim }} onClick={() => setOpen(open === "reasons" ? null : "reasons")}>back</button>}
       </div>
     </div>
@@ -4488,7 +4545,7 @@ function paceStartsOn(rows, phase, monthly) {
   return addDaysISO(start, monthly ? 27 : 19);
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null, nudge = false, onDismissNudge }) {
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, hold = null, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null, nudge = false, onDismissNudge }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -4638,6 +4695,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
         </div>
       )}
       {projection && <div style={S.pcProj}>{projection}</div>}
+      {hold?.ratePct ? (
+        <div style={{ ...S.pcProj, color: text }}>Getting back to {hold.anchor.toFixed(1)} lb · {Math.abs(hold.gapLb).toFixed(1)} lb to go</div>
+      ) : null}
 
       {/* Training volume only means something with RepReport (owner's call, Nov 2026). */}
       {hasRepReport && (<>
@@ -8605,7 +8665,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  catchUpWeeks, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,

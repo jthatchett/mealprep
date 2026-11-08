@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { maintenanceHold, AutoCheckinNotice, paceKcal } from '../src/App.jsx';
+import { maintenanceHold, AutoCheckinNotice, CatchUpProposal, catchUpWeeks, paceKcal } from '../src/App.jsx';
 
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const TODAY = '2026-11-09'; // a Monday
@@ -64,6 +64,20 @@ describe('a maintenance check-in done for you', () => {
   });
   it('says when it includes winning back a drift', () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onReason: () => {} }));
-    expect(t).toContain("This week includes 432 kcal/day extra to get back to 180.0 lb (you're 3.5 lb under).");
+    expect(t).toContain('This week includes 432 kcal/day extra to get back to 180.0 lb, 3.5 lb to go.');
+  });
+  it("the week a catch-up starts, it's explained instead: what to expect, without blaming anyone", () => {
+    const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 }), onReason: () => {} }));
+    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, calories go to 2,681 this week, then ease off. Expect the scale to rise about 3.5 lb over the next 8 weeks, then hold. OK");
+  });
+  it('before it starts, it asks: OK, or hold where you are', () => {
+    const hold = { ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 };
+    expect(text(React.createElement(CatchUpProposal, { c: { hold, suggestion: { cal: 2750 } }, onAccept: () => {}, onHoldCurrent: () => {} })))
+      .toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, calories go to 2,750 this week, then ease off. Expect the scale to rise about 3.5 lb over the next 8 weeks, then hold. OK Hold 176.5 lb instead");
+  });
+  it('how long a catch-up takes: a quarter of the gap a week until within 0.25%', () => {
+    expect(catchUpWeeks(-1.94)).toBe(8); // 3.5 lb at 180
+    expect(catchUpWeeks(-1.1)).toBe(6);  // 2 lb
+    expect(catchUpWeeks(0.2)).toBe(0);
   });
 });
