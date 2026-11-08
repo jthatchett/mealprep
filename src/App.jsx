@@ -1028,6 +1028,32 @@ function monthlyWeightTrend(log, today) {
   return { ready: true, avg: avg(recent), perMonth, pctPerMonth: (perMonth / fit.mean) * 100 };
 }
 
+// Where your weight stands in a phase: your weight when it started, now, and
+// (cuts and bulks) where its goal pace puts you today and at its planned end.
+// Each weight is the average of a week of weigh-ins (one morning swings
+// 1–2 lb on water): "start" the 7 days up to the start (else the first week
+// after it), "now" the last 7 days (else the latest weigh-in). The 2-week
+// pace can't see a slow drift (−0.2%/week reads "Holding steady" at
+// maintenance for months); the change since the start can.
+function phaseWeights(row, log, today) {
+  if (!row) return null;
+  const pts = (log || []).filter((r) => Number(r.weight) > 0).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const avgIn = (from, to) => { const w = pts.filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : null; };
+  const start = avgIn(addDaysISO(row.start_date, -6), row.start_date) ?? avgIn(row.start_date, addDaysISO(row.start_date, 6));
+  const before = pts.filter((r) => r.date <= today);
+  const now = avgIn(addDaysISO(today, -6), today) ?? (before.length ? Number(before[before.length - 1].weight) : null);
+  if (start == null || now == null) return { start, now, change: null };
+  const weeks = Math.max(0, daysBetween(row.start_date, today) / 7);
+  const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
+  const at = (w) => start * Math.pow(1 + rate / 100, w);
+  const endWeeks = row.planned_end_date ? (daysBetween(row.start_date, row.planned_end_date) + 1) / 7 : null;
+  return {
+    start, now, change: now - start, weeks,
+    planNow: rate ? at(weeks) : null,                       // where the goal pace puts you today
+    goalEnd: rate && endWeeks ? at(endWeeks) : null,        // and at the planned end
+  };
+}
+
 /* ---------- maintenance estimate + weekly check-in ----------
    MacroFactor-style: estimate maintenance from logged intake and the
    weight trend, then suggest calories that hit the phase's target rate.
@@ -6851,8 +6877,8 @@ function PlanPhaseTip({ block, onDone }) {
    (read-only), and macros balance inside the calories (balanceMacros). */
 const fmtK = (n) => Math.round(Number(n) || 0).toLocaleString("en-US");
 const signPct = (n, d = 2) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(d)}%`;
-// differences under this are rounding (weight drift, the calculator's 10s), not worth a line
-const TARGET_GAP_SHOWN_KCAL = 10;
+// differences under this are rounding and weight drift that the next check-in absorbs, not worth a line
+const TARGET_GAP_SHOWN_KCAL = 50;
 
 // "−0.50% / week", "+1.00% / month", "Hold" for a weekly rate on a phase type
 function rateLabel(type, ratePctPerWeek) {
@@ -6945,6 +6971,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
           const verdict = paceVerdict(dietPhase.phase_type, actualPct, goalPct);
           const maint = dietPhase.phase_type === "maintenance";
           const dir = (pct) => (pct < 0 ? "Losing" : pct > 0 ? "Gaining" : "Holding");
+          const wts = phaseWeights(dietPhase, bwLog, today);
           const weeksLeft = prog.plannedWeeks && !prog.overrun ? Math.max(0, Math.ceil(daysBetween(today, dietPhase.planned_end_date) / 7)) : null;
           return (
             <>
@@ -6987,6 +7014,31 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
                   </>
                 )}
               </div>
+
+              {wts && wts.now != null && (
+                <div style={S.ptWeights}>
+                  {[
+                    ["Start", wts.start != null ? `${wts.start.toFixed(1)}` : "—", shortDate(dietPhase.start_date)],
+                    ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
+                    maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
+                  ].filter(Boolean).map(([lab, n, sub]) => (
+                    <div key={lab}>
+                      <div style={S.pcStatL}>{lab}</div>
+                      <div style={S.pcStatN}>{n} <span style={{ fontSize: 11, color: dim, fontWeight: 400 }}>{WEIGHT_UNIT}</span></div>
+                      <div style={{ fontSize: 11, color: dim }}>{sub}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {wts?.change != null && (
+                <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
+                  {maint
+                    ? `${Math.abs(wts.change) < 0.05 ? "No change" : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}`} since this maintenance started ${wts.weeks >= 1 ? `${Math.floor(wts.weeks)} week${Math.floor(wts.weeks) === 1 ? "" : "s"} ago` : "this week"}.`
+                    : wts.planNow != null
+                      ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
+                      : ""}
+                </div>
+              )}
 
               <div style={S.ptMiniStats}>
                 <div><span style={{ fontWeight: 700 }}>{followed ? fmtK(followed.target.cal) : "—"}</span> <span style={{ color: dim }}>kcal / day</span></div>
@@ -8200,6 +8252,7 @@ const S = {
   ptCurrent: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 14, marginBottom: 10 },
   ptBigName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24, marginTop: 4, overflowWrap: "anywhere" },
   ptWeek: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24, letterSpacing: 0.5, marginTop: 6, overflowWrap: "anywhere" },
+  ptWeights: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 12, paddingTop: 12, borderTop: `1px solid ${line}` },
   ptPaceBox: { marginTop: 14, paddingTop: 12, borderTop: `1px solid ${line}` },
   ptPaceBig: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 22, margin: "2px 0 4px" },
   ptMiniStats: { display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 13, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${line}` },
@@ -8287,7 +8340,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  paceVerdict, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
