@@ -7298,7 +7298,6 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
               </div>
             ))}
           </div>
-          {check.total !== cal && check.ok && <div style={S.ptHint}>Macros total {fmtK(check.total)} kcal (whole grams can't always land exactly).</div>}
           {check.errors.map((e) => <div key={e} style={S.ptErr}>✕ {e}</div>)}
           {check.notes.map((n) => <div key={n} style={S.ptWarn}>▲ {n}</div>)}
         </div>
