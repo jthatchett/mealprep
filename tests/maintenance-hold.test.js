@@ -58,12 +58,12 @@ describe('a maintenance check-in done for you', () => {
     weekStart: TODAY, weightLb: 176.5, hold,
     thisWeek: { week_start: TODAY, estimate: 2681, action: 'apply', before: { cal: 2500 }, chosen: { p: 145, f: 70, c: 373, cal: 2681, auto: true } },
   });
-  it('says what changed and why, with OK and Undo', () => {
-    expect(text(React.createElement(AutoCheckinNotice, { c: c(), onUndo: () => {} })))
-      .toBe('WEEKLY CHECK-IN Calories 2,500 → 2,681 Your maintenance from the last 3 weeks of logging and weigh-ins is 2,681 kcal. OK Undo (keep 2,500)');
+  it('says what changed and why, with OK and "Something off?"', () => {
+    expect(text(React.createElement(AutoCheckinNotice, { c: c(), onReason: () => {} })))
+      .toBe('WEEKLY CHECK-IN Calories 2,500 → 2,681 Your maintenance from the last 3 weeks of logging and weigh-ins is 2,681 kcal. OK Something off?');
   });
   it('says when it includes winning back a drift', () => {
-    const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onUndo: () => {} }));
-    expect(t).toContain('This week includes 432 kcal/day extra to get back to 180.0 lb (you\'re 3.5 lb under).');
+    const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onReason: () => {} }));
+    expect(t).toContain("This week includes 432 kcal/day extra to get back to 180.0 lb (you're 3.5 lb under).");
   });
 });

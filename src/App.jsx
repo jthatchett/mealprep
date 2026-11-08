@@ -1078,9 +1078,11 @@ function maintenanceAnchorDate(rows, row) {
   const from = paceStartsOn(rows, row, false);
   return from ? addDaysISO(from, -1) : row.start_date;
 }
-function maintenanceHold(row, rows, log, today, checkins) {
+// holdFrom: { rowId, date } on the Maintenance preset, set by "Hold my
+// current weight instead": that maintenance holds the week up to `date`.
+function maintenanceHold(row, rows, log, today, checkins, holdFrom = null) {
   if (!row || row.phase_type !== "maintenance") return null;
-  const anchorDate = maintenanceAnchorDate(rows, row);
+  const anchorDate = holdFrom && holdFrom.rowId === row.id ? holdFrom.date : maintenanceAnchorDate(rows, row);
   if (today <= anchorDate) return { anchorDate, waiting: true, ratePct: 0 };
   const w = phaseWeights(row, log, today, anchorDate);
   if (!w || w.change == null) return { anchorDate, ratePct: 0 };
@@ -1096,6 +1098,56 @@ function maintenanceHold(row, rows, log, today, checkins) {
   if (ran.length && (Math.abs(gapPct) <= HOLD_DONE_PCT || ran.length >= HOLD_MAX_WEEKS)) return { ...base, ratePct: 0, done: true };
   return { ...base, ratePct: roundRate(-gapPct / HOLD_WEEKS) };
 }
+
+/* ---------- "Something off?" on a maintenance check-in done for you ----------
+   Undoing it outright let maintenance drift, so each reason does its own fix
+   (owner's choice, Nov 2026):
+     log         my log was incomplete -> the check-in is withdrawn and the
+                 week's days open to fix; it runs again from them
+     temporary   my weight is temporarily off -> this week stays as it was;
+                 next week's check-in updates it again
+     slow        I want to lose or gain slowly -> a slow cut (−0.25%/week)
+                 or bulk (+0.5%/month) starts today at its usual length
+     hold-reset  hold my current weight instead (only while winning back a
+                 drift) -> the weight to hold becomes now; plain maintenance
+     cant-eat    I can't eat that right now (only for a change of 150 kcal or
+                 6% of calories, whichever is less) -> halfway, or stay this
+                 week, with what it costs; one week, then the full number again */
+const SLOW_CUT_PCT = -0.25;                        // %/week
+const SLOW_BULK_PCT = 0.5 / WEEKS_PER_MONTH;       // +0.5%/month
+const CANT_EAT_MIN_KCAL = 150;
+const CANT_EAT_MIN_SHARE = 0.06;
+const cantEatMinKcal = (cal) => Math.min(CANT_EAT_MIN_KCAL, CANT_EAT_MIN_SHARE * (Number(cal) || 0));
+// which reasons this week's check-in offers
+function checkinReasons(ck, hold) {
+  if (!ck?.chosen?.auto || !ck.before) return [];
+  const change = Math.abs(Number(ck.chosen.cal) - Number(ck.before.cal));
+  return ["log", "temporary", "slow", ...(hold?.ratePct ? ["hold-reset"] : []), ...(change >= cantEatMinKcal(ck.before.cal) && change > 0 ? ["cant-eat"] : [])];
+}
+// What a reason changes: the check-in row (patch, or remove), the
+// Maintenance target, its holdFrom, and a phase to start. `half`: meet halfway.
+function resolveCheckinReason(reason, { ck, row, weightLb, today, half = false }) {
+  const before = { p: ck.before.p, f: ck.before.f, c: ck.before.c, cal: ck.before.cal };
+  const keep = (r) => ({ patch: { action: "keep", chosen: { auto: true, reason: r } }, target: before });
+  if (reason === "log") return { remove: true, target: before, reviewDays: true };
+  if (reason === "temporary") return keep("temporary");
+  if (reason === "slow-cut" || reason === "slow-bulk") return { ...keep(reason), start: reason === "slow-cut" ? { type: "deficit", ratePct: SLOW_CUT_PCT } : { type: "surplus", ratePct: roundRate(SLOW_BULK_PCT) } };
+  if (reason === "hold-reset") {
+    const s = suggestTargets({ estimate: Number(ck.estimate), ratePctPerWeek: 0, weightLb, current: before, phaseType: "maintenance" });
+    const target = { p: s.p, f: s.f, c: s.c, cal: s.cal };
+    return { patch: { target_rate_pct: 0, chosen: { ...target, auto: true, reason } }, target, holdFrom: { rowId: row.id, date: today } };
+  }
+  if (reason === "cant-eat") {
+    if (!half) return keep("cant-eat");
+    const cal = Math.round((Number(ck.before.cal) + Number(ck.chosen.cal)) / 2);
+    const t = fitMacros(ck.chosen, cal, { clampCarbs: true });
+    const target = { p: t.p, f: t.f, c: t.c, cal };
+    return { patch: { chosen: { ...target, auto: true, reason: "cant-eat-half" } }, target };
+  }
+  return null;
+}
+// lb a week the scale moves eating `cal` against a maintenance estimate
+const driftLbPerWeek = (cal, estimate) => ((cal - estimate) * 7) / KCAL_PER_LB;
 
 /* ---------- maintenance estimate + weekly check-in ----------
    MacroFactor-style: estimate maintenance from logged intake and the
@@ -1661,6 +1713,14 @@ async function sbLoadCheckins(session) {
   );
   if (!res.ok) throw new Error("Failed to load check-ins: " + res.status);
   return res.json();
+}
+
+async function sbDeleteCheckin(session, weekStart) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/checkins?user_id=eq.${session.user.id}&week_start=eq.${weekStart}`, {
+    method: "DELETE",
+    headers: sbHeaders(session, { Prefer: "return=minimal" }),
+  });
+  if (!res.ok) throw new Error("Failed to withdraw check-in: " + res.status);
 }
 
 async function sbUpdateCheckin(session, weekStart, patch) {
@@ -2943,7 +3003,7 @@ export default function App() {
     const weightLb = raw.trendWeight ?? latest;
     const wk = weightTrend(bwLog, today);
     // maintenance: 0, or the pace that wins back a drift (maintenanceHold)
-    const hold = dietPhase?.phase_type === "maintenance" ? maintenanceHold(dietPhase, dietPhases, bwLog, today, sorted) : null;
+    const hold = dietPhase?.phase_type === "maintenance" ? maintenanceHold(dietPhase, dietPhases, bwLog, today, sorted, followed?.holdFrom || null) : null;
     const ratePct = !dietPhase ? 0 : hold ? hold.ratePct : phaseRatePct(dietPhase);
     // suggest new targets only once the estimate rests on your own log and
     // weigh-ins (this week's, or an earlier check-in's), never on a guess
@@ -3050,21 +3110,36 @@ export default function App() {
     completeCheckin("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal, auto: true });
   }, [coaching, dietPhase, checkinsLoaded, dietLoaded, bwLoaded, historyReady, loadError]);
 
-  // Undo an automatic check-in: the week is recorded as a Keep and the
-  // target goes back to what it was, unless you've changed it since.
-  const undoAutoCheckin = async () => {
+  // "Something off?" on an automatic maintenance check-in: each reason's fix
+  // (resolveCheckinReason). The target goes back only if you haven't changed it since.
+  const [reviewDays, setReviewDays] = useState(false);
+  const resolveAutoCheckin = async (reason, { half = false } = {}) => {
     const ck = coaching?.thisWeek;
-    if (!ck?.chosen?.auto) return;
+    if (!ck?.chosen?.auto || !dietPhase) return false;
+    const r = resolveCheckinReason(reason, { ck, row: dietPhase, weightLb: coaching.weightLb, today: todayISO(), half });
+    if (!r) return false;
     try {
-      await sbUpdateCheckin(session, ck.week_start, { action: "keep", chosen: null });
+      if (r.remove) await sbDeleteCheckin(session, ck.week_start);
+      else await sbUpdateCheckin(session, ck.week_start, r.patch);
+      if (r.start) {
+        const preset = presetForType(phases, r.start.type);
+        if (preset) { await sbSwitchDietPhase(session, { ...preset, rate_pct: r.start.ratePct }, dietPhases, phases); await reloadDietPhases(); }
+      }
     } catch (e) {
-      dbg("undo check-in FAILED: " + e.message);
-      window.alert("Couldn't undo — " + e.message);
-      return;
+      dbg("check-in change FAILED: " + e.message);
+      window.alert("Couldn't save that — " + e.message);
+      return false;
     }
-    if (ck.before) setPhases((prev) => prev.map((p) => (p.id === ck.preset_id && sameTarget(p.target, ck.chosen)
-      ? { ...p, target: { p: ck.before.p, f: ck.before.f, c: ck.before.c, cal: ck.before.cal }, fit: { date: todayISO(), reason: "undo", from: { ...p.target } } } : p)));
-    setCheckins((prev) => prev.map((x) => (x.week_start === ck.week_start ? { ...x, action: "keep", chosen: null } : x)));
+    setPhases((prev) => prev.map((p) => {
+      if (p.id !== ck.preset_id) return p;
+      let next = p;
+      if (sameTarget(p.target, ck.chosen) && !sameTarget(r.target, p.target)) next = { ...next, target: { ...r.target }, fit: { date: todayISO(), reason: "checkin", from: { ...p.target } } };
+      if (r.holdFrom) next = { ...next, holdFrom: r.holdFrom };
+      return next;
+    }));
+    setCheckins((prev) => (r.remove ? prev.filter((x) => x.week_start !== ck.week_start) : prev.map((x) => (x.week_start === ck.week_start ? { ...x, ...r.patch } : x))));
+    if (r.reviewDays) setReviewDays(true);
+    return true;
   };
 
   /* ---------- a phase's fresh target when it starts ----------
@@ -3481,7 +3556,8 @@ export default function App() {
             coachError={coachError}
             onSetDayIncluded={setDayIncluded}
             onCompleteCheckin={completeCheckin}
-            onUndoAutoCheckin={undoAutoCheckin}
+            onCheckinReason={resolveAutoCheckin}
+            reviewDays={reviewDays}
             onOpenMonth={() => setShowMonth(true)}
             showCalcPrompt={!!ob?.setup && !calcLater && phases.some((p) => p.example)}
             onOpenCalc={openCalc}
@@ -3540,7 +3616,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onUndoAutoCheckin, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -3672,10 +3748,10 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
         </div>
       )}
       {selectedDate === coaching?.today && coaching?.due && (
-        <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} />
+        <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} startShowDays={reviewDays} />
       )}
       {selectedDate === coaching?.today && coaching?.thisWeek?.chosen?.auto && (
-        <AutoCheckinNotice c={coaching} onUndo={onUndoAutoCheckin} />
+        <AutoCheckinNotice c={coaching} phases={phases} onReason={onCheckinReason} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
       <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
@@ -3944,37 +4020,97 @@ function DayStatusRow({ included, onChange }) {
    vs the phase's target, and the suggested targets; 3) Apply, Adjust
    (edit first) or Keep current. Every decision is saved.
    ============================================================ */
-// This week's maintenance check-in, applied for you: what changed, why, and Undo.
-function AutoCheckinNotice({ c, onUndo }) {
+// This week's maintenance check-in, applied for you: what changed and why,
+// with "Something off?" for the reasons to change it (resolveCheckinReason).
+function AutoCheckinNotice({ c, phases = [], onReason }) {
   const key = `mealprep:auto-checkin-seen:${c.weekStart}`;
   const [seen, setSeen] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch { return false; } });
+  const [open, setOpen] = useState(null); // null | "reasons" | "slow" | "cant-eat"
   const [busy, setBusy] = useState(false);
   const ck = c.thisWeek;
-  if (seen) return null;
-  const was = Number(ck.before?.cal), now = Number(ck.chosen?.cal);
+  if (seen || !ck?.chosen) return null;
+  const fmt = (n) => Math.round(Number(n)).toLocaleString("en-US");
+  const was = Number(ck.before?.cal), now = Number(ck.chosen.cal), est = Number(ck.estimate);
+  const reason = ck.chosen.reason || null;
   const hold = c.hold;
   const close = () => { setSeen(true); try { localStorage.setItem(key, "1"); } catch { /* private mode */ } };
+  const pick = async (r, opts) => { setBusy(true); await onReason(r, opts); setBusy(false); setOpen(null); };
+  const lbWeek = (cal) => { const d = driftLbPerWeek(cal, est); return `${Math.abs(d) < 0.05 ? "hold steady" : `${d < 0 ? "lose" : "gain"} about ${Math.abs(d).toFixed(1)} lb a week`}`; };
+  const slowOpt = (type) => {
+    const preset = presetForType(phases, type);
+    if (!preset) return null;
+    const rate = type === "deficit" ? SLOW_CUT_PCT : SLOW_BULK_PCT;
+    const weeks = defaultPhaseWeeks(preset);
+    const cal = phaseCalTarget(est, rate, c.weightLb);
+    const lb = c.weightLb ? Math.abs((rate / 100) * c.weightLb * (type === "surplus" ? WEEKS_PER_MONTH : 1)).toFixed(1) : null;
+    return (
+      <button key={type} style={S.ciReason} disabled={busy} onClick={() => pick(type === "deficit" ? "slow-cut" : "slow-bulk")}>
+        <b>{type === "deficit" ? "Lose slowly · 0.25%/week" : "Gain slowly · +0.5%/month"}</b>{lb ? ` (≈${lb} lb a ${type === "surplus" ? "month" : "week"})` : ""}
+        <div style={{ color: dim, fontSize: 12, marginTop: 2 }}>Starts today{cal != null ? ` at ${fmt(cal)} kcal` : ""}, {weeks} weeks to {shortDate(addDaysISO(c.today, weeks * 7 - 1))}, then back to maintenance.</div>
+      </button>
+    );
+  };
+  // what happened, once a reason was picked
+  const outcome = reason === "temporary" ? `Got it. Your calories stay at ${fmt(was)} this week. Next week's check-in will update them again.`
+    : reason === "cant-eat" ? `Got it. ${fmt(was)} this week: at that you'll ${lbWeek(was)}. Next week's check-in will update them again.`
+    : reason === "cant-eat-half" ? `Got it. ${fmt(now)} this week, halfway: at that you'll ${lbWeek(now)}. Next week's check-in moves you the rest.`
+    : reason === "hold-reset" ? `Holding ${c.weightLb ? `${c.weightLb.toFixed(1)} lb` : "your current weight"} from now. Calories ${fmt(was)} → ${fmt(now)}, your maintenance.`
+    : reason === "slow-cut" || reason === "slow-bulk" ? `${reason === "slow-cut" ? "Slow cut" : "Slow bulk"} started today. Your new targets are on the phase card.`
+    : null;
+  const reasons = checkinReasons(ck, hold);
+  // stayed under two weeks running: make it the plan
+  const lastWeek = (c.last?.chosen?.reason || "").startsWith("cant-eat");
+  const lead = (
+    <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>
+      {was === now ? `Calories stay at ${fmt(now)}` : `Calories ${fmt(was)} → ${fmt(now)}`}
+    </div>
+  );
   return (
     <div style={S.ciCard}>
       <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
-      <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>
-        {was === now ? `Calories stay at ${now.toLocaleString()}` : `Calories ${was.toLocaleString()} → ${now.toLocaleString()}`}
-      </div>
-      <div style={S.ciSub}>
-        Your maintenance from the last 3 weeks of logging and weigh-ins is {Math.round(Number(ck.estimate)).toLocaleString()} kcal.
-        {hold?.ratePct ? ` This week includes ${Math.abs(Math.round(paceKcal(hold.ratePct, c.weightLb)))} kcal/day ${hold.ratePct > 0 ? "extra" : "less"} to get back to ${hold.anchor.toFixed(1)} lb (you're ${Math.abs(hold.gapLb).toFixed(1)} lb ${hold.gapLb < 0 ? "under" : "over"}).` : ""}
-      </div>
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <button style={{ ...S.primaryBtn, flex: 2 }} onClick={close}>OK</button>
-        <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={async () => { setBusy(true); await onUndo(); setBusy(false); close(); }}>
-          Undo{was === now ? "" : ` (keep ${was.toLocaleString()})`}
-        </button>
+      {outcome ? (
+        <div style={{ ...S.ciLine, marginTop: 8 }}>{outcome}</div>
+      ) : (
+        <>
+          {lead}
+          <div style={S.ciSub}>
+            Your maintenance from the last 3 weeks of logging and weigh-ins is {fmt(est)} kcal.
+            {hold?.ratePct ? ` This week includes ${Math.abs(Math.round(paceKcal(hold.ratePct, c.weightLb)))} kcal/day ${hold.ratePct > 0 ? "extra" : "less"} to get back to ${hold.anchor.toFixed(1)} lb (you're ${Math.abs(hold.gapLb).toFixed(1)} lb ${hold.gapLb < 0 ? "under" : "over"}).` : ""}
+          </div>
+          {open === "reasons" && (
+            <div style={{ marginTop: 10 }}>
+              {reasons.includes("log") && <button style={S.ciReason} disabled={busy} onClick={() => pick("log")}><b>My log was incomplete</b><div style={{ color: dim, fontSize: 12, marginTop: 2 }}>Fix last week's days; the check-in runs again from them.</div></button>}
+              {reasons.includes("temporary") && <button style={S.ciReason} disabled={busy} onClick={() => pick("temporary")}><b>My weight is temporarily off</b><div style={{ color: dim, fontSize: 12, marginTop: 2 }}>Travel, illness, a salty weekend, your cycle. Stay at {fmt(was)} this week.</div></button>}
+              {reasons.includes("slow") && <button style={S.ciReason} disabled={busy} onClick={() => setOpen("slow")}><b>I want to lose or gain slowly</b></button>}
+              {reasons.includes("hold-reset") && <button style={S.ciReason} disabled={busy} onClick={() => pick("hold-reset")}><b>Hold my current weight instead</b><div style={{ color: dim, fontSize: 12, marginTop: 2 }}>Stop winning back {Math.abs(hold.gapLb).toFixed(1)} lb and hold {c.weightLb ? c.weightLb.toFixed(1) : "your weight"} from now.</div></button>}
+              {reasons.includes("cant-eat") && <button style={S.ciReason} disabled={busy} onClick={() => setOpen("cant-eat")}><b>I can't eat that right now</b></button>}
+            </div>
+          )}
+          {open === "slow" && <div style={{ marginTop: 10 }}>{slowOpt("deficit")}{slowOpt("surplus")}</div>}
+          {open === "cant-eat" && (
+            <div style={{ marginTop: 10 }}>
+              {lastWeek && <div style={{ ...S.ciSub, color: "#ffb454", marginBottom: 8 }}>You've stayed under 2 weeks running. If this is what you can eat, a slow {now > was ? "cut" : "bulk"} makes it the plan instead of a drift.</div>}
+              <button style={S.ciReason} disabled={busy} onClick={() => pick("cant-eat", { half: true })}>
+                <b>Meet halfway: {fmt((was + now) / 2)}</b><div style={{ color: dim, fontSize: 12, marginTop: 2 }}>You'll {lbWeek((was + now) / 2)}. Next week moves you the rest.</div>
+              </button>
+              <button style={S.ciReason} disabled={busy} onClick={() => pick("cant-eat")}>
+                <b>Stay at {fmt(was)} this week</b><div style={{ color: dim, fontSize: 12, marginTop: 2 }}>You'll {lbWeek(was)}.</div>
+              </button>
+              {lastWeek && slowOpt(now > was ? "deficit" : "surplus")}
+            </div>
+          )}
+        </>
+      )}
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
+        <button style={{ ...S.primaryBtn, flex: 1 }} onClick={close}>{open && !outcome ? `Use ${fmt(now)}` : "OK"}</button>
+        {!outcome && !open && reasons.length > 0 && <button style={{ ...S.linkBtn, color: dim }} onClick={() => setOpen("reasons")}>Something off?</button>}
+        {!outcome && open && <button style={{ ...S.linkBtn, color: dim }} onClick={() => setOpen(open === "reasons" ? null : "reasons")}>back</button>}
       </div>
     </div>
   );
 }
 
-function CheckInCard({ c, onToggleDay, onComplete }) {
+function CheckInCard({ c, onToggleDay, onComplete, startShowDays = false }) {
   const [adjusting, setAdjusting] = useState(false);
   const [edit, setEdit] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -3991,7 +4127,7 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   // resets the estimate); a macro edit holds them and balances (balanceMacros)
   const editCheck = edit ? checkMacros(edit, edit.cal, { phaseType: c.followed.phase_type, weightLb: c.weightLb }) : null;
   const calChanged = !!edit && s && edit.cal !== s.cal;
-  const [showDays, setShowDays] = useState(false);
+  const [showDays, setShowDays] = useState(startShowDays);
   const counted = logged.filter((d) => dayIncluded(d, c.intakeByDate, c.statusByDate)).length;
 
   const finish = async (action, chosen) => {
@@ -7095,7 +7231,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
           const maint = dietPhase.phase_type === "maintenance";
           const dir = (pct) => (pct < 0 ? "Losing" : pct > 0 ? "Gaining" : "Holding");
           // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
-          const anchorDate = dietPhase.phase_type === "maintenance" ? maintenanceAnchorDate(dietPhases, dietPhase) : dietPhase.start_date;
+          const anchorDate = dietPhase.phase_type === "maintenance" ? coaching?.hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : dietPhase.start_date;
           const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
           const hold = coaching?.hold;
           const weeksLeft = prog.plannedWeeks && !prog.overrun ? Math.max(0, Math.ceil(daysBetween(today, dietPhase.planned_end_date) / 7)) : null;
@@ -7898,6 +8034,7 @@ const S = {
   ciSub: { color: dim, fontSize: 12, marginTop: 2, lineHeight: 1.45 },
   ciTable: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 },
   ciCell: { background: panel2, borderRadius: 8, padding: 8, fontSize: 14 },
+  ciReason: { display: "block", width: "100%", textAlign: "left", background: panel2, border: `1px solid ${line}`, borderRadius: 8, padding: "10px 12px", marginBottom: 6, color: text, fontSize: 13, lineHeight: 1.4, cursor: "pointer", fontFamily: "inherit" },
   ciNotes: { color: dim, fontSize: 12, lineHeight: 1.5, marginTop: 8 },
   dsRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, color: dim, padding: "8px 2px", marginBottom: 10 },
   dsBtn: { background: "transparent", border: `1px solid ${line}`, color: text, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" },
@@ -8468,7 +8605,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
