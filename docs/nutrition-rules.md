@@ -34,7 +34,41 @@ The weekly check-in ties these together: it compares what you logged with how yo
 
 - **New accounts start with example targets.** They're marked as examples, so nothing treats them as your real maintenance until you edit them or use the calculator. *(App's choice)*
 - **Day overrides:** any weekday can use a different target than the phase, for example a Saturday refeed. It's set in that week's plan, and a new week starts with the previous week's overrides. Day-only targets can't be picked as a diet phase, so RepReport never mistakes a refeed for a cut.
-- **Target history:** every change to a target is dated, so a past day is always judged against the target it had then.
+- **Target history:** every change to a target is dated, so a past day is always judged against the target it had then. Every path below (editor saves, check-ins, a phase starting, targets following the estimate) changes a target from today; nothing rewrites a past day, a logged meal or a past check-in.
+
+### The Phases tab
+One card per saved target, plus the phase in effect and the maintenance estimate behind every number. *(Owner's design, Nov 2026)*
+
+- **The phase in effect** shows its applied calories, the **actual trend** from your weigh-ins (or when it will show) and its **target goal**, kept apart so a goal never reads as a result.
+- **The maintenance estimate** is labeled by source: **learned** (the latest check-in, from your data), **your number** (a check-in Edit with different calories), or **starting estimate** (your Maintenance target, before your data takes over; see [section 5](#5-maintenance-estimate-and-the-weekly-check-in)). With none, it says so and points to the calculator. A due check-in's new estimate shows as "would move it to …, not applied until you finish the check-in".
+- **Each card** shows its goal (cuts in % per week, bulks in % per month, maintenance "Hold", a refeed "One-day target"), calories and macros, and whether it's ACTIVE, a PRESET or PLANNED (with the date). When its saved calories are 10+ kcal off what the estimate and its rate give, it says "At your estimate: 1,960 (not applied)"; differences under 10 kcal are rounding and aren't shown. *(App's choice)*
+
+### Editing a target
+**Rate → calories → macros.** Calories are calculated, never typed (except a one-day target's, and Maintenance's while it's the starting estimate; see below).
+
+- **The rate** is typed as a size (cuts lose, bulks gain); the limits in [section 3](#3-diet-phases) apply: a warning past them, no save past the hard limit. "≈ 0.90 lb per week" shows what it means at your weight.
+- **Calories from the rate:** the estimate plus what the pace needs (1% of bodyweight a week = bodyweight × 35 kcal a day), to the nearest 10. *Example:* 2,500 kcal maintenance, 180 lb, 0.5%/week → 2,500 − 450 = **2,050**.
+- **Macros balance inside those calories** (4 kcal/g protein and carbs, 9 kcal/g fat, whole grams):
+  - protein or fat changed → carbs take the difference
+  - carbs changed → fat takes the difference
+
+  *Example:* 165 P / 70 F / 190 C = 2,050. Fat to 74 → carbs 181. Carbs to 199 instead → fat 66. Calories stay at 2,050.
+- **Rounding:** whole grams can't always land exactly (1 g of fat is 2¼ g of carbs), so the macros may total up to half a gram of the balancing macro off the target: ±2 kcal when carbs balance, ±4.5 when fat does. The editor shows the total when it differs. *Example:* fat 71 → carbs 188 → 2,051. *(App's choice)*
+- **Fat is at least 20% of the target's calories,** one-day targets included, rounded **up** to a whole gram so it never lands under 20%: 2,000 kcal → 45 g (44 g is 19.8%), 2,050 → 46 g, 2,250 → 50 g. It moves with the calories. *(Owner's choice, Nov 2026)*
+- **When the calories change** (a new rate, a new estimate, a phase starting), protein and fat stay, carbs take the difference, and fat rises to its new minimum if needed. The editor lists what saving changes, e.g. "Rate −0.50% → −0.70% / week · Calories 2,050 → 1,870 · Carbs 190 → 145 g".
+- **What can't be saved, and why:** fat under its minimum ("…carbs can be 245 g at most"), carbs below 0 because protein and fat already exceed the calories ("Lower fat to 50 g or less, or protein to 355 g or less"), or a total off the target by more than the rounding above. The save button stays off and nothing is adjusted for you: never protein, the calories, the rate or anything in RepReport.
+- **Protein and carbs have no hard limits** beyond 0 yet. Protein under the check-in's floor ([Macro split](#macro-split)) gets a note, not a block. *(Owner's decision pending, Nov 2026)*
+
+**Which phase an edit changes:**
+- **A preset not in effect:** its rate is its **default rate**, the one new phases start or are planned at (a blank rate on the calendar uses it too), and the one its calories are calculated at. Saving applies the calculated calories. Phases already on the calendar keep their own rates; the editor lists them.
+- **The phase in effect:** the rate is that phase's own (its diet_phases row, which RepReport reads). Changing it moves the applied calories by the difference the two paces need at your weight, the same as "Slow to 0.5%/week", so a check-in's step still in progress or a Keep carries over instead of jumping. *Example:* estimate 2,500, kept at 2,250 on a −0.7% cut (1,870 by the numbers); −0.5% → 2,430. It shows how far that is from what the estimate and pace give, and why ("You chose Keep at the Nov 2 check-in" / "A check-in moves calories at most 250 kcal a week"), with **Use 2,050 now** to take the full number at once (your choice, not capped, like the Slow button). A checkbox also makes the new rate the preset's default; otherwise the default is untouched. Saved from today; past days keep their targets. The calendar's rate edit for the phase in effect moves its calories the same way. Only that row changes: later planned phases keep their rates. *(Owner's request, Nov 2026)*
+- **Macro-only edits never change the calories,** and no edit here moves the maintenance estimate.
+
+### Targets follow the estimate
+- **Presets not in effect follow each recorded estimate from your data:** when a check-in is completed (Use, Edit or Keep), every cut, bulk and maintenance preset not in effect is recalculated at the new estimate and its own default rate, with protein and fat kept. Unlike the check-in's suggestion, the protein floor isn't applied here, and there's no ±250 cap: nobody is eating those targets yet. The card shows "Updated Nov 9: was 2,050". Before the estimate rests on your data, saved values stay; the estimate panel offers **Update them** for any preset off the current estimate. *(Owner's request, Nov 2026)*
+- **A phase that starts gets a fresh target:** when a phase comes into effect (a switch, a planned start date arriving, maintenance after a cut), its preset is recalculated from the recorded estimate and **that phase's own rate**, once per phase. *Example:* estimate 2,560, a planned cut at −0.5% starts → 2,110, whatever the Cut preset held. Without an estimate (or, for a cut or bulk, a weigh-in) the saved target is kept. The first time this runs on an existing account it only records which phase is in effect; nothing changes. *(Owner's request, Nov 2026)*
+- **One-day targets (refeeds) don't follow the estimate.** A refeed has no weekly rate, so its calories are set directly in its editor, which shows them against the estimate ("+608 kcal vs your 2,500 maintenance estimate, +24%") and the days it's used. The calculator still sets a refeed to maintenance calories, as before. Your number is never overwritten by a new estimate. *(App's choice: a refeed is a deliberate day, not a pace)*
+- **Maintenance while it's the starting estimate:** its calories are the starting estimate itself, so they stay editable (labeled "Starting maintenance estimate") until a check-in learns your real one; after that they're calculated like the rest.
 
 ### Starting targets calculator
 A first estimate of maintenance from a short profile. The weekly check-in corrects it once you have a few weeks of data.
@@ -61,7 +95,7 @@ From that maintenance, each target is built:
 **Which phase is in effect on a date:** the latest-starting phase on or before that date that hasn't been closed. A later phase simply takes over from an earlier one, so you can plan ahead without closing anything. RepReport resolves phases with the same rule.
 
 ### Target rate of weight change
-Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month**, because a week of bulk gain is smaller than day-to-day noise.
+Stored per phase as % of bodyweight. Each preset also has a default rate (the phase type's below unless you change it on the Phases tab): what a new phase starts at. A phase on the calendar keeps its own rate. Cuts are shown per week; bulks per **month**, because a week of bulk gain is smaller than day-to-day noise.
 
 | Phase | Default | Warning past | Won't save past |
 |---|---|---|---|
@@ -129,7 +163,11 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 Shown on Monday, or later that week if you missed it, until you complete it:
 1. **Confirm** which of last week's days were fully logged.
 2. **See** the maintenance estimate, your actual rate against the phase target, and suggested targets.
-3. **Choose** Apply, Adjust (edit first) or Keep current. Every decision is saved.
+3. **Choose** Use, Edit or Keep. Every decision is saved.
+   - **Use:** the suggestion becomes the target in effect.
+   - **Edit:** calories have their own field; macros balance inside them as in the Phases editor (fat at least 20%). Changing the calories is the Adjust above: they become the estimate, less the pace. Keeping the suggested calories and changing only the split is recorded as a Use and leaves the estimate alone. *(Owner's choice, Nov 2026: before, any split change counted as an Adjust, so a split tweak on a capped week could move the estimate)*
+   - **Keep:** the target in effect doesn't change.
+   - Whichever you pick, the presets not in effect follow the new estimate once it rests on your data ([Targets follow the estimate](#targets-follow-the-estimate)).
 
 The card keeps it short: which days count, the estimate's change this week (old → new), and the suggested targets. It doesn't show the raw 3-week number on its own, since that single reading swings with water weight; the estimate only moves part way toward it. *(Owner's request, Nov 2026)*
 
@@ -143,7 +181,7 @@ The card keeps it short: which days count, the estimate's change this week (old 
 ### Macro split
 For any calorie target:
 - **Protein:** never cut; raised to at least **2.0 g/kg** on a cut (Helms 2014) or **1.6 g/kg** otherwise (Morton 2018). *(Research-backed)*
-- **Fat:** kept, but never below **20% of calories** (Helms 2014: 15–30%). *(Research-backed range; 20% is the app's choice)*
+- **Fat:** kept, but never below **20% of calories**, rounded up to a whole gram (Helms 2014: 15–30%). *(Research-backed range; 20% is the owner's choice)*
 - **Carbs:** the rest.
 
 ---
@@ -248,10 +286,13 @@ These live in both apps. A change to one must be made in the other:
 - the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match, including the example's `beforeSets`/`afterSets`
 - the protein summary: Meal Prep computes it (`buildProteinStatus`) and saves it to `app_data.status` (`sbSaveStatus`); RepReport only displays it (`proteinSummary`); the field names in between must match
 - the goal check (`goalCheck`, `goalPhaseOf`, `goalPlanCheck`), wording included: RepReport writes the goal (`buildGoalStatus`), both apps run the same check on it
+- each phase's `target_rate_pct` (%/week): Meal Prep writes it (calendar, Phases tab, Slow button), RepReport reads it for a cut's planned pace and the goal line. A preset's default rate (`rate_pct`) lives only in Meal Prep's saved data, which RepReport never reads. Tests on both sides pin the effect of an edit (Meal Prep `tests/`, RepReport `tests/mealprep-rate-edit.test.js`).
 
 ---
 
 ## Open problems
+
+- **Protein and carb limits.** Only the 20% fat minimum is enforced in the editor. Hard limits for protein and carbs are still to be decided.
 
 - **Goal words wait for limits.** The goal line gives your pace as a number. Words like "lean" or "aggressive" need agreed limits first (see [Your training goal](#your-training-goal-from-repreport)).
 - **Duplicated logic can drift.** The shared rules above are copied, not shared code, so a change in one app can silently disagree with the other.

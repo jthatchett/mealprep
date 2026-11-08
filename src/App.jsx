@@ -796,7 +796,7 @@ async function sbInsertDietPhase(session, { preset, start_date, planned_end_date
       start_date,
       planned_end_date: planned_end_date || null,
       end_date: null,
-      target_rate_pct: target_rate_pct ?? roundRate(defaultRatePct(preset.phase_type, preset.name)),
+      target_rate_pct: target_rate_pct ?? roundRate(presetRatePct(preset)),
     }),
   });
   if (!res.ok) throw new Error("Failed to add phase: " + res.status);
@@ -898,7 +898,7 @@ async function sbSwitchDietPhase(session, preset, rows, presets) {
   const fields = { phase_id: preset.id, phase_name: preset.name, phase_type: preset.phase_type, start_date: today, planned_end_date: planned };
   if (current && current.start_date === today) {
     await sbUpdateDietPhase(session, current.id, {
-      ...fields, target_rate_pct: roundRate(defaultRatePct(preset.phase_type, preset.name)),
+      ...fields, target_rate_pct: roundRate(presetRatePct(preset)),
     });
   } else {
     if (current) await sbUpdateDietPhase(session, current.id, { end_date: addDaysISO(today, -1) });
@@ -1152,10 +1152,11 @@ const paceKcal = (ratePctPerWeek, weightLb) => (weightLb ? ((ratePctPerWeek / 10
 //           (cut ≥2 g/kg bodyweight — Helms 2014; otherwise ≥1.6 g/kg — Morton 2018)
 //  fat:     kept, but never under 20% of calories (Helms 2014: 15–30%)
 //  carbs:   take the rest
+const proteinFloorG = (phaseType, weightLb) => (weightLb ? Math.round(lbToKg(weightLb) * (phaseType === "deficit" ? 2.0 : 1.6)) : 0);
 function splitMacros({ cal, current, phaseType, weightLb }) {
-  const floorP = weightLb ? Math.round(lbToKg(weightLb) * (phaseType === "deficit" ? 2.0 : 1.6)) : 0;
+  const floorP = proteinFloorG(phaseType, weightLb);
   const p = Math.max(Math.round(current.p), floorP);
-  const f = Math.max(Math.round(current.f), Math.round((0.2 * cal) / 9));
+  const f = Math.max(Math.round(current.f), fatMinG(cal));
   const c = Math.max(0, Math.round((cal - 4 * p - 9 * f) / 4));
   return { p, f, c, cal: Math.round(cal), proteinRaised: p > Math.round(current.p), fatRaised: f > Math.round(current.f) };
 }
@@ -1175,6 +1176,223 @@ function suggestTargets({ estimate, ratePctPerWeek, weightLb, current, phaseType
     tooFast: impliedPct < -1,
     impliedPct,
   };
+}
+
+/* ---------- phase targets: calories from the rate, macros inside them ----------
+   A cut's or bulk's calories come from the maintenance estimate plus what
+   its target pace needs; maintenance is the estimate itself. Macros are
+   whole grams (4 kcal/g protein and carbs, 9 kcal/g fat) and balance inside
+   that fixed calorie target:
+     protein or fat changed -> carbs take the difference
+     carbs changed          -> fat takes the difference
+   Fat is at least 20% of the target's calories (owner's choice, Nov 2026),
+   rounded UP to a whole gram so it never lands under 20%: 2,000 kcal ->
+   45 g (44 g would be 19.8%), 2,050 -> 46 g, 2,250 -> 50 g. Protein and
+   carbs have no hard limits beyond "not below 0"; the protein floor the
+   check-in uses (proteinFloorG) is shown as guidance, not enforced. */
+const FAT_MIN_SHARE = 0.2;
+const macroKcal = (t) => 4 * (Number(t.p) || 0) + 9 * (Number(t.f) || 0) + 4 * (Number(t.c) || 0);
+function fatMinG(cal) {
+  return Math.max(0, Math.ceil((FAT_MIN_SHARE * (Number(cal) || 0)) / 9 - 1e-9));
+}
+// Whole grams can't always hit a calorie target exactly (1 g of fat is
+// 9 kcal, 1 g of carbs 4), so the macros may total up to half a gram of the
+// balancing macro away from it: ±2 kcal when carbs balance, ±4.5 when fat does.
+const MACRO_KCAL_TOLERANCE = 4.5;
+
+// A phase's calorie target: estimate + the calories its pace needs, to the
+// nearest 10 kcal (as the calculator rounds). null without an estimate, or
+// without a weight for a phase that has a pace.
+function phaseCalTarget(estimate, ratePctPerWeek, weightLb) {
+  if (estimate == null || !Number.isFinite(Number(estimate))) return null;
+  if (ratePctPerWeek && !weightLb) return null;
+  return Math.round((Number(estimate) + paceKcal(ratePctPerWeek || 0, weightLb)) / 10) * 10;
+}
+
+// A preset's default rate (%/week): what new phases started or planned from
+// it begin at, and what its saved calories are worked out at while it isn't
+// in effect. A phase already on the calendar keeps its own target_rate_pct.
+function presetRatePct(preset) {
+  if (!preset || (preset.phase_type !== "deficit" && preset.phase_type !== "surplus")) return 0;
+  const r = preset.rate_pct;
+  return r != null && Number.isFinite(Number(r)) ? Number(r) : defaultRatePct(preset.phase_type, preset.name);
+}
+
+// New calories, same protein and fat (fat raised to its minimum if the new
+// calories need more), carbs take the rest. Carbs can come out below 0 when
+// protein and fat alone are over the calories: checkMacros flags it, and
+// with clampCarbs (automatic updates) carbs stop at 0 and `over` says by how much.
+function fitMacros(current, cal, { clampCarbs = false } = {}) {
+  const p = Math.max(0, Math.round(Number(current.p) || 0));
+  const f0 = Math.max(0, Math.round(Number(current.f) || 0));
+  const f = Math.max(f0, fatMinG(cal));
+  const raw = Math.round((cal - 4 * p - 9 * f) / 4);
+  const c = clampCarbs ? Math.max(0, raw) : raw;
+  return { p, f, c, cal: Math.round(cal), fatRaised: f > f0, over: raw < 0 ? -raw * 4 : 0 };
+}
+
+// One macro edited, calories held: protein or fat -> carbs balance; carbs -> fat.
+// The balanced macro isn't clamped, so checkMacros can explain a conflict.
+function balanceMacros(t, field, value, cal) {
+  const v = Math.max(0, Math.round(Number(value) || 0));
+  const next = { p: Math.round(Number(t.p) || 0), f: Math.round(Number(t.f) || 0), c: Math.round(Number(t.c) || 0), [field]: v };
+  if (field === "c") next.f = Math.round((cal - 4 * next.p - 4 * next.c) / 9);
+  else next.c = Math.round((cal - 4 * next.p - 9 * next.f) / 4);
+  return next;
+}
+
+// Can this split be saved against `cal`? errors block saving; notes don't.
+// limits: the most of each macro that still fits (the others as they are,
+// fat at its minimum where it's the one making room).
+function checkMacros(t, cal, { phaseType = null, weightLb = null } = {}) {
+  const p = Number(t.p), f = Number(t.f), c = Number(t.c);
+  const errors = [], notes = [];
+  const fmt = (n) => Math.round(n).toLocaleString("en-US");
+  if (!(cal > 0)) return { ok: false, errors: ["No calorie target to fit the macros into yet."], notes, total: macroKcal(t), fatMin: 0, limits: null };
+  const total = macroKcal(t);
+  const fatMin = fatMinG(cal);
+  // does a split fit: nothing below 0, fat at its minimum (of the target or,
+  // if rounding puts the total above it, of the total), total within tolerance
+  const fits = (x) => x.p >= 0 && x.c >= 0 && x.f >= fatMinG(Math.max(cal, macroKcal(x))) && Math.abs(macroKcal(x) - cal) <= MACRO_KCAL_TOLERANCE;
+  // the most of `field` that still fits once balanced (start from the
+  // algebraic bound and step down past any rounding edge)
+  const most = (base, field, guess) => {
+    for (let v = Math.floor(guess) + 1; v >= 0; v--) if (fits(balanceMacros(base, field, v, cal))) return v;
+    return null;
+  };
+  const base = { p: Math.max(0, p || 0), f: Math.max(0, f || 0), c: Math.max(0, c || 0) };
+  const limits = {
+    p: most(base, "p", (cal - 9 * base.f) / 4),                                   // carbs balance, down to 0
+    pAtFatMin: most({ ...base, f: fatMin }, "p", (cal - 9 * fatMin) / 4),         // the same with fat at its minimum
+    f: most(base, "f", (cal - 4 * base.p) / 9),                                   // carbs balance, down to 0
+    c: most(base, "c", (cal - 4 * base.p - 9 * fatMin) / 4 + 1),                  // fat balances, down to its minimum
+  };
+  const lim = (v) => fmt(Math.max(0, v ?? 0));
+  if (![p, f, c].every(Number.isFinite)) errors.push("Enter protein, fat and carbs as numbers.");
+  else {
+    if (p < 0) errors.push("Protein can't be below 0 g.");
+    if (c < 0) {
+      errors.push(`Protein ${fmt(p)} g and fat ${fmt(f)} g already come to ${fmt(4 * p + 9 * f)} kcal, over the ${fmt(cal)} kcal target, so carbs would be below 0. `
+        + (limits.f != null && limits.f >= fatMin
+          ? `Lower fat to ${lim(limits.f)} g or less, or protein to ${lim(limits.p)} g or less.`
+          : `Fat can't go under its ${fmt(fatMin)} g minimum, so lower protein to ${lim(limits.pAtFatMin)} g or less.`));
+    }
+    const fatNeed = fatMinG(Math.max(cal, total));
+    if (f < fatNeed) {
+      errors.push(`Fat would be ${fmt(f)} g, under its ${fmt(fatNeed)} g minimum (20% of ${fmt(Math.max(cal, total))} kcal). `
+        + (limits.c != null ? `With protein at ${fmt(p)} g, carbs can be ${lim(limits.c)} g at most.` : `Protein ${fmt(p)} g leaves no room for it: lower protein to ${lim(limits.pAtFatMin)} g or less.`));
+    }
+    if (!errors.length && Math.abs(total - cal) > MACRO_KCAL_TOLERANCE) {
+      errors.push(`These macros total ${fmt(total)} kcal, ${fmt(Math.abs(total - cal))} ${total > cal ? "over" : "under"} the ${fmt(cal)} kcal target.`);
+    }
+    const floorP = phaseType ? proteinFloorG(phaseType, weightLb) : 0;
+    if (floorP && p >= 0 && p < floorP) {
+      notes.push(`Protein is under the ${fmt(floorP)} g (${phaseType === "deficit" ? "2.0" : "1.6"} g/kg) the weekly check-in raises it to${phaseType === "deficit" ? " on a cut" : ""}. You can still save it.`);
+    }
+  }
+  return { ok: !errors.length, errors, notes, total, fatMin, limits };
+}
+
+// A target recalculated for new calories, recording what it was calculated
+// from and what it replaced, so the card can say what changed and why.
+function refitTarget(preset, cal, info) {
+  const t = fitMacros(preset.target, cal, { clampCarbs: true });
+  const target = { p: t.p, f: t.f, c: t.c, cal: t.cal };
+  if (sameTarget(target, preset.target)) return null;
+  return { target, fit: { ...info, from: { ...preset.target }, fatRaised: t.fatRaised, over: t.over } };
+}
+
+// Inactive presets follow the maintenance estimate: each phase preset not in
+// effect today is recalculated at its own default rate (cuts and bulks) or
+// at the estimate (maintenance). Protein and fat stay (fat up to its
+// minimum), carbs take the change. Day targets (refeeds) are left alone:
+// they're set directly. Run when a check-in records a new estimate from
+// your data; the same array back when nothing changed.
+function realignPresets(presets, { estimate, weightLb, skipIds = [], date, reason = "estimate", source = "learned" }) {
+  if (estimate == null) return presets;
+  let changed = false;
+  const next = (presets || []).map((p) => {
+    if (skipIds.includes(p.id) || !isPhaseType(p.phase_type)) return p;
+    const rate = presetRatePct(p);
+    const cal = phaseCalTarget(estimate, rate, weightLb);
+    if (cal == null) return p;
+    const r = refitTarget(p, cal, { date, reason, estimate: Math.round(estimate), source, ratePct: roundRate(rate), weightLb: weightLb ? r1(weightLb) : null });
+    if (!r) return p;
+    changed = true;
+    return { ...p, target: r.target, fit: r.fit, example: false };
+  });
+  return changed ? next : presets;
+}
+
+// When a phase comes into effect (switched to, or a planned phase's start
+// date arrives) its preset gets a fresh target: the current estimate plus
+// that phase's OWN rate (row.target_rate_pct), not whatever the preset last
+// held. startedFor remembers the diet_phases row it was done for, so it
+// happens once per phase. The first time this runs for an account (no
+// preset has startedFor yet) it only records where things stand: the phase
+// already in effect keeps its target. Without an estimate (or a weight, for
+// a cut or bulk) the saved target is kept. The same array back when nothing changed.
+function phaseStartUpdate(presets, { row, estimate, weightLb, date, source = null }) {
+  let next = presets || [];
+  let changed = false;
+  if (next.some((p) => p.startedFor === undefined)) {
+    next = next.map((p) => (p.startedFor !== undefined ? p : { ...p, startedFor: row && p.id === row.phase_id ? row.id : null }));
+    changed = true;
+  }
+  const p = row ? next.find((x) => x.id === row.phase_id) : null;
+  if (p && p.startedFor !== row.id) {
+    const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
+    const cal = phaseCalTarget(estimate, rate, weightLb);
+    const r = cal == null ? null : refitTarget(p, cal, { date, reason: "start", estimate: Math.round(estimate), source, ratePct: roundRate(rate), weightLb: weightLb ? r1(weightLb) : null });
+    next = next.map((x) => (x.id !== p.id ? x : r ? { ...x, target: r.target, fit: r.fit, startedFor: row.id, example: false } : { ...x, startedFor: row.id }));
+    changed = true;
+  }
+  return changed ? next : presets;
+}
+
+// The phase in effect changes pace (Phases editor, calendar): its calories
+// move by the difference in what the two paces need at this weight, from
+// the target you have now, so a check-in's step still in progress (or a
+// Keep) carries over instead of jumping. Same as "Slow to 0.5%/week".
+function shiftForRate(target, oldRatePct, newRatePct, weightLb) {
+  const delta = paceKcal(newRatePct, weightLb) - paceKcal(oldRatePct, weightLb);
+  return Math.round(Number(target.cal) + delta);
+}
+
+// Where the maintenance estimate behind the targets comes from: the latest
+// recorded check-in (from your data, or your Edit), else your Maintenance
+// target as a starting estimate, else none.
+function estimateBasis({ checkins, maintenance }) {
+  const sorted = [...(checkins || [])].sort((a, b) => (a.week_start < b.week_start ? -1 : 1));
+  const last = sorted[sorted.length - 1] || null;
+  if (last && last.estimate != null) {
+    const learned = sorted.some((c) => c.estimate_raw != null);
+    return { kcal: Number(last.estimate), source: last.action === "adjust" ? "adjusted" : learned ? "learned" : "starting", asOf: last.week_start };
+  }
+  if (maintenance && !maintenance.example && Number(maintenance.target?.cal) > 0) return { kcal: Number(maintenance.target.cal), source: "starting", asOf: null };
+  return null;
+}
+
+// What a completed check-in does. Use and Edit set the phase's target; an
+// Edit that keeps the suggested calories only changes the split, so it's
+// recorded as a Use and doesn't move the estimate (an Edit with different
+// calories makes them the estimate, less the pace: "your Adjust sticks").
+// Keep changes nothing in effect. Either way, once the estimate rests on
+// your data, the presets not in effect follow it.
+function checkinOutcome({ action, chosen, c, presets, date }) {
+  let act = action;
+  if (act === "adjust" && chosen && c.suggestion && Math.round(chosen.cal) === Math.round(c.suggestion.cal)) act = "apply";
+  const estimate = act === "adjust" && chosen?.cal != null ? chosen.cal - paceKcal(c.ratePct, c.weightLb) : c.estimate;
+  let next = presets;
+  if (act !== "keep" && chosen) {
+    next = next.map((p) => (p.id === c.followed.id
+      ? { ...p, target: { p: chosen.p, f: chosen.f, c: chosen.c, cal: chosen.cal }, fit: { date, reason: "checkin", estimate: Math.round(estimate), source: act === "adjust" ? "adjusted" : "learned", ratePct: roundRate(c.ratePct), weightLb: c.weightLb ? r1(c.weightLb) : null, from: { ...p.target } } }
+      : p));
+  }
+  if (c.grounded && estimate != null) {
+    next = realignPresets(next, { estimate, weightLb: c.weightLb, skipIds: [c.followed.id], date, reason: "estimate", source: act === "adjust" ? "adjusted" : "learned" });
+  }
+  return { action: act, estimate, presets: next };
 }
 
 /* ---------- starting targets calculator ----------
@@ -1217,7 +1435,7 @@ function estimateMaintenance({ sex, age, heightIn, weightLb, bodyFatPct, movemen
 // 2014: 15–30%), carbs the rest.
 function targetsFromMaintenance(preset, maintenance, weightLb) {
   const type = preset.phase_type;
-  const rate = type === "deficit" || type === "surplus" ? defaultRatePct(type, preset.name) : 0;
+  const rate = presetRatePct(preset);
   const cal = Math.round((maintenance + (rate / 100) * weightLb * KCAL_PER_LB / 7) / 10) * 10;
   const fatShare = type === "deficit" || type === "day" ? 0.2 : 0.25; // refeeds: carbs, not fat
   const { p, f, c } = splitMacros({ cal, current: { p: 0, f: Math.round((fatShare * cal) / 9) }, phaseType: type, weightLb });
@@ -1575,7 +1793,7 @@ const SEED_PHASES = [
 // maintenance (the estimate's starting guess, the % vs maintenance).
 // Editing a preset's numbers clears it.
 function ph(name, p, f, c, cal, stableId) {
-  return { id: stableId || uid(), name, phase_type: SEED_PHASE_TYPES[stableId], target: { p, f, c, cal }, example: true };
+  return { id: stableId || uid(), name, phase_type: SEED_PHASE_TYPES[stableId], target: { p, f, c, cal }, example: true, startedFor: null };
 }
 
 function uid() {
@@ -2037,6 +2255,8 @@ export default function App() {
   const [strengthAnswer, setStrengthAnswer] = useState(null); // this session's answer to the strength suggestion (see strengthChoice)
   const [intake, setIntake] = useState({});           // food log rows by date (loaded on demand)
   const [targetHistory, setTargetHistory] = useState([]); // target_history rows, oldest first
+  const [historyReady, setHistoryReady] = useState(false); // target history loaded: target changes can be dated
+  const [bwLoaded, setBwLoaded] = useState(false);         // weigh-ins loaded at least once
   // latest history for the save path (its closure can be a render behind), and
   // whether it loaded — never record against a history we failed to read
   const historyRef = useRef({ loaded: false, rows: [] });
@@ -2152,7 +2372,7 @@ export default function App() {
         }
         // not tied to this effect's cleanup: a token refresh re-runs the effect,
         // and the guard above skips that re-run, so this result must land
-        if (historyLoadForRef.current === uid) { historyRef.current = { loaded: true, rows }; setTargetHistory(rows); }
+        if (historyLoadForRef.current === uid) { historyRef.current = { loaded: true, rows }; setTargetHistory(rows); setHistoryReady(true); }
       } catch (e) {
         historyLoadForRef.current = null; // let a later run retry
         dbg("target history load FAILED: " + e.message); // past days fall back to current targets
@@ -2201,6 +2421,9 @@ export default function App() {
     setRangeIntake({});
     setDayStatus({});
     setCheckins([]);
+    setCheckinsLoaded(false);
+    setBwLoaded(false);
+    setHistoryReady(false);
     // the next account must not inherit this one's training status or its
     // answer to the strength suggestion
     setTraining(null);
@@ -2457,6 +2680,7 @@ export default function App() {
       if (weights.status === "fulfilled") {
         dailyCheckDayRef.current = day;
         setBwLog(weights.value);
+        setBwLoaded(true);
         const todayRow = weights.value.find((r) => r.date === day);
         if (!todayRow && !bwSkippedOn(day)) setShowBwModal(true);
       } else {
@@ -2471,7 +2695,25 @@ export default function App() {
     return () => { cancelled = true; document.removeEventListener("visibilitychange", onVisible); };
   }, [loaded, session, sideLoadNonce]);
 
-  const reloadDietPhases = async () => setDietPhases(await sbLoadDietPhases(session));
+  const reloadDietPhases = async () => { const rows = await sbLoadDietPhases(session); setDietPhases(rows); return rows; };
+
+  // The phase in effect today changed pace (calendar or Phases): its target's
+  // calories move by what the new pace needs (shiftForRate); carbs take it,
+  // fat up to its minimum. `target` overrides that with macros already chosen.
+  const applyActiveRate = (row, oldRate, newRate, target = null) => {
+    const weightLb = coaching?.weightLb ?? null;
+    setPhases((prev) => prev.map((p) => {
+      if (p.id !== row.phase_id) return p;
+      let t = target;
+      if (!t) {
+        if (!weightLb) return p; // no weight: the pace's calories can't be worked out, target kept
+        const f = fitMacros(p.target, shiftForRate(p.target, oldRate, newRate, weightLb), { clampCarbs: true });
+        t = { p: f.p, f: f.f, c: f.c, cal: f.cal };
+      }
+      if (sameTarget(t, p.target)) return p;
+      return { ...p, target: t, example: false, fit: { date: todayISO(), reason: "rate", ratePct: roundRate(newRate), fromRatePct: roundRate(oldRate), weightLb: weightLb ? r1(weightLb) : null, estimate: coaching?.basis ? Math.round(coaching.basis.kcal) : null, source: coaching?.basis?.source || null, from: { ...p.target } } };
+    }));
+  };
 
   // Onboarding: decided once the data is in. An account that already has
   // real targets or a diet phase has been using the app: it skips it all.
@@ -2511,8 +2753,15 @@ export default function App() {
   // the calendar always shows what's actually stored
   const editDietPhases = async (write) => {
     try {
+      const before = phaseOnDate(dietPhases, todayISO());
       await write(session);
-      await reloadDietPhases();
+      const rows = await reloadDietPhases();
+      // today's phase given a new pace (same phase, same preset): its calories follow
+      const after = phaseOnDate(rows, todayISO());
+      if (before && after && after.id === before.id && after.phase_id === before.phase_id && after.phase_type !== "maintenance"
+        && Math.abs(phaseRatePct(after) - phaseRatePct(before)) > EPS) {
+        applyActiveRate(after, phaseRatePct(before), phaseRatePct(after));
+      }
       return true;
     } catch (e) {
       dbg("edit phase FAILED: " + e.message);
@@ -2550,6 +2799,7 @@ export default function App() {
   const [rangeProtein, setRangeProtein] = useState(null); // { iso: grams | null (a food's protein unknown) }; null until loaded
   const [dayStatus, setDayStatus] = useState({});     // { iso: included } — explicit choices only
   const [checkins, setCheckins] = useState([]);
+  const [checkinsLoaded, setCheckinsLoaded] = useState(false);
   const [coachError, setCoachError] = useState(null);
   useEffect(() => {
     if (!loaded || !session) return;
@@ -2574,6 +2824,7 @@ export default function App() {
         setRangeProtein(protein);
         setDayStatus(Object.fromEntries(status.map((s) => [s.date, s.included])));
         setCheckins(cks);
+        setCheckinsLoaded(true);
         setCoachError(null);
       } catch (e) {
         dbg("check-in data load FAILED: " + e.message);
@@ -2623,7 +2874,9 @@ export default function App() {
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
     return {
-      today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct,
+      today, weekStart, firstData, intakeByDate, statusByDate, raw, estimate, prior, agrees, startingGuess, weightLb, ratePct, grounded,
+      // the estimate the saved targets rest on (recorded, never this week's unapplied one)
+      basis: estimateBasis({ checkins: sorted, maintenance: maint }),
       actualPct: wk.ready ? wk.pctPerWeek : null, followed, suggestion, thisWeek, last,
       // nothing to check in on until there's an estimate (example targets, no data yet)
       // not until there's a logged day before today: a brand-new account's
@@ -2667,16 +2920,16 @@ export default function App() {
 
   // Record this week's check-in; Apply/Adjust also update the phase's targets
   // (target history keeps the old values for past days).
-  const completeCheckin = async (action, chosen) => {
+  const completeCheckin = async (requested, chosen) => {
     const c = coaching;
     if (!c || !c.followed) return false;
     const before = { ...c.followed.target };
     // Adjust: the calories you chose become the estimate (less what the
     // phase's pace adds), so next week starts from your number instead of
     // pulling you back toward the old one. (Owner's choice, Oct 2026)
-    const estimate = action === "adjust" && chosen?.cal != null
-      ? chosen.cal - paceKcal(c.ratePct, c.weightLb)
-      : c.estimate;
+    // An Edit that only changes the split is a Use (see checkinOutcome).
+    const date = todayISO();
+    const { action, estimate } = checkinOutcome({ action: requested, chosen, c, presets: store.phases || [], date });
     try {
       await sbInsertCheckin(session, {
         week_start: c.weekStart, estimate: Math.round(estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw),
@@ -2691,12 +2944,61 @@ export default function App() {
       window.alert("Couldn't save the check-in — " + e.message);
       return false;
     }
-    if (action !== "keep" && chosen) {
-      setPhases((prev) => prev.map((p) => (p.id === c.followed.id ? { ...p, target: { p: chosen.p, f: chosen.f, c: chosen.c, cal: chosen.cal } } : p)));
-    }
+    // Use/Edit set the phase's target; Keep leaves it. Presets not in effect
+    // follow the new estimate either way (once it rests on your data).
+    setPhases((prev) => checkinOutcome({ action: requested, chosen, c, presets: prev, date }).presets);
     setCheckins((prev) => [...prev, {
       week_start: c.weekStart, estimate: Math.round(estimate), estimate_raw: c.raw.raw == null ? null : Math.round(c.raw.raw), action, chosen,
     }]);
+    return true;
+  };
+
+  /* ---------- a phase's fresh target when it starts ----------
+     When a phase comes into effect (switched to, a planned start date
+     arriving, or maintenance after a cut), its preset is recalculated from
+     the recorded estimate and that phase's own rate (phaseStartUpdate). Waits
+     until everything it reads has loaded, so it never works from a partial
+     picture, and runs once per phase (startedFor). */
+  useEffect(() => {
+    if (!loaded || !store || !dietLoaded || !checkinsLoaded || !bwLoaded || !historyReady || loadError) return;
+    const row = phaseOnDate(dietPhases, todayISO());
+    const basis = coaching?.basis || null;
+    const next = phaseStartUpdate(store.phases || [], { row, estimate: basis?.kcal ?? null, weightLb: coaching?.weightLb ?? null, date: todayISO(), source: basis?.source || null });
+    if (next !== store.phases) setPhases((prev) => (prev === store.phases ? next : prev));
+  }, [loaded, store, dietLoaded, checkinsLoaded, bwLoaded, historyReady, loadError, dietPhases, coaching]);
+
+  // Phases tab saves. A preset not in effect: its target and default rate.
+  // The phase in effect: its own rate goes on its diet_phases row (what
+  // RepReport reads), and the target saved from today (target history keeps
+  // the old one for past days). Calories only change through the rate.
+  const savePresetTarget = (presetId, { target, ratePct = null, cal = null }) => {
+    setPhases((prev) => prev.map((p) => {
+      if (p.id !== presetId) return p;
+      const next = { ...p, target: { p: target.p, f: target.f, c: target.c, cal: cal ?? target.cal }, example: false };
+      if (ratePct != null) next.rate_pct = roundRate(ratePct);
+      if (!sameTarget(next.target, p.target)) next.fit = { date: todayISO(), reason: "edit", from: { ...p.target }, ratePct: ratePct != null ? roundRate(ratePct) : null };
+      return next;
+    }));
+  };
+  const saveActiveTarget = async ({ target, ratePct, alsoDefault = false }) => {
+    const row = phaseOnDate(dietPhases, todayISO());
+    if (!row) return false;
+    const oldRate = phaseRatePct(row);
+    if (ratePct != null && Math.abs(ratePct - oldRate) > EPS) {
+      try {
+        await sbUpdateDietPhase(session, row.id, { target_rate_pct: roundRate(ratePct) });
+        await reloadDietPhases();
+      } catch (e) {
+        dbg("phase rate save FAILED: " + e.message);
+        window.alert("Couldn't save the phase's rate — " + e.message);
+        return false;
+      }
+      applyActiveRate(row, oldRate, ratePct, target);
+    } else {
+      setPhases((prev) => prev.map((p) => (p.id === row.phase_id && !sameTarget(target, p.target)
+        ? { ...p, target: { ...target }, example: false, fit: { date: todayISO(), reason: "edit", from: { ...p.target }, ratePct: roundRate(oldRate) } } : p)));
+    }
+    if (alsoDefault && ratePct != null) setPhases((prev) => prev.map((p) => (p.id === row.phase_id ? { ...p, rate_pct: roundRate(ratePct) } : p)));
     return true;
   };
 
@@ -2734,7 +3036,9 @@ export default function App() {
     }
     const cal = Math.round((Number(followed.target.cal) + deltaKcal) / 10) * 10;
     const t = splitMacros({ cal, current: followed.target, phaseType: "deficit", weightLb: coaching.weightLb });
-    setPhases((prev) => prev.map((p) => (p.id === followed.id ? { ...p, target: { p: t.p, f: t.f, c: t.c, cal: t.cal }, example: false } : p)));
+    const fromRatePct = phaseRatePct(dietPhase);
+    setPhases((prev) => prev.map((p) => (p.id === followed.id ? { ...p, target: { p: t.p, f: t.f, c: t.c, cal: t.cal }, example: false,
+      fit: { date: todayISO(), reason: "rate", ratePct: STRENGTH_SLOW_TO_PCT, fromRatePct: roundRate(fromRatePct), weightLb: coaching.weightLb ? r1(coaching.weightLb) : null, from: { ...p.target } } } : p)));
     try { await reloadDietPhases(); } catch (e) { dbg("diet phase reload FAILED: " + e.message); }
     await rememberStrengthChoice("slow", changePct);
   };
@@ -3088,6 +3392,11 @@ export default function App() {
             dietPhases={dietPhases}
             bwLog={bwLog}
             targetHistory={targetHistory}
+            coaching={coaching}
+            training={training}
+            week={todayWeek}
+            onSavePreset={savePresetTarget}
+            onSaveActive={saveActiveTarget}
             onSwitchPhase={switchPhase}
             onOpenCalendar={() => { setTab("plan"); setShowMonth(true); }}
             onOpenCalc={openCalc}
@@ -3530,7 +3839,10 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
   const needDays = Math.max(0, EST_MIN_INCLUDED - c.raw.includedDays);
   const needWeigh = Math.max(0, EST_MIN_WEIGHINS - c.raw.weighInDays);
   const signed = (n, d = 0) => (n > 0 ? "+" : n < 0 ? "−" : "±") + Math.abs(n).toFixed(d);
-  const editCal = edit ? Math.round(4 * edit.p + 4 * edit.c + 9 * edit.f) : 0;
+  // Edit: calories are their own field (changing them is the Adjust that
+  // resets the estimate); a macro edit holds them and balances (balanceMacros)
+  const editCheck = edit ? checkMacros(edit, edit.cal, { phaseType: c.followed.phase_type, weightLb: c.weightLb }) : null;
+  const calChanged = !!edit && s && edit.cal !== s.cal;
   const [showDays, setShowDays] = useState(false);
   const counted = logged.filter((d) => dayIncluded(d, c.intakeByDate, c.statusByDate)).length;
 
@@ -3600,10 +3912,14 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             {[["Calories", "cal"], ["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].map(([lab, k]) => (
               <div key={k} style={S.ciCell}>
                 <div style={{ color: dim, fontSize: 11 }}>{lab}</div>
-                {adjusting && k !== "cal" ? (
-                  <NumInput type="number" value={edit[k]} onChange={(e) => setEdit({ ...edit, [k]: Math.max(0, parseFloat(e.target.value) || 0) })} style={{ ...S.fInput, padding: "4px 6px" }} />
+                {adjusting ? (
+                  <NumInput type="number" inputMode="numeric" value={edit[k]} aria-label={lab}
+                    onChange={(e) => setEdit(k === "cal"
+                      ? (() => { const cal = Math.max(0, Math.round(parseFloat(e.target.value) || 0)); const t = fitMacros(edit, cal); return { p: t.p, f: t.f, c: t.c, cal }; })()
+                      : { ...balanceMacros(edit, k, e.target.value, edit.cal), cal: edit.cal })}
+                    style={{ ...S.fInput, padding: "4px 6px" }} />
                 ) : (
-                  <div style={{ fontWeight: 700 }}>{(adjusting && k === "cal" ? editCal : s[k]).toLocaleString()}{k === "cal" ? "" : " g"}</div>
+                  <div style={{ fontWeight: 700 }}>{s[k].toLocaleString()}{k === "cal" ? "" : " g"}</div>
                 )}
                 <div style={{ color: dim, fontSize: 11 }}>now {Math.round(cur[k]).toLocaleString()}</div>
               </div>
@@ -3615,18 +3931,26 @@ function CheckInCard({ c, onToggleDay, onComplete }) {
             {s.fatRaised && <div>• Fat raised to 20% of calories.</div>}
             {!s.proteinRaised && !s.fatRaised && s.cal !== Math.round(cur.cal) && <div>• Protein and fat stay; carbs take the change.</div>}
             {s.tooFast && <div style={{ color: "#ffb454" }}>▲ This would mean losing faster than 1% of bodyweight a week — the top of the range for keeping muscle.</div>}
-            {adjusting && <div>• Your calories become the new maintenance estimate{c.ratePct ? " (less what the phase's pace adds)" : ""}, so next week starts from them instead of pulling you back.</div>}
+            {!adjusting && <div>• Keep leaves {c.followed.name} at {Math.round(cur.cal).toLocaleString()}. Whichever you pick, your other targets follow the new estimate (see Phases).</div>}
+            {adjusting && <div>• Protein or fat changes move carbs; carbs move fat. Calories stay at {edit.cal.toLocaleString()} · fat at least {editCheck.fatMin} g (20%).</div>}
+            {adjusting && (calChanged
+              ? <div>• You changed calories, so {edit.cal.toLocaleString()} becomes the new maintenance estimate{c.ratePct ? " (less what the phase's pace adds)" : ""}, and next week starts from it instead of pulling you back.</div>
+              : <div>• Same calories as suggested: only the split changes, and the estimate stays at {Math.round(c.estimate).toLocaleString()}.</div>)}
+            {adjusting && editCheck.errors.map((e) => <div key={e} style={{ color: "#ff8a5c" }}>✕ {e}</div>)}
+            {adjusting && editCheck.notes.map((n) => <div key={n} style={{ color: "#ffb454" }}>▲ {n}</div>)}
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             {!adjusting ? (
               <>
                 <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={() => finish("apply", { p: s.p, f: s.f, c: s.c, cal: s.cal })}>Use {s.cal.toLocaleString()}</button>
-                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => { setEdit({ p: s.p, f: s.f, c: s.c }); setAdjusting(true); }}>Edit</button>
+                <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => { setEdit({ p: s.p, f: s.f, c: s.c, cal: s.cal }); setAdjusting(true); }}>Edit</button>
                 <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => finish("keep", null)}>Keep {Math.round(cur.cal).toLocaleString()}</button>
               </>
             ) : (
               <>
-                <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy} onClick={() => finish("adjust", { ...edit, cal: editCal })}>Apply these</button>
+                <button style={{ ...S.primaryBtn, flex: 2 }} disabled={busy || !editCheck.ok} onClick={() => finish("adjust", { ...edit })}>
+                  {calChanged ? `Use ${edit.cal.toLocaleString()}` : `Use ${edit.cal.toLocaleString()} with this split`}
+                </button>
                 <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={() => setAdjusting(false)}>back</button>
               </>
             )}
@@ -4332,7 +4656,8 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
   const monthly = preset ? rateIsMonthly(preset.phase_type) : false;
   const rateSign = preset?.phase_type === "deficit" ? -1 : 1;
   const rateUnit = preset?.phase_type === "deficit" ? "% loss/week" : monthly ? "% gain/month" : "%/week";
-  const defaultShown = preset ? Math.abs(defaultRatePct(preset.phase_type, preset.name) * (monthly ? WEEKS_PER_MONTH : 1)) : 0;
+  // a blank rate is the preset's default (its own, else the phase type's)
+  const defaultShown = preset ? Math.abs(presetRatePct(preset) * (monthly ? WEEKS_PER_MONTH : 1)) : 0;
   // Cuts: Helms et al. 2014. Bulks: Iraki et al. 2019 (0.25–0.5 %/week for
   // novice/intermediate, slower for advanced; no figure given for advanced).
   // Mini-cut rates are coaching practice, not research — labeled as such.
@@ -4345,7 +4670,7 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
       : "";
   const rateWeekly = () => {
     if (!preset || preset.phase_type === "maintenance") return 0;
-    if (form.rate === "") return roundRate(defaultRatePct(preset.phase_type, preset.name));
+    if (form.rate === "") return roundRate(presetRatePct(preset));
     const n = Math.abs(parseFloat(form.rate)) * rateSign;
     return isNaN(n) ? null : roundRate(monthly ? n / WEEKS_PER_MONTH : n);
   };
@@ -6515,125 +6840,476 @@ function PlanPhaseTip({ block, onDone }) {
 }
 
 
-function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, onSwitchPhase, onOpenCalendar, onOpenCalc }) {
-  const prog = phaseProgress(dietPhase, todayISO());
-  const set = (id, key, sub, val) =>
-    setPhases((prev) =>
-      prev.map((p) =>
-        p.id === id
-          ? sub
-            ? { ...p, target: { ...p.target, [key]: parseFloat(val) || 0 }, example: false }
-            : { ...p, [key]: val }
-          : p
-      )
+/* ---------- the Phases tab ----------
+   The phase in effect, the maintenance estimate behind every target, and
+   each saved target as a card: its goal rate, the calories that rate gives
+   at the current estimate, and its macros. "View & edit" opens
+   TargetEditor: the rate is edited, calories are calculated from it
+   (read-only), and macros balance inside the calories (balanceMacros). */
+const fmtK = (n) => Math.round(Number(n) || 0).toLocaleString("en-US");
+const signPct = (n, d = 2) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(d)}%`;
+// differences under this are rounding (weight drift, the calculator's 10s), not worth a line
+const TARGET_GAP_SHOWN_KCAL = 10;
+
+// "−0.50% / week", "+1.00% / month", "Hold" for a weekly rate on a phase type
+function rateLabel(type, ratePctPerWeek) {
+  if (type === "maintenance") return "Hold";
+  const monthly = rateIsMonthly(type);
+  return `${signPct(monthly ? ratePctPerWeek * WEEKS_PER_MONTH : ratePctPerWeek)} / ${monthly ? "month" : "week"}`;
+}
+function rateHintFor(type, name) {
+  if (type === "deficit") return isMiniCut(type, name)
+    ? "mini-cuts usually lose ~1.0–1.25 %/week (coaching practice, not studied)"
+    : "research range 0.5–1.0 % loss/week";
+  if (type === "surplus") return "research range ~1–2 %/month (0.25–0.5 %/week) for novice–intermediate · slower if advanced";
+  return "";
+}
+const ESTIMATE_SOURCE = {
+  learned: "from your logged food and weigh-ins",
+  adjusted: "your own number, from a check-in Edit",
+  starting: "a starting estimate (your Maintenance target), until your data takes over",
+};
+
+// What a preset's card shows. The phase in effect (row) uses that phase's
+// own rate; a preset not in effect, its default rate. calculated: the
+// calories that rate gives at the recorded estimate (null without one).
+function presetView(p, { basis, weightLb, row, dietPhases, today }) {
+  const active = !!row && row.phase_id === p.id;
+  const kind = p.phase_type === "day" ? "day" : isPhaseType(p.phase_type) ? p.phase_type : null;
+  const ratePct = kind === "day" || !kind ? null : active ? (row.phase_type === "maintenance" ? 0 : phaseRatePct(row)) : presetRatePct(p);
+  const calculated = kind && kind !== "day" ? phaseCalTarget(basis?.kcal ?? null, ratePct, weightLb) : null;
+  const saved = Number(p.target.cal) || 0;
+  const gap = calculated != null ? saved - calculated : null;
+  const planned = (dietPhases || []).filter((r) => r.phase_id === p.id && r.start_date > today)
+    .sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
+  const check = checkMacros(p.target, saved, { phaseType: kind === "day" ? null : kind, weightLb });
+  return { active, kind, ratePct, calculated, saved, gap, planned, check, showGap: gap != null && Math.abs(gap) >= TARGET_GAP_SHOWN_KCAL };
+}
+
+// Why the phase in effect is off what its pace and the estimate give
+function gapReason(latest, row) {
+  if (latest && latest.week_start >= row.start_date) {
+    if (latest.action === "keep") return `You chose Keep at the ${shortDate(latest.week_start)} check-in, so this target stayed as it was.`;
+    if (latest.action === "apply") return `A check-in moves calories at most ${CHECKIN_MAX_CHANGE} kcal a week (${FIRST_CHECKIN_MAX_CHANGE} the first time), so your next check-ins keep closing it.`;
+  }
+  return "Your weight or the estimate has moved since this target was set; your next check-in suggests an update.";
+}
+
+function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, coaching = null, training = null, week = null, onSavePreset, onSaveActive, onSwitchPhase, onOpenCalendar, onOpenCalc, initialEdit = null }) {
+  const [editing, setEditing] = useState(initialEdit); // { id, focus: "rate" | null }
+  const today = todayISO();
+  const basis = coaching?.basis || null;
+  const weightLb = coaching?.weightLb ?? null;
+  const ctx = { basis, weightLb, row: dietPhase, dietPhases, today };
+  const latestCheckin = coaching ? coaching.thisWeek || coaching.last : null;
+
+  const edited = editing ? phases.find((p) => p.id === editing.id) : null;
+  if (edited) {
+    return (
+      <TargetEditor key={edited.id} preset={edited} view={presetView(edited, ctx)} ctx={ctx} row={dietPhase}
+        latestCheckin={latestCheckin} week={week} focus={editing.focus} targetHistory={targetHistory}
+        setPhases={setPhases} onSavePreset={onSavePreset} onSaveActive={onSaveActive}
+        onBack={() => setEditing(null)} />
     );
+  }
+
+  const prog = phaseProgress(dietPhase, today);
+  const followed = dietPhase ? phases.find((p) => p.id === dietPhase.phase_id) || null : null;
+  const activeView = followed ? presetView(followed, ctx) : null;
+  const pace = paceReading(dietPhases, bwLog, today);
+  const paceFrom = dietPhase ? paceStartsOn(dietPhases, dietPhase, rateIsMonthly(dietPhase.phase_type)) : null;
+  const vctx = dietPhase ? dietPhaseContext(dietPhases, today, bwLog) : null;
+  const impact = Math.round(volumeImpactPct(vctx));
+  // this week's check-in would move the estimate: shown as proposed, not applied
+  const proposed = coaching?.due && coaching.grounded && coaching.raw?.raw != null && basis && Math.abs(coaching.estimate - basis.kcal) >= 1 ? Math.round(coaching.estimate) : null;
+  const stale = basis ? phases.filter((p) => !(dietPhase && p.id === dietPhase.phase_id) && presetView(p, ctx).showGap) : [];
+  // a hidden reason a preset would stay put: no weight for its pace (realignPresets skips it)
+
   return (
     <div>
-      <div style={{ ...S.phaseCard, marginBottom: 20 }}>
-        <div style={{ fontSize: 11, letterSpacing: 1, color: dim, marginBottom: 6 }}>
-          CURRENT PHASE
+      <div style={S.ptKicker}>YOUR NUTRITION</div>
+      <div style={S.ptTitle}>Phases</div>
+
+      {/* the phase in effect */}
+      <div style={{ ...S.ptCurrent, borderLeft: `4px solid ${dietPhase ? PHASE_COLORS[dietPhase.phase_type] : line}` }}>
+        <div style={S.pcTop}>
+          <div style={S.pcKicker}>CURRENT PHASE</div>
+          {dietPhase && <span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
         </div>
         {dietPhase ? (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
-            <div>
-              <div style={{ fontWeight: 700, fontSize: 15 }}>{dietPhase.phase_name}</div>
-              <div style={{ fontSize: 12, color: dim }}>
-                {dietPhase.phase_type} · since {dietPhase.start_date} · week {prog.week}
-                {prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : ""}
-                {prog.overrun ? " · past planned end" : ""}
+          <>
+            <div style={S.ptBigName}>{dietPhase.phase_name}</div>
+            <div style={S.pcWeek}>
+              Week {prog.week}{prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : ""} · since {shortDate(dietPhase.start_date)}
+              {prog.overrun ? " · past planned end" : ""}
+            </div>
+            <div style={S.ptStats}>
+              <div>
+                <div style={S.pcStatN}>{followed ? fmtK(followed.target.cal) : "—"}</div>
+                <div style={S.pcStatL}>kcal / day (applied)</div>
+              </div>
+              <div>
+                <div style={S.pcStatN}>{pace.ready ? rateLabel(pace.monthly ? "surplus" : "deficit", pace.pctPerWeek).replace("week", "wk").replace("month", "mo") : "—"}</div>
+                <div style={S.pcStatL}>{pace.ready ? "actual trend (weigh-ins)" : paceFrom && today < paceFrom ? `actual trend from ${shortDate(paceFrom)}` : "actual trend: needs weigh-ins"}</div>
+              </div>
+              <div>
+                <div style={S.pcStatN}>{rateLabel(dietPhase.phase_type, phaseRatePct(dietPhase)).replace("week", "wk").replace("month", "mo")}</div>
+                <div style={S.pcStatL}>target goal</div>
               </div>
             </div>
-            <select
-              value=""
-              onChange={(e) => {
-                const preset = phases.find((p) => p.id === e.target.value);
-                if (preset) onSwitchPhase(preset);
-              }}
-              style={S.fInput}
-            >
-              <option value="" disabled>switch phase…</option>
-              {phases
-                .filter((p) => p.id !== dietPhase.phase_id && isPhaseType(p.phase_type))
-                .map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+            {activeView?.showGap && (
+              <div style={S.ptNote}>
+                Applied {fmtK(activeView.saved)} kcal · your estimate and this pace give {fmtK(activeView.calculated)}. {gapReason(latestCheckin, dietPhase)}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              <select value="" onChange={(e) => { const preset = phases.find((p) => p.id === e.target.value); if (preset) onSwitchPhase(preset); }}
+                style={{ ...S.fInput, flex: 1, minWidth: 140 }} aria-label="Switch phase">
+                <option value="" disabled>switch phase…</option>
+                {phases.filter((p) => p.id !== dietPhase.phase_id && isPhaseType(p.phase_type)).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name} ({rateLabel(p.phase_type, presetRatePct(p))})</option>
                 ))}
-            </select>
-          </div>
+              </select>
+              {followed && <button style={{ ...S.ghostBtn, flex: 1, minWidth: 120 }} onClick={() => setEditing({ id: followed.id, focus: null })}>Edit this phase</button>}
+            </div>
+            <div style={S.ptHint}>Switching starts the new phase today with a fresh target: your estimate plus its default rate.</div>
+          </>
         ) : (
-          <div style={{ fontSize: 13, color: dim }}>no phase set yet</div>
+          <div style={{ fontSize: 13, color: dim, marginTop: 4 }}>No phase set yet. Plan one on the calendar, or switch to one below.</div>
         )}
-        <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} onClick={onOpenCalendar}>
-          plan phases on the calendar
-        </button>
       </div>
-      <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} targetHistory={targetHistory} />
-      <button style={{ ...S.ghostBtn, width: "100%", marginBottom: 14, color: accent, borderColor: accent }} onClick={onOpenCalc}>
-        Calculate my targets
+
+      {/* the maintenance estimate every target is calculated from */}
+      <div style={S.ptPanel}>
+        <div style={S.pcKicker}>MAINTENANCE ESTIMATE</div>
+        {basis ? (
+          <>
+            <div><span style={S.ptMid}>{fmtK(basis.kcal)}</span> <span style={{ color: dim, fontSize: 13 }}>kcal / day</span></div>
+            <div style={S.ptHint}>
+              {basis.source === "starting" ? "Starting estimate" : basis.source === "adjusted" ? "Your number" : "Learned"}: {ESTIMATE_SOURCE[basis.source]}{basis.asOf ? ` (check-in ${shortDate(basis.asOf)})` : ""}.
+              {basis.source === "starting" && ` Your data takes over at a check-in once the last ${EST_WINDOW_DAYS} days have ${EST_MIN_INCLUDED} fully logged days and ${EST_MIN_WEIGHINS} weigh-ins.`}
+              {weightLb ? ` Paces use your weight, ${r1(weightLb)} ${WEIGHT_UNIT}.` : " No weigh-ins yet, so cut and bulk calories keep their saved values until you weigh in."}
+            </div>
+            {proposed != null && (
+              <div style={{ ...S.ptNote, color: "#ffb454" }}>
+                This week's check-in would move it to {fmtK(proposed)} kcal. Not applied until you finish the check-in on Plan.
+              </div>
+            )}
+            {stale.length > 0 && weightLb && (
+              <div style={S.ptNote}>
+                {stale.length === 1 ? `${stale[0].name} doesn't` : `${stale.length} saved targets don't`} match this estimate yet.{" "}
+                <button style={S.linkBtn} onClick={() => setPhases((prev) => realignPresets(prev, { estimate: basis.kcal, weightLb, skipIds: [dietPhase?.phase_id, basis.source === "starting" ? maintenancePreset(prev)?.id : null].filter(Boolean), date: today, reason: "estimate", source: basis.source }))}>
+                  Update {stale.length === 1 ? "it" : "them"}
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={S.ptHint}>
+            None yet: your targets are example numbers. Use <b>Calculate my targets</b> below for a starting estimate, or set your Maintenance target's calories.
+            After ~3 weeks of logging and weigh-ins, the weekly check-in learns your real maintenance.
+          </div>
+        )}
+      </div>
+
+      {/* RepReport */}
+      {dietPhase && (
+        <div style={S.ptPanel}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div>
+              <div style={{ ...S.pcKicker, color: REPREPORT_AMBER, fontWeight: 700 }}>REPREPORT</div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Training set ceilings</div>
+            </div>
+            <span style={{ ...S.ptBadge, color: impact < 0 ? PHASE_COLORS.deficit : impact > 0 ? PHASE_COLORS.surplus : PHASE_COLORS.maintenance, background: "rgba(122,167,255,0.12)" }}>
+              {impact === 0 ? "Baseline" : `${impact > 0 ? "+" : "−"}${Math.abs(impact)}%`}
+            </span>
+          </div>
+          {!training?.active && <div style={S.ptHint}>No active RepReport block — this applies when you start one.</div>}
+        </div>
+      )}
+
+      {/* the saved targets */}
+      <div style={S.ptSection}>Saved targets</div>
+      <div style={S.ptHint}>Cuts, bulks and maintenance follow your maintenance estimate at their own rate. A one-day target is set directly.</div>
+      <div style={S.ptGrid}>
+        {phases.map((p) => {
+          const v = presetView(p, ctx);
+          const color = v.kind === "day" || !v.kind ? dim : PHASE_COLORS[v.kind];
+          return (
+            <div key={p.id} style={{ ...S.ptCard, ...(v.active ? { borderColor: color } : {}) }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 4, background: color, flex: "none" }} />
+                <span style={S.ptCardName}>{p.name}</span>
+              </div>
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                {v.active && <span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
+                {!v.active && v.kind && v.kind !== "day" && <span style={{ ...S.ptBadge, color: dim, background: panel2 }}>PRESET</span>}
+                {v.planned[0] && <span style={{ ...S.ptBadge, color: PHASE_COLORS.maintenance, background: "rgba(122,167,255,0.12)" }}>PLANNED {shortDate(v.planned[0].start_date).toUpperCase()}</span>}
+              </div>
+              {v.kind === "day" ? (
+                <div style={{ ...S.ptGoal, color: dim }}>ONE-DAY TARGET</div>
+              ) : v.kind ? (
+                <button style={{ ...S.ptGoalBtn, color }} onClick={() => setEditing({ id: p.id, focus: "rate" })} aria-label={`Edit ${p.name} rate`}>
+                  {v.kind === "maintenance" ? "GOAL Hold" : `GOAL ${rateLabel(v.kind, v.ratePct)}`}{v.kind !== "maintenance" ? " ✎" : ""}
+                </button>
+              ) : null}
+              <div><span style={S.ptKcal}>{fmtK(p.target.cal)}</span> <span style={{ color: dim, fontSize: 11 }}>kcal / day</span></div>
+              <div style={S.ptMacros}>{r0(p.target.p)}P · {r0(p.target.f)}F · {r0(p.target.c)}C</div>
+              {v.showGap && !v.active && (
+                <div style={S.ptCardNote}>At your estimate: {fmtK(v.calculated)} (not applied)</div>
+              )}
+              {!v.check.ok && <div style={{ ...S.ptCardNote, color: "#ff8a5c" }}>Needs a fix: {v.check.errors[0].split(". ")[0]}.</div>}
+              {p.fit?.date && p.fit.from && (
+                <div style={S.ptCardNote}>Updated {shortDate(p.fit.date)}: was {fmtK(p.fit.from.cal)}</div>
+              )}
+              <button style={S.ptLink} onClick={() => setEditing({ id: p.id, focus: null })}>View &amp; edit ›</button>
+            </div>
+          );
+        })}
+      </div>
+      <button style={{ ...S.addSlot, marginTop: 10 }}
+        onClick={() => setPhases((prev) => [...prev, { ...ph("New target", 180, 50, 250, 2500), phase_type: "maintenance" }])}>
+        + add target
       </button>
-      {phases.map((p) => (
-        <div key={p.id} style={S.phaseCard}>
-          <input
-            value={p.name}
-            onChange={(e) => set(p.id, "name", false, e.target.value)}
-            style={S.phaseName}
-          />
-          {/* what this preset can be used as — only the three phase types can
-              become a diet phase; "day" only shows in a day's TARGETS menu */}
-          <label style={S.useRow}>
-            <span>Used as</span>
-            <select
-              value={p.phase_type || ""}
-              onChange={(e) => set(p.id, "phase_type", false, e.target.value)}
-              style={{ ...S.fInput, flex: 1 }}
-            >
-              {!p.phase_type && <option value="" disabled>choose…</option>}
-              {PRESET_USES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
-            </select>
-          </label>
-          <div style={S.macroGrid}>
-            {[
-              ["Protein", "p"],
-              ["Fat", "f"],
-              ["Carbs", "c"],
-              ["Calories", "cal"],
-            ].map(([lab, k]) => (
+
+      <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <button style={{ ...S.ghostBtn, flex: 1 }} onClick={onOpenCalendar}>Plan on calendar</button>
+        <button style={{ ...S.ghostBtn, flex: 1, color: accent, borderColor: accent }} onClick={onOpenCalc}>Calculate my targets</button>
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} targetHistory={targetHistory} />
+      </div>
+    </div>
+  );
+}
+
+// One target: its rate (cuts and bulks), the calories it gives (calculated,
+// read-only; a one-day target's are set directly), and its macros.
+function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targetHistory, setPhases, onSavePreset, onSaveActive, onBack }) {
+  const { basis, weightLb } = ctx;
+  const kind = view.kind;
+  const active = view.active;
+  const hasRate = kind === "deficit" || kind === "surplus";
+  const monthly = rateIsMonthly(kind);
+  const rateSign = kind === "deficit" ? -1 : 1;
+  const shownRate = (w) => Math.abs(roundRate(w * (monthly ? WEEKS_PER_MONTH : 1))).toFixed(2);
+  const startRate = hasRate ? view.ratePct : 0;
+  // maintenance's calories ARE the starting estimate until your data takes over: editable then
+  const startingMaint = kind === "maintenance" && (!basis || basis.source === "starting");
+  const [rateText, setRateText] = useState(hasRate ? shownRate(startRate) : "");
+  const [calText, setCalText] = useState(String(Math.round(view.saved)));
+  const [useCalculated, setUseCalculated] = useState(false);
+  const [alsoDefault, setAlsoDefault] = useState(false);
+  const [draft, setDraft] = useState({ p: r0(preset.target.p), f: r0(preset.target.f), c: r0(preset.target.c), at: view.saved });
+  const [busy, setBusy] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  // the rate typed (size only; the phase type gives the sign), per week
+  const rateNum = parseFloat(rateText);
+  const rateWeekly = !hasRate ? 0 : rateText === "" || isNaN(rateNum) ? null : roundRate((Math.abs(rateNum) * rateSign) / (monthly ? WEEKS_PER_MONTH : 1));
+  const rateCheck = hasRate && rateWeekly != null ? checkPhaseRate(kind, preset.name, rateWeekly) : { level: "ok", message: "" };
+  const rateChanged = hasRate && rateWeekly != null && Math.abs(rateWeekly - startRate) > EPS;
+
+  // the calorie target
+  let cal = view.saved, calWhy = null;
+  if (kind === "day" || startingMaint) {
+    cal = Math.max(0, Math.round(parseFloat(calText) || 0));
+  } else if (active) {
+    const calcNow = hasRate && rateWeekly != null ? phaseCalTarget(basis?.kcal ?? null, rateWeekly, weightLb) : view.calculated;
+    if (useCalculated && calcNow != null) { cal = calcNow; calWhy = "calculated"; }
+    else if (rateChanged && weightLb) { cal = shiftForRate({ cal: view.saved }, startRate, rateWeekly, weightLb); calWhy = "shift"; }
+  } else if (hasRate || kind === "maintenance") {
+    const calc = phaseCalTarget(basis?.kcal ?? null, rateWeekly ?? startRate, weightLb);
+    if (calc != null) { cal = calc; calWhy = "calculated"; }
+  }
+  const m = cal === draft.at ? draft : { ...fitMacros(draft, cal), at: cal };
+  const setMacro = (k, v) => setDraft({ ...balanceMacros(m, k, v, cal), at: cal });
+  const check = checkMacros(m, cal, { phaseType: kind === "day" ? null : kind, weightLb });
+  const calcAtNewRate = active && hasRate && rateWeekly != null ? phaseCalTarget(basis?.kcal ?? null, rateWeekly, weightLb) : view.calculated;
+
+  // what saving changes, against what's saved
+  const changes = [];
+  if (rateChanged) changes.push(`Rate ${rateLabel(kind, startRate)} → ${rateLabel(kind, rateWeekly)}`);
+  if (cal !== view.saved) changes.push(`Calories ${fmtK(view.saved)} → ${fmtK(cal)}`);
+  [["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].forEach(([lab, k]) => { if (m[k] !== r0(preset.target[k])) changes.push(`${lab} ${r0(preset.target[k])} → ${m[k]} g`); });
+  const dirty = changes.length > 0 || (hasRate && !active && rateChanged);
+  const canSave = dirty && check.ok && rateCheck.level !== "block" && (!hasRate || rateWeekly != null) && !busy;
+
+  const save = async () => {
+    if (!canSave) return;
+    const target = { p: m.p, f: m.f, c: m.c, cal };
+    setBusy(true);
+    if (active) {
+      const ok = await onSaveActive({ target, ratePct: hasRate ? rateWeekly : null, alsoDefault });
+      setBusy(false);
+      if (ok) onBack();
+    } else {
+      onSavePreset(preset.id, { target, ratePct: hasRate ? rateWeekly : null });
+      setBusy(false);
+      onBack();
+    }
+  };
+  const set = (key, val) => setPhases((prev) => prev.map((p) => (p.id === preset.id ? { ...p, [key]: val } : p)));
+  const color = kind === "day" || !kind ? dim : PHASE_COLORS[kind];
+  const lbPer = hasRate && rateWeekly != null && weightLb ? Math.abs((rateWeekly / 100) * weightLb * (monthly ? WEEKS_PER_MONTH : 1)) : null;
+  const dayUses = kind === "day" && week ? DAYS.filter((d) => week[d]?.targetId === preset.id) : [];
+
+  return (
+    <div>
+      <button style={{ ...S.linkBtn, marginBottom: 10 }} onClick={onBack}>‹ All targets</button>
+      <div style={S.ptKicker}>{kind === "day" ? "ONE-DAY TARGET" : "PHASE TARGET"}</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div style={S.ptTitle}>{preset.name}</div>
+        <span style={{ ...S.ptBadge, color: active ? accent : color, background: active ? "rgba(70,230,160,0.12)" : panel2 }}>
+          {active ? "ACTIVE" : kind === "day" ? "DAY OVERRIDE" : "PRESET"}
+        </span>
+      </div>
+      <div style={{ ...S.ptEditor, borderTop: `4px solid ${color}` }}>
+
+        {/* rate */}
+        {hasRate && (
+          <div style={S.ptBlock}>
+            <div style={S.ptBlockHead}>
+              <span style={{ fontSize: 15, fontWeight: 700 }}>Target rate</span>
+              <span style={{ ...S.ptTag, color }}>{kind === "deficit" ? "WEIGHT LOSS" : "WEIGHT GAIN"}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <NumInput value={rateText} onChange={(e) => setRateText(e.target.value)} autoFocus={focus === "rate"}
+                aria-label="Target rate" style={{ ...S.fInput, width: 96, fontSize: 20, fontWeight: 700 }} />
+              <span style={{ color: dim, fontSize: 13 }}>% of bodyweight / {monthly ? "month" : "week"}</span>
+            </div>
+            <div style={S.ptHint}>
+              {lbPer != null ? `≈ ${lbPer.toFixed(2)} ${WEIGHT_UNIT} per ${monthly ? "month" : "week"} · ` : ""}{rateHintFor(kind, preset.name)}
+            </div>
+            {rateWeekly == null && <div style={S.ptErr}>Enter the rate as a number.</div>}
+            {rateCheck.level === "block" && <div style={S.ptErr}>✕ Won't save: {rateCheck.message}.</div>}
+            {rateCheck.level === "warn" && <div style={S.ptWarn}>▲ {rateCheck.message}</div>}
+            <div style={S.ptHint}>
+              {active
+                ? <>This is the rate of the phase in effect (since {shortDate(row.start_date)}); RepReport reads it too. Other phases on the calendar keep their own rates.{" "}
+                    New {preset.name} phases start at {rateLabel(kind, presetRatePct(preset))}.</>
+                : <>The default for new {preset.name} phases.{view.planned.length ? ` Already planned: ${view.planned.map((r) => `${shortDate(r.start_date)} at ${rateLabel(kind, phaseRatePct(r))}`).join(", ")} — each keeps its own rate (change it on the calendar).` : ""}</>}
+            </div>
+            {active && rateChanged && (
+              <label style={{ ...S.useRow, marginTop: 6 }}>
+                <input type="checkbox" checked={alsoDefault} onChange={(e) => setAlsoDefault(e.target.checked)} />
+                <span>Also start new {preset.name} phases at this rate</span>
+              </label>
+            )}
+          </div>
+        )}
+
+        {/* calories */}
+        <div style={S.ptBlock}>
+          <div style={S.ptBlockHead}>
+            <span style={S.pcKicker}>{kind === "day" ? "DAY CALORIES" : startingMaint ? "STARTING MAINTENANCE ESTIMATE" : "CALORIE TARGET"}</span>
+            <span style={{ ...S.ptBadge, color: dim, background: panel2 }}>{kind === "day" || startingMaint ? "SET BY YOU" : calWhy === "calculated" ? "CALCULATED" : calWhy === "shift" ? "FROM NEW RATE" : active ? "APPLIED" : "SAVED"}</span>
+          </div>
+          {kind === "day" || startingMaint ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <NumInput value={calText} onChange={(e) => setCalText(e.target.value)} aria-label="Calories"
+                style={{ ...S.fInput, width: 120, fontSize: 20, fontWeight: 700 }} />
+              <span style={{ color: dim, fontSize: 13 }}>kcal / day</span>
+            </div>
+          ) : (
+            <div><span style={S.ptBig}>{fmtK(cal)}</span> <span style={{ color: dim, fontSize: 13 }}>kcal / day</span></div>
+          )}
+          <div style={S.ptHint}>
+            {kind === "day" ? <>
+              A one-day override (like a refeed): no weekly rate, and it doesn't follow your estimate, so your number stays until you change it.
+              {basis ? ` That's ${cal - Math.round(basis.kcal) >= 0 ? "+" : "−"}${fmtK(Math.abs(cal - basis.kcal))} kcal vs your ${fmtK(basis.kcal)} maintenance estimate (${signPct(((cal - basis.kcal) / basis.kcal) * 100, 0)}).` : ""}
+              {dayUses.length ? ` Used this week on ${dayUses.map((d) => DAY_NAMES[d]).join(", ")}.` : " Pick it for a day in that week's plan (the day's TARGETS menu)."}
+            </> : startingMaint ? <>
+              Until your data takes over, your Maintenance calories are the estimate every target is calculated from. After you save, use “Update them” on the Phases screen to refit your other targets to it.
+            </> : <>
+              {basis ? `From your ${hasRate ? "rate and " : ""}estimated maintenance · maintenance ${fmtK(basis.kcal)} kcal (${basis.source === "starting" ? "starting estimate" : basis.source === "adjusted" ? "your check-in number" : "learned"})` : "No maintenance estimate yet, so calories stay as saved"}
+              {hasRate && weightLb ? ` · weight ${r1(weightLb)} ${WEIGHT_UNIT} · pace ${paceKcal(rateWeekly ?? startRate, weightLb) >= 0 ? "+" : "−"}${fmtK(Math.abs(paceKcal(rateWeekly ?? startRate, weightLb)))} kcal/day` : ""}
+              {hasRate && !weightLb ? " · no weigh-ins yet, so a pace can't be turned into calories" : ""}.
+            </>}
+          </div>
+          {active && kind !== "day" && !startingMaint && (
+            <div style={S.ptNote}>
+              {calWhy === "shift" && <>Your new rate moves the applied {fmtK(view.saved)} by {cal - view.saved >= 0 ? "+" : "−"}{fmtK(Math.abs(cal - view.saved))} kcal, the difference the two paces need at your weight. </>}
+              {calcAtNewRate != null && Math.abs(cal - calcAtNewRate) >= TARGET_GAP_SHOWN_KCAL && !useCalculated && <>
+                Your estimate and this pace give {fmtK(calcAtNewRate)}. {gapReason(latestCheckin, row)}{" "}
+                <button style={S.linkBtn} onClick={() => setUseCalculated(true)}>Use {fmtK(calcAtNewRate)} now</button>
+              </>}
+              {useCalculated && <>Using the full {fmtK(cal)} from your estimate now (your choice; a check-in would move at most {CHECKIN_MAX_CHANGE} a week). <button style={S.linkBtn} onClick={() => setUseCalculated(false)}>undo</button></>}
+              {!calWhy && calcAtNewRate != null && Math.abs(cal - calcAtNewRate) < TARGET_GAP_SHOWN_KCAL && <>Matches your estimate and pace. Applies from today when you save; past days keep their targets.</>}
+              {!calWhy && calcAtNewRate == null && <>Applies from today when you save; past days keep their targets.</>}
+            </div>
+          )}
+        </div>
+
+        {/* macros */}
+        <div style={S.ptBlock}>
+          <div style={S.ptBlockHead}>
+            <span style={{ fontSize: 15, fontWeight: 700 }}>Macros</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: check.ok ? accent : "#ff8a5c" }}>
+              {fmtK(check.total)} kcal total{check.total !== cal ? ` (target ${fmtK(cal)})` : ""}
+            </span>
+          </div>
+          <div style={S.ptMacroGrid}>
+            {[["Protein", "p", "Adjusts carbs"], ["Fat", "f", `Min ${check.fatMin} g · 20%`], ["Carbs", "c", "Adjusts fat"]].map(([lab, k, sub]) => (
               <div key={k}>
-                <span style={S.macroMini}>{lab}</span>
-                <NumInput
-                  type="number"
-                  value={p.target[k]}
-                  onChange={(e) => set(p.id, k, true, e.target.value)}
-                  style={S.fInput}
-                />
+                <div style={{ fontSize: 13, fontWeight: 600, color: dim, marginBottom: 4 }}>{lab}</div>
+                <NumInput inputMode="numeric" value={m[k]} onChange={(e) => setMacro(k, e.target.value)} aria-label={lab}
+                  style={{ ...S.fInput, fontSize: 18, fontWeight: 700 }} />
+                <div style={{ fontSize: 11, color: k === "f" ? accent : dim, marginTop: 4 }}>{sub}</div>
               </div>
             ))}
           </div>
-          {p.example && (
-            <div style={S.exampleNote}>
-              Example numbers. Change them to yours
-              {p.phase_type === "maintenance" ? "; your maintenance calories are where the calorie coaching starts" : ""}.{" "}
-              <button style={S.linkBtn} onClick={() => set(p.id, "example", false, false)}>these are mine</button>
+          {check.total !== cal && check.ok && <div style={S.ptHint}>Whole grams can't always land exactly: within {Math.abs(check.total - cal)} kcal of the target.</div>}
+          {(changes.length > 0 || m.fatRaised) && (
+            <div style={S.ptChanges}>
+              <div style={{ fontWeight: 700, marginBottom: 2 }}>What saving changes</div>
+              <div style={{ color: dim }}>{changes.join(" · ") || "Nothing yet"}</div>
+              {m.fatRaised && <div style={{ color: dim }}>Fat raised to its {check.fatMin} g minimum for {fmtK(cal)} kcal.</div>}
+              <div style={{ color: accent, fontWeight: 700, marginTop: 2 }}>
+                {cal === view.saved ? `Calories stay at ${fmtK(cal)}` : `Calories ${fmtK(view.saved)} → ${fmtK(cal)}`}
+              </div>
             </div>
           )}
-          <TargetChanges rows={(targetHistory || []).filter((h) => h.preset_id === p.id)} />
-          <button
-            style={S.xBtnSm}
-            onClick={() =>
-              setPhases((prev) => prev.filter((x) => x.id !== p.id))
-            }
-          >
-            ✕ remove
-          </button>
+          {check.errors.map((e) => <div key={e} style={S.ptErr}>✕ {e}</div>)}
+          {check.notes.map((n) => <div key={n} style={S.ptWarn}>▲ {n}</div>)}
         </div>
-      ))}
-      <button
-        style={S.addSlot}
-        onClick={() =>
-          setPhases((prev) => [...prev, { ...ph("New phase", 180, 50, 250, 2500), phase_type: "maintenance" }])
-        }
-      >
-        + add phase
-      </button>
+
+        <button style={{ ...S.primaryBtn, width: "100%", padding: "13px 14px", fontSize: 15, opacity: canSave ? 1 : 0.5 }} disabled={!canSave} onClick={save}>
+          {busy ? "Saving…" : active ? "Save goal & macros · applies today" : hasRate ? "Save goal & macros" : "Save target"}
+        </button>
+        <div style={S.ptHint}>Fat minimum: 20% of this calorie target. Protein and carbs have no hard limits yet.</div>
+
+        {/* settings */}
+        <div style={{ ...S.ptBlock, borderBottom: "none", marginTop: 14 }}>
+          <label style={S.useRow}>
+            <span style={{ width: 52 }}>Name</span>
+            <input value={preset.name} onChange={(e) => set("name", e.target.value)} style={{ ...S.fInput, flex: 1 }} />
+          </label>
+          <label style={S.useRow}>
+            <span style={{ width: 52 }}>Used as</span>
+            <select value={preset.phase_type || ""} onChange={(e) => set("phase_type", e.target.value)} style={{ ...S.fInput, flex: 1 }} disabled={active}>
+              {!preset.phase_type && <option value="" disabled>choose…</option>}
+              {PRESET_USES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+          </label>
+          {preset.example && (
+            <div style={S.exampleNote}>
+              Example numbers. Change them to yours{kind === "maintenance" ? "; your maintenance calories are where the calorie coaching starts" : ""}.{" "}
+              <button style={S.linkBtn} onClick={() => set("example", false)}>these are mine</button>
+            </div>
+          )}
+          <TargetChanges rows={(targetHistory || []).filter((h) => h.preset_id === preset.id)} />
+          {!active && (confirmRemove ? (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+              <span style={{ flex: 1, color: dim }}>Remove {preset.name}?{view.planned.length ? " Its planned phases stay on the calendar." : ""}</span>
+              <button style={S.dangerBtn} onClick={() => { setPhases((prev) => prev.filter((x) => x.id !== preset.id)); onBack(); }}>Remove</button>
+              <button style={S.ghostBtn} onClick={() => setConfirmRemove(false)}>Cancel</button>
+            </div>
+          ) : (
+            <button style={S.xBtnSm} onClick={() => setConfirmRemove(true)}>✕ remove target</button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -7490,6 +8166,36 @@ const S = {
 
   // phases
   note: { color: dim, fontSize: 13, lineHeight: 1.5, marginBottom: 16 },
+  // Phases tab
+  ptKicker: { color: dim, fontSize: 11, letterSpacing: 2, fontWeight: 700 },
+  ptTitle: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 30, lineHeight: 1.15, margin: "2px 0 14px", overflowWrap: "anywhere" },
+  ptCurrent: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 14, marginBottom: 10 },
+  ptBigName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24, marginTop: 4, overflowWrap: "anywhere" },
+  ptStats: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 12, paddingTop: 12, borderTop: `1px solid ${line}` },
+  ptBadge: { fontSize: 10, fontWeight: 800, letterSpacing: 0.8, borderRadius: 999, padding: "3px 8px", whiteSpace: "nowrap" },
+  ptPanel: { background: panel2, border: `1px solid ${line}`, borderRadius: 12, padding: "12px 14px", marginBottom: 10 },
+  ptMid: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 22 },
+  ptHint: { color: dim, fontSize: 12, lineHeight: 1.45, marginTop: 6 },
+  ptNote: { fontSize: 12, lineHeight: 1.45, marginTop: 10, padding: "8px 10px", borderRadius: 8, background: panel2, border: `1px solid ${line}` },
+  ptSection: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 20, marginTop: 18 },
+  ptGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginTop: 10 },
+  ptCard: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 12, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 },
+  ptCardName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 16, overflowWrap: "anywhere" },
+  ptGoal: { fontSize: 11, fontWeight: 800, letterSpacing: 0.5, marginTop: 4 },
+  ptGoalBtn: { background: "none", border: "none", padding: "4px 0", textAlign: "left", fontSize: 12, fontWeight: 800, letterSpacing: 0.3, cursor: "pointer", fontFamily: "inherit" },
+  ptKcal: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24 },
+  ptMacros: { color: dim, fontSize: 12, paddingTop: 6, borderTop: `1px solid ${line}` },
+  ptCardNote: { color: dim, fontSize: 11, lineHeight: 1.35 },
+  ptLink: { background: "none", border: "none", padding: "4px 0 0", color: accent, fontWeight: 700, fontSize: 13, textAlign: "left", cursor: "pointer", fontFamily: "inherit", marginTop: "auto" },
+  ptEditor: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 14, marginTop: 6 },
+  ptBlock: { paddingBottom: 14, marginBottom: 14, borderBottom: `1px solid ${line}` },
+  ptBlockHead: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 },
+  ptTag: { fontSize: 11, fontWeight: 800, letterSpacing: 0.8 },
+  ptBig: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 34 },
+  ptMacroGrid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 },
+  ptChanges: { fontSize: 12, lineHeight: 1.5, marginTop: 12, padding: "10px 12px", borderRadius: 8, background: panel2, border: `1px solid ${line}` },
+  ptErr: { color: "#ff8a5c", fontSize: 12, lineHeight: 1.45, marginTop: 8 },
+  ptWarn: { color: "#ffb454", fontSize: 12, lineHeight: 1.45, marginTop: 8 },
   phaseCard: {
     background: panel,
     border: `1px solid ${line}`,
@@ -7544,3 +8250,11 @@ function Style() {
     `}</style>
   );
 }
+
+// Named exports for the tests (tests/): the real functions and components, never copies.
+export {
+  fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
+  checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
+  targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
+};
