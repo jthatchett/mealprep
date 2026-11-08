@@ -1138,7 +1138,7 @@ function resolveCheckinReason(reason, { ck, row, weightLb, today, half = false }
   if (reason === "temporary") return keep("temporary");
   if (reason === "slow-cut" || reason === "slow-bulk") return { ...keep(reason), start: reason === "slow-cut" ? { type: "deficit", ratePct: SLOW_CUT_PCT } : { type: "surplus", ratePct: roundRate(SLOW_BULK_PCT) } };
   if (reason === "hold-reset") {
-    const s = suggestTargets({ estimate: Number(ck.estimate), ratePctPerWeek: 0, weightLb, current: before, phaseType: "maintenance" });
+    const s = suggestTargets({ estimate: Number(ck.estimate), ratePctPerWeek: 0, weightLb, current: before, phaseType: "maintenance", maxChange: checkinMaxChange("maintenance") });
     const target = { p: s.p, f: s.f, c: s.c, cal: s.cal };
     return { patch: { target_rate_pct: 0, chosen: { ...target, auto: true, reason } }, target, holdFrom: { rowId: row.id, date: today } };
   }
@@ -1160,8 +1160,7 @@ function catchUpCopy(hold, cal = null) {
   return {
     title: `You're ${lb} lb ${under ? "under" : "over"} your maintenance weight`,
     context: `You started maintenance at ${hold.anchor.toFixed(1)} lb${hold.anchorDate ? ` on ${shortDate(hold.anchorDate)}` : ""}. You're at ${hold.now.toFixed(1)} now.`,
-    // this week's number can sit short of the pace while the ±250 weekly step gets there
-    body: `To get back: ${cal != null ? `${Math.round(cal).toLocaleString("en-US")} calories this week, then ` : ""}about ${kcal} ${under ? "over" : "under"} maintenance (≈${lbWeek} lb a week).`,
+    body: `To get back: about ${cal != null ? `${(Math.round(cal / 10) * 10).toLocaleString("en-US")} calories a day (${kcal} ${under ? "over" : "under"} maintenance` : `${kcal} calories a day ${under ? "over" : "under"} maintenance (`}, ≈${lbWeek} lb a week).`,
   };
 }
 const catchUpStarting = (hold) => !!hold?.ratePct && hold.weeksRun === 0;
@@ -1192,6 +1191,15 @@ const CHECKIN_MAX_CHANGE = 250;       // a check-in moves daily calories at most
 const EST_FIRST_STEP = 1;
 const EST_FIRST_MAX_STEP = Infinity;
 const FIRST_CHECKIN_MAX_CHANGE = 300; // that week's calories still move at most ±300
+// How far a check-in may move calories. At maintenance there's no weekly step
+// (owner's choice, Nov 2026): the estimate from your data is already trusted
+// in full, and stepping toward it held people under (or over) maintenance for
+// extra weeks, still drifting, while being told they were "getting back". A
+// noisy estimate (~±150 kcal from a water swing) then goes in as is; the
+// estimate's own 30% steps take it out over a few weeks (~1 lb at most).
+// Cuts and bulks keep the step: they're asked Use / Edit / Keep.
+const checkinMaxChange = (phaseType, firstData) =>
+  phaseType === "maintenance" ? Infinity : firstData ? FIRST_CHECKIN_MAX_CHANGE : CHECKIN_MAX_CHANGE;
 const TREND_ALPHA = 0.1;              // smoothing for the trend-weight line
 const lbToKg = (lb) => lb / 2.2046;
 
@@ -3029,7 +3037,7 @@ export default function App() {
     // weigh-ins (this week's, or an earlier check-in's), never on a guess
     const grounded = raw.raw != null || sorted.some((c) => c.estimate_raw != null);
     const suggestion = followed && estimate != null && grounded
-      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: firstData ? FIRST_CHECKIN_MAX_CHANGE : CHECKIN_MAX_CHANGE })
+      ? suggestTargets({ estimate, ratePctPerWeek: ratePct, weightLb, current: followed.target, phaseType: dietPhase.phase_type, maxChange: checkinMaxChange(dietPhase.phase_type, firstData) })
       : null;
     // shown on the phase card: the latest check-in's estimate, else the starting guess
     const shown = thisWeek || last;
@@ -8677,7 +8685,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,

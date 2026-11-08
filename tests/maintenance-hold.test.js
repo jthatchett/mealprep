@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { maintenanceHold, AutoCheckinNotice, CatchUpProposal, paceKcal } from '../src/App.jsx';
+import { maintenanceHold, AutoCheckinNotice, CatchUpProposal, paceKcal, checkinMaxChange, suggestTargets } from '../src/App.jsx';
 
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const TODAY = '2026-11-09'; // a Monday
@@ -79,12 +79,29 @@ describe('a maintenance check-in done for you', () => {
   });
   it("the week a catch-up starts: the fact, the action, the pace in pounds", () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 }), onReason: () => {} }));
-    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under your maintenance weight You started maintenance at 180.0 lb. You're at 176.5 now. To get back: 2,681 calories this week, then about 430 over maintenance (≈0.9 lb a week). OK");
+    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under your maintenance weight You started maintenance at 180.0 lb. You're at 176.5 now. To get back: about 2,680 calories a day (430 over maintenance, ≈0.9 lb a week). OK");
   });
   it('before it starts, it asks: OK, or stay where you are (the usual case: back from the holidays)', () => {
     // holding 180.0 since Oct 6, 182.4 after the holidays: down at the capped pace
     const hold = { ratePct: -0.23, anchor: 180, anchorDate: '2026-10-06', gapLb: 2.4, gapPct: 1.33, weeksRun: 0, now: 182.4 };
     expect(text(React.createElement(CatchUpProposal, { c: { hold, suggestion: { cal: 2480 } }, onAccept: () => {}, onHoldCurrent: () => {} })))
-      .toBe("WEEKLY CHECK-IN You're 2.4 lb over your maintenance weight You started maintenance at 180.0 lb on Oct 6. You're at 182.4 now. To get back: 2,480 calories this week, then about 210 under maintenance (≈0.4 lb a week). OK Stay at 182.4 lb");
+      .toBe("WEEKLY CHECK-IN You're 2.4 lb over your maintenance weight You started maintenance at 180.0 lb on Oct 6. You're at 182.4 now. To get back: about 2,480 calories a day (210 under maintenance, ≈0.4 lb a week). OK Stay at 182.4 lb");
+  });
+});
+
+describe('maintenance check-ins move calories all the way', () => {
+  it('no weekly step at maintenance; cuts and bulks keep theirs', () => {
+    expect(checkinMaxChange('maintenance', true)).toBe(Infinity);
+    expect(checkinMaxChange('deficit', true)).toBe(300);
+    expect(checkinMaxChange('surplus', false)).toBe(250);
+  });
+  it('a calculator 20% low: the first check-in goes straight to maintenance plus the catch-up, not 300 at a time', () => {
+    // guessed 2,140, real 2,680, 2.4 lb under at 177.6: +0.23%/week ≈ +204 kcal
+    const current = { p: 145, f: 70, c: 228, cal: 2140 };
+    const s = suggestTargets({ estimate: 2680, ratePctPerWeek: 1 / (30.44 / 7), weightLb: 177.6, current, phaseType: 'maintenance', maxChange: checkinMaxChange('maintenance', true) });
+    expect(s.cal).toBe(2884);
+    expect(s.capped).toBe(false);
+    // what the old step gave that week: still 240 under maintenance
+    expect(suggestTargets({ estimate: 2680, ratePctPerWeek: 1 / (30.44 / 7), weightLb: 177.6, current, phaseType: 'maintenance', maxChange: 300 }).cal).toBe(2440);
   });
 });
