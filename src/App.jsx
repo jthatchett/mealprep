@@ -1151,22 +1151,15 @@ function resolveCheckinReason(reason, { ck, row, weightLb, today, half = false }
   }
   return null;
 }
-// About how many weeks a catch-up takes: a quarter of the gap per week, at
-// most HOLD_MAX_RATE_PCT, until within HOLD_DONE_PCT.
-function catchUpWeeks(gapPct) {
-  let g = Math.abs(gapPct), n = 0;
-  while (g > HOLD_DONE_PCT && n < 52) { g -= Math.min(g / HOLD_WEEKS, HOLD_MAX_RATE_PCT); n++; }
-  return n;
-}
 // The week a catch-up starts it's explained once, with the choice to hold
 // where they are instead (owner's design, Nov 2026).
-function catchUpCopy(hold, cal) {
-  const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1), weeks = catchUpWeeks(hold.gapPct);
+function catchUpCopy(hold) {
+  const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1);
+  const kcal = Math.round(Math.abs(paceKcal(hold.ratePct, hold.now)) / 10) * 10;
+  const lbWeek = Math.abs((hold.ratePct / 100) * hold.now).toFixed(1);
   return {
-    title: `You're ${lb} lb ${under ? "under" : "over"} the ${hold.anchor.toFixed(1)} lb you're holding`,
-    // the catch-up's own pace on top of maintenance; this week's calories can sit
-    // short of it while the check-in's weekly step (±250) gets there
-    body: `To get you back, you'll eat about ${Math.round(Math.abs(paceKcal(hold.ratePct, hold.now)))} kcal a day ${under ? "over" : "under"} your maintenance until you're close (${Math.round(cal).toLocaleString("en-US")} this week). Expect the scale to ${under ? "rise" : "drop"} about ${lb} lb over the next ${weeks} weeks, then hold.`,
+    title: `You're ${lb} lb ${under ? "under" : "over"} ${hold.anchor.toFixed(1)} lb`,
+    body: `Calories go ${under ? "up" : "down"} about ${kcal} a day (about ${lbWeek} lb a week) until you're back.`,
   };
 }
 const catchUpStarting = (hold) => !!hold?.ratePct && hold.weeksRun === 0;
@@ -4069,7 +4062,7 @@ function DayStatusRow({ included, onChange }) {
 // expect, before anything changes. OK applies it; or hold where you are.
 function CatchUpProposal({ c, onAccept, onHoldCurrent }) {
   const [busy, setBusy] = useState(false);
-  const copy = catchUpCopy(c.hold, c.suggestion.cal);
+  const copy = catchUpCopy(c.hold);
   return (
     <div style={S.ciCard}>
       <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
@@ -4077,7 +4070,7 @@ function CatchUpProposal({ c, onAccept, onHoldCurrent }) {
       <div style={S.ciSub}>{copy.body}</div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={async () => { setBusy(true); await onAccept(); setBusy(false); }}>OK</button>
-        <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={onHoldCurrent}>Hold {c.hold.now.toFixed(1)} lb instead</button>
+        <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={onHoldCurrent}>Stay at {c.hold.now.toFixed(1)} lb</button>
       </div>
     </div>
   );
@@ -4135,15 +4128,19 @@ function AutoCheckinNotice({ c, phases = [], onReason }) {
         <div style={{ ...S.ciLine, marginTop: 8 }}>{outcome}</div>
       ) : catchUpStarting(hold) ? (
         <>
-          <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{catchUpCopy(hold, now).title}</div>
-          <div style={S.ciSub}>{catchUpCopy(hold, now).body}</div>
+          <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{catchUpCopy(hold).title}</div>
+          <div style={S.ciSub}>{catchUpCopy(hold).body}</div>
+        </>
+      ) : hold?.ratePct ? (
+        <>
+          <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{Math.abs(hold.gapLb).toFixed(1)} lb to go</div>
+          <div style={S.ciSub}>Back to {hold.anchor.toFixed(1)} lb at about {Math.abs((hold.ratePct / 100) * hold.now).toFixed(1)} lb a week. Calories {fmt(now)} this week.</div>
         </>
       ) : (
         <>
           {lead}
           <div style={S.ciSub}>
             Your maintenance from the last 3 weeks of logging and weigh-ins is {fmt(est)} kcal.
-            {hold?.ratePct ? ` This week includes ${Math.abs(Math.round(paceKcal(hold.ratePct, c.weightLb)))} kcal/day ${hold.ratePct > 0 ? "extra" : "less"} to get back to ${hold.anchor.toFixed(1)} lb, ${Math.abs(hold.gapLb).toFixed(1)} lb to go.` : ""}
           </div>
           {open === "reasons" && (
             <div style={{ marginTop: 10 }}>
@@ -7368,7 +7365,9 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
                   {maint
                     ? hold?.ratePct
                       ? `${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} ${wts.change < 0 ? "under" : "over"}: calories are ${Math.abs(Math.round(paceKcal(hold.ratePct, weightLb)))} kcal/day ${hold.ratePct > 0 ? "above" : "below"} maintenance to get you back, less each week as you close in.`
-                      : `${Math.abs(wts.change) < 0.05 ? "Right where you started" : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${shortDate(anchorDate)}`}.${Math.abs(hold?.gapPct ?? 0) > HOLD_TRIGGER_PCT ? " Your next check-in brings you back." : ""}`
+                      : Math.abs((wts.change / wts.start) * 100) <= HOLD_TRIGGER_PCT
+                        ? "Holding steady · within your normal day-to-day range."
+                        : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${shortDate(anchorDate)}. Your next check-in brings you back.`
                     : wts.planNow != null
                       ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
                       : ""}
@@ -8676,7 +8675,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  catchUpWeeks, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,

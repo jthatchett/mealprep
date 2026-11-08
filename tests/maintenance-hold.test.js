@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { maintenanceHold, AutoCheckinNotice, CatchUpProposal, catchUpWeeks, paceKcal } from '../src/App.jsx';
+import { maintenanceHold, AutoCheckinNotice, CatchUpProposal, paceKcal } from '../src/App.jsx';
 
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const TODAY = '2026-11-09'; // a Monday
@@ -66,29 +66,25 @@ describe('a maintenance check-in done for you', () => {
   afterEach(() => vi.useRealTimers());
   const text = (el) => renderToStaticMarkup(el).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   const c = (hold = null) => ({
-    weekStart: TODAY, weightLb: 176.5, hold,
+    weekStart: TODAY, weightLb: 176.5, hold: hold && { now: 176.5, ...hold },
     thisWeek: { week_start: TODAY, estimate: 2681, action: 'apply', before: { cal: 2500 }, chosen: { p: 145, f: 70, c: 373, cal: 2681, auto: true } },
   });
   it('says what changed and why, with OK and "Something off?"', () => {
     expect(text(React.createElement(AutoCheckinNotice, { c: c(), onReason: () => {} })))
       .toBe('WEEKLY CHECK-IN Calories 2,500 → 2,681 Your maintenance from the last 3 weeks of logging and weigh-ins is 2,681 kcal. OK Something off?');
   });
-  it('says when it includes winning back a drift', () => {
+  it('later weeks lead with what is left', () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onReason: () => {} }));
-    expect(t).toContain('This week includes 432 kcal/day extra to get back to 180.0 lb, 3.5 lb to go.');
+    expect(t).toBe('WEEKLY CHECK-IN 3.5 lb to go Back to 180.0 lb at about 0.9 lb a week. Calories 2,681 this week. OK Something off?');
   });
-  it("the week a catch-up starts, it's explained instead: what to expect, without blaming anyone", () => {
+  it("the week a catch-up starts: the fact, the action, the pace in pounds", () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 }), onReason: () => {} }));
-    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, you'll eat about 432 kcal a day over your maintenance until you're close (2,681 this week). Expect the scale to rise about 3.5 lb over the next 10 weeks, then hold. OK");
+    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under 180.0 lb Calories go up about 430 a day (about 0.9 lb a week) until you're back. OK");
   });
   it('before it starts, it asks: OK, or hold where you are', () => {
-    const hold = { ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 };
+    // the capped pace: +1%/month, ~0.23%/week
+    const hold = { ratePct: 0.23, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 };
     expect(text(React.createElement(CatchUpProposal, { c: { hold, suggestion: { cal: 2750 } }, onAccept: () => {}, onHoldCurrent: () => {} })))
-      .toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, you'll eat about 432 kcal a day over your maintenance until you're close (2,750 this week). Expect the scale to rise about 3.5 lb over the next 10 weeks, then hold. OK Hold 176.5 lb instead");
-  });
-  it('how long a catch-up takes: at most +1%/month, a quarter of the gap near the end, until within 0.25%', () => {
-    expect(catchUpWeeks(-1.94)).toBe(10); // 3.5 lb at 180: ~0.4 lb/week, then easing
-    expect(catchUpWeeks(-1.1)).toBe(6);   // 2 lb
-    expect(catchUpWeeks(0.2)).toBe(0);
+      .toBe("WEEKLY CHECK-IN You're 3.5 lb under 180.0 lb Calories go up about 200 a day (about 0.4 lb a week) until you're back. OK Stay at 176.5 lb");
   });
 });
