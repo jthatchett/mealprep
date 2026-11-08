@@ -4150,7 +4150,10 @@ function AutoCheckinNotice({ c, phases = [], onReason }) {
         <>
           {lead}
           <div style={S.ciSub}>
-            Your maintenance from the last 3 weeks of logging and weigh-ins is {fmt(est)} kcal.
+            {/* the first estimate from their data replaces the calculator's: say so once */}
+            {c.firstData && c.prior != null && Math.round(est - c.prior) !== 0
+              ? `Your real maintenance is ${fmt(est)} calories. That's ${fmt(Math.abs(est - c.prior))} ${est > c.prior ? "more" : "less"} than the starting estimate. From now on your targets use it, and it keeps adjusting a little each week as you log.`
+              : `Your maintenance from the last 3 weeks of logging and weigh-ins is ${fmt(est)} kcal.`}
           </div>
           {open === "reasons" && (
             <div style={{ marginTop: 10 }}>

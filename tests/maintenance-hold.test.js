@@ -73,6 +73,11 @@ describe('a maintenance check-in done for you', () => {
     expect(text(React.createElement(AutoCheckinNotice, { c: c(), onReason: () => {} })))
       .toBe('WEEKLY CHECK-IN Calories 2,500 → 2,681 Your maintenance from the last 3 weeks of logging and weigh-ins is 2,681 kcal. OK Something off?');
   });
+  it("the first one from their data says it replaced the starting estimate, and what that means from now on", () => {
+    const first = { ...c(), firstData: true, prior: 2500, hold: { ratePct: 0 } };
+    expect(text(React.createElement(AutoCheckinNotice, { c: first, onReason: () => {} })))
+      .toBe("WEEKLY CHECK-IN Calories 2,500 → 2,681 Your real maintenance is 2,681 calories. That's 181 more than the starting estimate. From now on your targets use it, and it keeps adjusting a little each week as you log. OK Something off?");
+  });
   it('later weeks lead with what is left', () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onReason: () => {} }));
     expect(t).toBe('WEEKLY CHECK-IN 3.5 lb to go Back to 180.0 lb at about 0.9 lb a week. Calories 2,681 this week. OK Something off?');
