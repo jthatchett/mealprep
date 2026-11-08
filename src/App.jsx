@@ -1043,15 +1043,56 @@ function phaseWeights(row, log, today, anchorDate = row?.start_date) {
   const before = pts.filter((r) => r.date <= today);
   const now = avgIn(addDaysISO(today, -6), today) ?? (before.length ? Number(before[before.length - 1].weight) : null);
   if (start == null || now == null) return { start, now, change: null };
-  const weeks = Math.max(0, daysBetween(row.start_date, today) / 7);
+  // the plan line runs from the anchor (the phase's start, or where it was re-planned)
+  const weeks = Math.max(0, daysBetween(anchorDate, today) / 7);
   const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
   const at = (w) => start * Math.pow(1 + rate / 100, w);
-  const endWeeks = row.planned_end_date ? (daysBetween(row.start_date, row.planned_end_date) + 1) / 7 : null;
+  const endWeeks = row.planned_end_date ? (daysBetween(anchorDate, row.planned_end_date) + 1) / 7 : null;
   return {
     start, now, change: now - start, weeks,
     planNow: rate ? at(weeks) : null,                       // where the goal pace puts you today
     goalEnd: rate && endWeeks ? at(endWeeks) : null,        // and at the planned end
   };
+}
+
+/* ---------- behind plan on a cut or bulk ----------
+   The 2-week pace can read "On pace" while the cut as a whole is behind
+   (slow early weeks). Past a week of the goal pace behind, the card says so,
+   and offers three ways to get back on plan, each redrawing the plan line
+   from today (planFrom on the preset): finish later, the same date with a
+   lighter goal, or the same date and goal at a faster pace, which gets the
+   usual rate checks (a warning past them, not offered past the limit).
+   Calories never drop on their own to catch up. (Owner's choice, Nov 2026) */
+const planAnchorDate = (row, preset) =>
+  (preset?.planFrom && preset.planFrom.rowId === row?.id ? preset.planFrom.date : row?.start_date);
+function planStatus(row, preset, log, today) {
+  if (!row || (row.phase_type !== "deficit" && row.phase_type !== "surplus")) return null;
+  const anchorDate = planAnchorDate(row, preset);
+  const wts = phaseWeights(row, log, today, anchorDate);
+  if (!wts || wts.planNow == null) return { anchorDate, wts, behindLb: 0, behind: false };
+  const rate = phaseRatePct(row);
+  // behind: heavier than the plan on a cut, lighter on a bulk
+  const behindLb = (wts.now - wts.planNow) * (rate < 0 ? 1 : -1);
+  const weekOfPace = Math.abs((rate / 100) * wts.start);
+  return { anchorDate, wts, behindLb, behind: behindLb > weekOfPace + 1e-9 };
+}
+// The three ways back on plan, from today's weight. Each is null when it
+// doesn't apply (no planned end, or a phase planned too soon after it).
+function behindOptions({ row, wts, today, nextStart = null, name }) {
+  const r = phaseRatePct(row) / 100, W = wts.now, G = wts.goalEnd, E = row.planned_end_date;
+  if (!E || G == null) return { restart: true };
+  const weeksLeft = (daysBetween(today, E) + 1) / 7;
+  const n = Math.log(G / W) / Math.log(1 + r);
+  let later = null;
+  if (n > weeksLeft) {
+    const end = addDaysISO(today, Math.round(n * 7) - 1);
+    later = { end, goal: G, blockedBy: nextStart && end >= nextStart ? nextStart : null };
+  }
+  const lighter = { goal: W * Math.pow(1 + r, weeksLeft), end: E };
+  const fasterPct = roundRate((Math.pow(G / W, 1 / weeksLeft) - 1) * 100);
+  const check = checkPhaseRate(row.phase_type, name ?? row.phase_name, fasterPct);
+  const faster = check.level === "block" ? null : { ratePct: fasterPct, goal: G, end: E, warning: check.level === "warn" ? check.message : null };
+  return { later, lighter, faster };
 }
 
 /* ---------- maintenance holds the weight you started it at ----------
@@ -3200,6 +3241,27 @@ export default function App() {
     if (next !== store.phases) setPhases((prev) => (prev === store.phases ? next : prev));
   }, [loaded, store, dietLoaded, checkinsLoaded, bwLoaded, historyReady, loadError, dietPhases, coaching]);
 
+  // Getting back on plan (BehindPlan): the plan line restarts from today; "later"
+  // also moves the phase's end (and the maintenance after it, as a calendar edit
+  // does), "faster" its rate (calories follow, see editDietPhases).
+  const replan = async (kind, arg) => {
+    const row = phaseOnDate(dietPhases, todayISO());
+    if (!row) return;
+    let ok = true;
+    if (kind === "later") {
+      ok = await editDietPhases(async (sess) => {
+        let rows = dietPhases;
+        const old = followingMaintenance(dietPhases, row);
+        if (old) { await sbDeleteDietPhase(sess, old.id); rows = rows.filter((r) => r.id !== old.id); }
+        await sbUpdateDietPhase(sess, row.id, { planned_end_date: arg });
+        await sbAddMaintenanceAfter(sess, rows, { ...row, planned_end_date: arg }, store.phases || []);
+      });
+    } else if (kind === "faster") {
+      ok = await editDietPhases((sess) => sbUpdateDietPhase(sess, row.id, { target_rate_pct: roundRate(arg) }));
+    }
+    if (ok) setPhases((prev) => prev.map((p) => (p.id === row.phase_id ? { ...p, planFrom: { rowId: row.id, date: todayISO() } } : p)));
+  };
+
   // Phases tab saves. A preset not in effect: its target and default rate.
   // The phase in effect: its own rate goes on its diet_phases row (what
   // RepReport reads), and the target saved from today (target history keeps
@@ -3634,6 +3696,7 @@ export default function App() {
             week={todayWeek}
             onSavePreset={savePresetTarget}
             onSaveActive={saveActiveTarget}
+            onReplan={replan}
             onSwitchPhase={switchPhase}
             onOpenCalendar={() => { setTab("plan"); setShowMonth(true); }}
             onOpenCalc={openCalc}
@@ -4552,6 +4615,13 @@ function paceVerdict(type, actual, targetPct) {
   return { ok: false, text: actual <= 0 ? "Not gaining yet" : diff < 0 ? "Gaining slower than target" : "Gaining faster than target" };
 }
 
+// The 2-week verdict, with the plan as a whole: "On pace now · 1.8 lb behind plan"
+function behindVerdict(v, plan) {
+  if (!v || !plan?.behind) return v;
+  const lb = `${plan.behindLb.toFixed(1)} lb behind plan`;
+  return { ok: false, text: v.ok ? `On pace now · ${lb}` : `${v.text} · ${lb}` };
+}
+
 function paceStartsOn(rows, phase, monthly) {
   if (!phase) return null;
   const sorted = [...(rows || [])].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
@@ -4614,7 +4684,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   // pace: actual vs target, in display units
-  const pace = paceVerdict(phase.phase_type, actual, targetPct);
+  const pace = behindVerdict(paceVerdict(phase.phase_type, actual, targetPct), planStatus(phase, (presets || []).find((p) => p.id === phase.phase_id), bwLog, today));
 
   // projected weight at the planned end, at the target pace
   let projection = null;
@@ -7257,7 +7327,7 @@ function gapReason(latest, row) {
   return "Your weight or the estimate has moved since this target was set; your next check-in suggests an update.";
 }
 
-function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, coaching = null, training = null, week = null, onSavePreset, onSaveActive, onSwitchPhase, onOpenCalendar, onOpenCalc, initialEdit = null }) {
+function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, coaching = null, training = null, week = null, onSavePreset, onSaveActive, onReplan = () => {}, onSwitchPhase, onOpenCalendar, onOpenCalc, initialEdit = null }) {
   const [editing, setEditing] = useState(initialEdit); // { id, focus: "rate" | null }
   const today = todayISO();
   const basis = coaching?.basis || null;
@@ -7308,11 +7378,12 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
           const weight = pace.ready ? pace.avg : weightLb;
           const lb = (pct) => (weight ? Math.abs((pct / 100) * weight) : null);
           const actualPct = pace.ready ? toUnits(pace.pctPerWeek) : null;
-          const verdict = paceVerdict(dietPhase.phase_type, actualPct, goalPct);
+          const plan = planStatus(dietPhase, followed, bwLog, today);
+          const verdict = behindVerdict(paceVerdict(dietPhase.phase_type, actualPct, goalPct), plan);
           const maint = dietPhase.phase_type === "maintenance";
           const dir = (pct) => (pct < 0 ? "Losing" : pct > 0 ? "Gaining" : "Holding");
           // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
-          const anchorDate = dietPhase.phase_type === "maintenance" ? coaching?.hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : dietPhase.start_date;
+          const anchorDate = dietPhase.phase_type === "maintenance" ? coaching?.hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : planAnchorDate(dietPhase, followed);
           const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
           const hold = coaching?.hold;
           const weeksLeft = prog.plannedWeeks && !prog.overrun ? Math.max(0, Math.ceil(daysBetween(today, dietPhase.planned_end_date) / 7)) : null;
@@ -7361,7 +7432,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
               {wts && wts.now != null && (
                 <div style={S.ptWeights}>
                   {[
-                    [maint ? "Holding" : "Start", wts.start != null ? `${wts.start.toFixed(1)}` : "—", shortDate(anchorDate)],
+                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", shortDate(anchorDate)],
                     ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
                     maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
                   ].filter(Boolean).map(([lab, n, sub]) => (
@@ -7385,6 +7456,11 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
                       ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
                       : ""}
                 </div>
+              )}
+
+              {plan?.behind && followed && (
+                <BehindPlan row={dietPhase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} weightUnit={WEIGHT_UNIT}
+                  onReplan={onReplan} />
               )}
 
               <div style={S.ptMiniStats}>
@@ -7513,6 +7589,43 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
       <div style={{ marginTop: 16 }}>
         <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} targetHistory={targetHistory} />
       </div>
+    </div>
+  );
+}
+
+// Behind plan: the three ways back, each one tap (onReplan does the writes).
+function BehindPlan({ row, preset, plan, today, dietPhases, onReplan }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const own = followingMaintenance(dietPhases, row);
+  const next = [...(dietPhases || [])].filter((r) => r.start_date > row.start_date && r.id !== row.id && r !== own)
+    .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0] || null;
+  const o = behindOptions({ row, wts: plan.wts, today, nextStart: next?.start_date || null, name: preset.name });
+  const monthly = rateIsMonthly(row.phase_type);
+  const lbPace = (pctWeek) => `${Math.abs((pctWeek / 100) * plan.wts.now * (monthly ? WEEKS_PER_MONTH : 1)).toFixed(1)} lb/${monthly ? "mo" : "wk"}`;
+  const pace = lbPace(phaseRatePct(row));
+  const go = async (kind, arg) => { setBusy(true); await onReplan(kind, arg); setBusy(false); setOpen(false); };
+  const opt = (key, title, detail, onClick, extra = null) => (
+    <button key={key} style={S.ciReason} disabled={busy} onClick={onClick}>
+      <b>{title}</b><div style={{ color: dim, fontSize: 12, marginTop: 2 }}>{detail}</div>{extra}
+    </button>
+  );
+  return (
+    <div style={{ marginTop: 8 }}>
+      {!open ? (
+        <button style={{ ...S.linkBtn, color: "#ffb454", fontSize: 13 }} onClick={() => setOpen(true)}>Get back on plan ›</button>
+      ) : (
+        <div style={{ marginTop: 4 }}>
+          {o.restart && opt("restart", "Plan from today", `Keep ${pace} from ${plan.wts.now.toFixed(1)} lb.`, () => go("restart"))}
+          {o.later && !o.later.blockedBy && opt("later", "Finish later", `${o.later.goal.toFixed(1)} lb by ${shortDate(o.later.end)} at the same ${pace}.`, () => go("later", o.later.end))}
+          {o.later?.blockedBy && <div style={{ ...S.ptHint, marginBottom: 6 }}>Finishing later would run into the phase planned for {shortDate(o.later.blockedBy)}; move that on the calendar first.</div>}
+          {o.lighter && opt("lighter", "Same date, lighter goal", `${o.lighter.goal.toFixed(1)} lb by ${shortDate(o.lighter.end)} at the same ${pace}.`, () => go("lighter"))}
+          {o.faster && opt("faster", "Same date and goal, faster", `${o.faster.goal.toFixed(1)} lb by ${shortDate(o.faster.end)} at ${lbPace(o.faster.ratePct)}.`, () => go("faster", o.faster.ratePct),
+            o.faster.warning ? <div style={{ color: "#ffb454", fontSize: 12, marginTop: 4 }}>▲ {o.faster.warning.replace(" You can still save it.", "")} Finishing later keeps your pace.</div> : null)}
+          {o.lighter && !o.faster && <div style={S.ptHint}>Keeping both the date and the goal would mean losing faster than a {row.phase_type === "deficit" ? (isMiniCut(row.phase_type, preset.name) ? "mini-cut" : "cut") : "bulk"} can be set to.</div>}
+          <button style={{ ...S.linkBtn, color: dim, fontSize: 12, marginTop: 4 }} onClick={() => setOpen(false)}>not now</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -8688,7 +8801,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
