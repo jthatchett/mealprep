@@ -22,12 +22,23 @@ describe('maintenance holds its starting weight', () => {
     expect(h.gapPct).toBeGreaterThan(-1);
     expect(h.ratePct).toBe(0);
   });
-  it('past 1% under, calories aim to close a quarter of it this week', () => {
+  it('it starts at the cap (any gap past 1% is over it), and tapers to a quarter a week near the end', () => {
+    const rows = [maint(70)];
+    const start = maintenanceHold(rows[0], rows, log(77, 70, -0.12), TODAY, []);
+    expect(start.gapPct).toBeLessThan(-1);
+    expect(start.ratePct).toBeCloseTo(1 / (30.44 / 7), 3);
+    // a running catch-up 0.6% under: a quarter of it, 0.15%/week
+    const near = maintenanceHold(rows[0], rows, log(77, 35, -0.12), TODAY, [{ week_start: day(-7), action: 'apply', target_rate_pct: 0.23 }]);
+    expect(near.gapPct).toBeGreaterThan(-0.92);
+    expect(near.ratePct).toBeCloseTo(-near.gapPct / 4, 3);
+  });
+  it('past 1% under, calories aim to close a quarter of it this week, at most +1%/month', () => {
     const h = maintenanceHold(maint(70), [maint(70)], log(77, 70, -0.2), TODAY, []);
     expect(h.anchor.toFixed(1)).toBe('180.0');
     expect(h.gapLb.toFixed(1)).toBe('-3.4');                   // the last 7 days' average
-    expect(h.ratePct).toBeCloseTo(-h.gapPct / 4, 3);           // +0.47%/week
-    expect(Math.round(paceKcal(h.ratePct, 176.6))).toBe(419);  // ≈ 3.4 lb × 3,500 ÷ 4 weeks ÷ 7 days
+    // a quarter of 1.9% would be +0.47%/week; capped at the default bulk pace, +1%/month
+    expect(h.ratePct).toBeCloseTo(1 / (30.44 / 7), 3);         // +0.23%/week
+    expect(Math.round(paceKcal(h.ratePct, 176.6))).toBe(203);  // ≈ 0.4 lb a week
   });
   it("a Keep doesn't count as a week of the correction; it stops once back within 0.25%", () => {
     const rows = [maint(70)];
@@ -68,16 +79,16 @@ describe('a maintenance check-in done for you', () => {
   });
   it("the week a catch-up starts, it's explained instead: what to expect, without blaming anyone", () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 }), onReason: () => {} }));
-    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, calories go to 2,681 this week, then ease off. Expect the scale to rise about 3.5 lb over the next 8 weeks, then hold. OK");
+    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, calories go to 2,681 this week, then ease off. Expect the scale to rise about 3.5 lb over the next 10 weeks, then hold. OK");
   });
   it('before it starts, it asks: OK, or hold where you are', () => {
     const hold = { ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 };
     expect(text(React.createElement(CatchUpProposal, { c: { hold, suggestion: { cal: 2750 } }, onAccept: () => {}, onHoldCurrent: () => {} })))
-      .toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, calories go to 2,750 this week, then ease off. Expect the scale to rise about 3.5 lb over the next 8 weeks, then hold. OK Hold 176.5 lb instead");
+      .toBe("WEEKLY CHECK-IN You're 3.5 lb under the 180.0 lb you're holding To get you back, calories go to 2,750 this week, then ease off. Expect the scale to rise about 3.5 lb over the next 10 weeks, then hold. OK Hold 176.5 lb instead");
   });
-  it('how long a catch-up takes: a quarter of the gap a week until within 0.25%', () => {
-    expect(catchUpWeeks(-1.94)).toBe(8); // 3.5 lb at 180
-    expect(catchUpWeeks(-1.1)).toBe(6);  // 2 lb
+  it('how long a catch-up takes: at most +1%/month, a quarter of the gap near the end, until within 0.25%', () => {
+    expect(catchUpWeeks(-1.94)).toBe(10); // 3.5 lb at 180: ~0.4 lb/week, then easing
+    expect(catchUpWeeks(-1.1)).toBe(6);   // 2 lb
     expect(catchUpWeeks(0.2)).toBe(0);
   });
 });

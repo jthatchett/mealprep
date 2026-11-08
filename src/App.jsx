@@ -1064,7 +1064,8 @@ function phaseWeights(row, log, today, anchorDate = row?.start_date) {
    - More than HOLD_TRIGGER_PCT away from it: each check-in aims to close a
      quarter of what's left that week (HOLD_WEEKS), as a pace (%/week) on top
      of the estimate, so it never speeds up. 1.8 lb low at 180 lb -> +0.25%/
-     week -> about +225 kcal/day, shrinking as you get back.
+     week -> about +225 kcal/day, shrinking as you get back; capped at
+     HOLD_MAX_RATE_PCT.
    - It stops once within HOLD_DONE_PCT (about 0.45 lb at 180), or after
      HOLD_MAX_WEEKS check-ins, and the check-ins hold from there.
    A running correction is the latest applied check-ins (since the anchor)
@@ -1073,7 +1074,11 @@ function phaseWeights(row, log, today, anchorDate = row?.start_date) {
 const HOLD_TRIGGER_PCT = 1;
 const HOLD_DONE_PCT = 0.25;
 const HOLD_WEEKS = 4;
-const HOLD_MAX_WEEKS = 8;
+const HOLD_MAX_WEEKS = 16; // a safety stop: at the capped pace, 4 lb takes ~11 weeks
+// ...and never faster than the default bulk pace, +1%/month (~0.23%/week),
+// either way: a catch-up shouldn't coach past the app's own lean-gain pace
+// (owner's choice, Nov 2026). 3.5 lb under at 176.5 lb -> ~0.4 lb/week.
+const HOLD_MAX_RATE_PCT = 1 / WEEKS_PER_MONTH;
 function maintenanceAnchorDate(rows, row) {
   const from = paceStartsOn(rows, row, false);
   return from ? addDaysISO(from, -1) : row.start_date;
@@ -1096,7 +1101,7 @@ function maintenanceHold(row, rows, log, today, checkins, holdFrom = null) {
   const base = { anchorDate, anchor: w.start, now: w.now, gapLb: w.change, gapPct, weeksRun: ran.length };
   if (!ran.length && Math.abs(gapPct) <= HOLD_TRIGGER_PCT) return { ...base, ratePct: 0 };
   if (ran.length && (Math.abs(gapPct) <= HOLD_DONE_PCT || ran.length >= HOLD_MAX_WEEKS)) return { ...base, ratePct: 0, done: true };
-  return { ...base, ratePct: roundRate(-gapPct / HOLD_WEEKS) };
+  return { ...base, ratePct: roundRate(-Math.sign(gapPct) * Math.min(Math.abs(gapPct) / HOLD_WEEKS, HOLD_MAX_RATE_PCT)) };
 }
 
 /* ---------- "Something off?" on a maintenance check-in done for you ----------
@@ -1146,9 +1151,13 @@ function resolveCheckinReason(reason, { ck, row, weightLb, today, half = false }
   }
   return null;
 }
-// About how many weeks a catch-up takes: a quarter of the gap per week until
-// within HOLD_DONE_PCT.
-const catchUpWeeks = (gapPct) => (Math.abs(gapPct) <= HOLD_DONE_PCT ? 0 : Math.ceil(Math.log(HOLD_DONE_PCT / Math.abs(gapPct)) / Math.log(1 - 1 / HOLD_WEEKS)));
+// About how many weeks a catch-up takes: a quarter of the gap per week, at
+// most HOLD_MAX_RATE_PCT, until within HOLD_DONE_PCT.
+function catchUpWeeks(gapPct) {
+  let g = Math.abs(gapPct), n = 0;
+  while (g > HOLD_DONE_PCT && n < 52) { g -= Math.min(g / HOLD_WEEKS, HOLD_MAX_RATE_PCT); n++; }
+  return n;
+}
 // The week a catch-up starts it's explained once, with the choice to hold
 // where they are instead (owner's design, Nov 2026).
 function catchUpCopy(hold, cal) {
