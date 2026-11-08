@@ -40,7 +40,7 @@ The weekly check-in ties these together: it compares what you logged with how yo
 One card per saved target, plus the phase in effect and the maintenance estimate behind every number. *(Owner's design, Nov 2026)*
 
 - **The phase in effect** leads with where you are ("CUT · WEEK 6 / 12", a progress bar, dates and weeks left), then **what the scale is doing in pounds**: "Losing 0.8 lb / week · On pace · goal 0.9 lb / week" (the same 2-week trend and on-pace tolerance as the Plan card; bulks per month over 4 weeks). Until that trend exists it shows the goal in pounds ("Lose 0.9 lb / week") and when the actual pace will show. Calories and the goal as % of bodyweight sit below. *(Owner's request, Nov 2026)*
-- **Your weight in the phase:** Start, Now and (cuts and bulks) Goal at the planned end, each a week's average of weigh-ins, then one line: "On plan you'd be at 176.2 today: 1.8 lb behind" (cuts and bulks) or "Down 3.5 lb since this maintenance started 10 weeks ago". The 2-week pace can't see a slow drift: −0.2%/week reads "Holding steady" at maintenance indefinitely, about 3.5 lb over 10 weeks at 180 lb. *(Owner's request, Nov 2026)*
+- **Your weight in the phase:** Start (maintenance: Holding, the weight it holds, see [Maintenance holds your starting weight](#maintenance-holds-your-starting-weight)), Now and (cuts and bulks) Goal at the planned end, each a week's average of weigh-ins, then one line: "On plan you'd be at 176.2 today: 1.8 lb behind" (cuts and bulks) or "Down 3.5 lb since this maintenance started 10 weeks ago". The 2-week pace can't see a slow drift: −0.2%/week reads "Holding steady" at maintenance indefinitely, about 3.5 lb over 10 weeks at 180 lb. *(Owner's request, Nov 2026)*
 - **The maintenance estimate** is labeled by source: **learned** (the latest check-in, from your data), **your number** (a check-in Edit with different calories), or **starting estimate** (your Maintenance target, before your data takes over; see [section 5](#5-maintenance-estimate-and-the-weekly-check-in)). With none, it says so and points to the calculator. A due check-in's new estimate shows as "would move it to …, not applied until you finish the check-in".
 - **Each card** shows its goal (cuts in % per week, bulks in % per month, maintenance "Hold", a refeed "One-day target"), calories and macros, and whether it's ACTIVE, a PRESET or PLANNED (with the date). When its saved calories are 50+ kcal off what the estimate and its rate give, it says "At your estimate: 1,960 (not applied)"; smaller differences are rounding and weight drift the next check-in absorbs, and aren't shown. *(App's choice)*
 
@@ -169,6 +169,7 @@ Shown on Monday, or later that week if you missed it, until you complete it:
    - **Use:** the suggestion becomes the target in effect.
    - **Edit:** calories have their own field; macros balance inside them as in the Phases editor (fat at least 20%). Changing the calories is the Adjust above: they become the estimate, less the pace. Keeping the suggested calories and changing only the split is recorded as a Use and leaves the estimate alone. *(Owner's choice, Nov 2026: before, any split change counted as an Adjust, so a split tweak on a capped week could move the estimate)*
    - **Keep:** the target in effect doesn't change.
+   - **At maintenance the check-in does itself:** once the estimate rests on your data, the week's check-in is completed with its suggestion when you open the app, and Plan shows "Weekly check-in · done for you: Calories 2,500 → 2,681" with **OK** and **Undo (keep 2,500)**. Undo records the week as a Keep and puts the target back (unless you've changed it since). Cuts and bulks still ask. *Why:* a Keep or a skipped check-in let maintenance drift: guessed at 2,500 with a real maintenance of 2,680, someone keeping 2,500 is 5.4 lb down after 15 weeks; with the check-ins applied they hold at 179.3. *(Owner's choice, Nov 2026)*
    - Whichever you pick, the presets not in effect follow the new estimate once it rests on your data ([Targets follow the estimate](#targets-follow-the-estimate)).
 
 The card keeps it short: which days count, the estimate's change this week (old → new), and the suggested targets. It doesn't show the raw 3-week number on its own, since that single reading swings with water weight; the estimate only moves part way toward it. *(Owner's request, Nov 2026)*
@@ -179,6 +180,16 @@ The card keeps it short: which days count, the estimate's change this week (old 
 - **Suggestions only appear once the estimate rests on your own data,** never on the starting guess alone.
 
 *(Research-backed for the 1% ceiling; the ±250 cap is the app's choice)*
+
+### Maintenance holds your starting weight
+Maintenance aims to keep you at the weight you began it at, not just to stop the scale moving. *(Owner's choice, Nov 2026)*
+- **The weight it holds:** a week's average of weigh-ins up to the maintenance's start, or, after a cut or bulk, up to its day 19 (the day before its pace counts), once the water from the change has settled. The phase card shows it as "Holding 180.0 lb".
+- **More than 1% away** (1.8 lb at 180 lb), each check-in aims to win back a quarter of what's left that week, as a pace on top of the estimate: 2.2 lb under → +0.3%/week → about +270 kcal/day, less each week as you close in. It never speeds up, and the check-in's ±250 kcal weekly limit still applies.
+- **It stops** once back within 0.25% (about 0.45 lb), or after 8 applied check-ins, and the check-ins hold from there. A Keep doesn't count as a week of it.
+- *Example (simulated with the app's own functions):* real maintenance 2,680, guessed 2,500, targets kept for 6 weeks → 177.8 lb. From then on, check-ins apply themselves: 2,750, 2,991, 2,948, 2,869 … 2,678 kcal; back to 179.7 lb by week 14, with no overshoot.
+- A small drift (under 1%) is left to the estimate: it learns your real maintenance within about 2 weeks of enough data, which stops it. *Example:* guessed 7% low, the person settles 0.7 lb under.
+
+*(Owner's choice for holding the starting weight and "about 4 weeks"; the 1% trigger, 0.25% stop, quarter-per-week and 8-week stop are the app's choice)*
 
 ### Macro split
 For any calorie target:
