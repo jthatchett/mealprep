@@ -79,12 +79,12 @@ describe('a maintenance check-in done for you', () => {
   });
   it("the week a catch-up starts: the fact, the action, the pace in pounds", () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 }), onReason: () => {} }));
-    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under your maintenance weight You started maintenance at 180.0 lb and you're at 176.5 now. To get back, calories go to 2,681 this week and settle about 430 over your maintenance (≈0.9 lb a week). OK");
+    expect(t).toBe("WEEKLY CHECK-IN You're 3.5 lb under your maintenance weight You started maintenance at 180.0 lb. You're at 176.5 now. To get back: 2,681 calories this week, then about 430 over maintenance (≈0.9 lb a week). OK");
   });
-  it('before it starts, it asks: OK, or hold where you are', () => {
-    // the capped pace: +1%/month, ~0.23%/week
-    const hold = { ratePct: 0.23, anchor: 180, anchorDate: '2026-08-30', gapLb: -3.5, gapPct: -1.94, weeksRun: 0, now: 176.5 };
-    expect(text(React.createElement(CatchUpProposal, { c: { hold, suggestion: { cal: 2750 } }, onAccept: () => {}, onHoldCurrent: () => {} })))
-      .toBe("WEEKLY CHECK-IN You're 3.5 lb under your maintenance weight You started maintenance at 180.0 lb on Aug 30 and you're at 176.5 now. To get back, calories go to 2,750 this week and settle about 200 over your maintenance (≈0.4 lb a week). OK Stay at 176.5 lb");
+  it('before it starts, it asks: OK, or stay where you are (the usual case: back from the holidays)', () => {
+    // holding 180.0 since Oct 6, 182.4 after the holidays: down at the capped pace
+    const hold = { ratePct: -0.23, anchor: 180, anchorDate: '2026-10-06', gapLb: 2.4, gapPct: 1.33, weeksRun: 0, now: 182.4 };
+    expect(text(React.createElement(CatchUpProposal, { c: { hold, suggestion: { cal: 2480 } }, onAccept: () => {}, onHoldCurrent: () => {} })))
+      .toBe("WEEKLY CHECK-IN You're 2.4 lb over your maintenance weight You started maintenance at 180.0 lb on Oct 6. You're at 182.4 now. To get back: 2,480 calories this week, then about 210 under maintenance (≈0.4 lb a week). OK Stay at 182.4 lb");
   });
 });
