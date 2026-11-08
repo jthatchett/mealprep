@@ -1164,7 +1164,9 @@ function catchUpCopy(hold, cal) {
   const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1), weeks = catchUpWeeks(hold.gapPct);
   return {
     title: `You're ${lb} lb ${under ? "under" : "over"} the ${hold.anchor.toFixed(1)} lb you're holding`,
-    body: `To get you back, calories go to ${Math.round(cal).toLocaleString("en-US")} this week, then ease off. Expect the scale to ${under ? "rise" : "drop"} about ${lb} lb over the next ${weeks} weeks, then hold.`,
+    // the catch-up's own pace on top of maintenance; this week's calories can sit
+    // short of it while the check-in's weekly step (±250) gets there
+    body: `To get you back, you'll eat about ${Math.round(Math.abs(paceKcal(hold.ratePct, hold.now)))} kcal a day ${under ? "over" : "under"} your maintenance until you're close (${Math.round(cal).toLocaleString("en-US")} this week). Expect the scale to ${under ? "rise" : "drop"} about ${lb} lb over the next ${weeks} weeks, then hold.`,
   };
 }
 const catchUpStarting = (hold) => !!hold?.ratePct && hold.weeksRun === 0;
