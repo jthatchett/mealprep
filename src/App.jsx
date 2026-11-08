@@ -3956,7 +3956,7 @@ function AutoCheckinNotice({ c, onUndo }) {
   const close = () => { setSeen(true); try { localStorage.setItem(key, "1"); } catch { /* private mode */ } };
   return (
     <div style={S.ciCard}>
-      <div style={S.ciKicker}>WEEKLY CHECK-IN · DONE FOR YOU</div>
+      <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
       <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>
         {was === now ? `Calories stay at ${now.toLocaleString()}` : `Calories ${was.toLocaleString()} → ${now.toLocaleString()}`}
       </div>

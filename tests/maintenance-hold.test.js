@@ -60,7 +60,7 @@ describe('a maintenance check-in done for you', () => {
   });
   it('says what changed and why, with OK and Undo', () => {
     expect(text(React.createElement(AutoCheckinNotice, { c: c(), onUndo: () => {} })))
-      .toBe('WEEKLY CHECK-IN · DONE FOR YOU Calories 2,500 → 2,681 Your maintenance from the last 3 weeks of logging and weigh-ins is 2,681 kcal. OK Undo (keep 2,500)');
+      .toBe('WEEKLY CHECK-IN Calories 2,500 → 2,681 Your maintenance from the last 3 weeks of logging and weigh-ins is 2,681 kcal. OK Undo (keep 2,500)');
   });
   it('says when it includes winning back a drift', () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onUndo: () => {} }));
