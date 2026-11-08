@@ -76,7 +76,7 @@ describe('a maintenance check-in done for you', () => {
   it("the first one from their data says it replaced the starting estimate, and what that means from now on", () => {
     const first = { ...c(), firstData: true, prior: 2500, hold: { ratePct: 0 } };
     expect(text(React.createElement(AutoCheckinNotice, { c: first, onReason: () => {} })))
-      .toBe("WEEKLY CHECK-IN Calories 2,500 → 2,681 Your real maintenance is 2,681 calories. That's 181 more than the starting estimate. Your daily calories are now based on it. Each weekly check-in fine-tunes it from your latest logging and weigh-ins. OK Something off?");
+      .toBe("WEEKLY CHECK-IN Calories 2,500 → 2,681 Your real maintenance is 2,681 calories. That's 181 more than the starting estimate. Each weekly check-in fine-tunes it from your latest logging and weigh-ins. OK Something off?");
   });
   it('later weeks lead with what is left', () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onReason: () => {} }));
