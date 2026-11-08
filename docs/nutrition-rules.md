@@ -46,7 +46,7 @@ One card per saved target, plus the phase in effect and the maintenance estimate
 ### Editing a target
 **Rate → calories → macros.** Calories are calculated, never typed (except a one-day target's, and Maintenance's while it's the starting estimate; see below).
 
-- **The editor shows four things, in order:** the goal in pounds ("Lose 0.9 lb / week"), the calories it gives ("2,050 → 1,870"), the macros, and Save. Everything else is on request: "How is this calculated?" (maintenance, its source, the pace's calories at your weight), and the ⋯ menu (name, use, history, remove). *(Owner's request, Nov 2026, after ranking what each line was doing)*
+- **The editor shows four things, in order:** the goal in pounds ("Lose 0.9 lb / week"), the calories it gives ("2,050 → 1,870"), the macros, and Save. Under the calories, one line: "Maintenance 2,500 kcal · this goal is 450 kcal/day under it." Name, use, history and remove are in the ⋯ menu. *(Owner's request, Nov 2026, after ranking what each line was doing)*
 - **The rate** is stored as % of bodyweight and shown in pounds at your weight. −/+ step it by 0.05%/week on a cut (about 0.09 lb at 180 lb) or 0.25%/month on a bulk, or type it (cuts lose, bulks gain). The limits in [section 3](#3-diet-phases) apply: a warning past them, no save past the hard limit. *(Step sizes are the app's choice)*
 - **Calories from the rate:** the estimate plus what the pace needs (1% of bodyweight a week = bodyweight × 35 kcal a day), to the nearest 10. *Example:* 2,500 kcal maintenance, 180 lb, 0.5%/week → 2,500 − 450 = **2,050**.
 - **Macros balance inside those calories** (4 kcal/g protein and carbs, 9 kcal/g fat, whole grams):

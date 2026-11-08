@@ -7138,7 +7138,6 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
   const [draft, setDraft] = useState({ p: r0(preset.target.p), f: r0(preset.target.f), c: r0(preset.target.c), at: view.saved });
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [showHow, setShowHow] = useState(false);       // "How is this calculated?"
   const [showMore, setShowMore] = useState(false);     // name, use, history, remove
 
   // the rate typed (size only; the phase type gives the sign), per week
@@ -7273,22 +7272,15 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
             </div>
           )}
           {useCalculated && <div style={S.ptHint}>Using the full {fmtK(cal)} now. <button style={S.linkBtn} onClick={() => setUseCalculated(false)}>undo</button></div>}
+          {/* the one thing worth knowing about where the number comes from:
+              maintenance, and how far this goal sits from it */}
           {kind !== "day" && !startingMaint && (
-            <>
-              <button style={{ ...S.linkBtn, color: dim, fontSize: 12, marginTop: 8 }} onClick={() => setShowHow(!showHow)}>{showHow ? "Hide" : "How is this calculated?"}</button>
-              {showHow && (
-                <div style={S.ptHint}>
-                  {basis
-                    ? <>Maintenance {fmtK(basis.kcal)} kcal ({basis.source === "starting" ? "starting estimate" : basis.source === "adjusted" ? "your check-in number" : `learned from your log${basis.asOf ? `, ${shortDate(basis.asOf)}` : ""}`})
-                        {hasRate && weightLb ? <>{" "}{paceKcal(rateWeekly ?? startRate, weightLb) < 0 ? "−" : "+"} {fmtK(Math.abs(paceKcal(rateWeekly ?? startRate, weightLb)))} kcal for {lbPer != null ? `${lbPer.toFixed(1)} ${WEIGHT_UNIT}/${per}` : "this rate"} at {r1(weightLb)} {WEIGHT_UNIT} (3,500 kcal per lb)</> : ""}
-                        {hasRate && !weightLb ? ". No weigh-ins yet, so the rate can't be turned into calories" : ""}.</>
-                    : "No maintenance estimate yet, so calories stay as saved. Use Calculate my targets for a starting estimate."}
-                  {active && calWhy === "shift" && <> A new rate moves what you're eating now by the difference between the two rates, so a check-in's step in progress isn't lost.</>}
-                  {gapToCalc && <> {gapReason(latestCheckin, row)}</>}
-                  {active && <> Applies from today; past days keep their targets.</>}
-                </div>
-              )}
-            </>
+            <div style={S.ptHint}>
+              {!basis ? "No maintenance estimate yet, so calories stay as saved."
+                : !hasRate ? `Your maintenance: ${fmtK(basis.kcal)} kcal.`
+                : !weightLb ? `Maintenance ${fmtK(basis.kcal)} kcal. Weigh in to turn this goal into calories.`
+                : (() => { const k = paceKcal(rateWeekly ?? startRate, weightLb); return `Maintenance ${fmtK(basis.kcal)} kcal · this goal is ${fmtK(Math.abs(k))} kcal/day ${k < 0 ? "under" : "over"} it.`; })()}
+            </div>
           )}
         </div>
 

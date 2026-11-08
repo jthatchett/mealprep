@@ -72,7 +72,7 @@ describe('target editor', () => {
     const t = text(render({ initialEdit: { id: 'phase-cut', focus: 'rate' } }));
     expect(t).toMatch(/Cut ACTIVE ⋯ GOAL Lose 0\.9 lb \/ week − \+ % of bodyweight \/ week CALORIES 2,250 kcal \/ day/);
     expect(t).toContain('Your maintenance points to 2,050. Use 2,050');
-    expect(t).toContain('How is this calculated?');
+    expect(t).toContain('Maintenance 2,500 kcal · this goal is 450 kcal/day under it.');
     expect(t).toMatch(/Protein Adjusts carbs Fat Min 50 g \(20%\) Carbs Adjusts fat/); // 20% of 2,250 = 50 g
     expect(t).toContain('Save · applies today');
     for (const gone of ['What saving changes', 'research range', 'RepReport reads it', 'APPLIED', 'CALCULATED', 'Fat minimum: 20% of this', 'Name']) expect(t).not.toContain(gone);
