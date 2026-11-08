@@ -28,11 +28,21 @@ const text = (html) => html.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').repl
 describe('Phases tab', () => {
   it('the phase in effect: applied calories, its own rate, and why it differs from the calculation', () => {
     const t = text(render());
-    expect(t).toMatch(/CURRENT PHASE ACTIVE Cut Week 6 of 12/);
-    expect(t).toMatch(/2,250 kcal \/ day \(applied\)/);
-    expect(t).toMatch(/−0\.50% \/ wk target goal/);
-    expect(t).toMatch(/actual trend: needs weigh-ins/);
-    expect(t).toContain('Applied 2,250 kcal · your estimate and this pace give 2,050. You chose Keep at the Nov 2 check-in, so this target stayed as it was.');
+    expect(t).toMatch(/CURRENT PHASE ACTIVE CUT · WEEK 6 \/ 12 Oct 1 – Dec 23 · 7 weeks left/);
+    // no weigh-ins: the goal in pounds, and when the actual pace will show
+    expect(t).toMatch(/GOAL Lose 0\.9 lb \/ week Your actual pace shows after 2 weeks with 4\+ weigh-ins each\./);
+    expect(t).toMatch(/2,250 kcal \/ day goal −0\.50% \/ wk of bodyweight/);
+    expect(t).toContain('Eating 2,250 kcal; your maintenance and this goal point to 2,050. You chose Keep at the Nov 2 check-in, so this target stayed as it was.');
+    expect(t).not.toContain('default rate');
+  });
+  it('with weigh-ins: what the scale is doing, in pounds, against the goal', () => {
+    // 3 weeks of daily weigh-ins, losing 0.4%/week from 181 lb (≈0.7 lb); goal 0.5% (0.9 lb)
+    const bw = Array.from({ length: 21 }, (_, i) => {
+      const d = new Date(2026, 9, 19 + i);
+      return { date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`, weight: +(181 * (1 - 0.004 * i / 7)).toFixed(2) };
+    });
+    const t = text(render({ bwLog: bw }));
+    expect(t).toMatch(/YOUR WEIGHT, LAST 2 WEEKS Losing 0\.7 lb \/ week ● On pace · goal 0\.9 lb \/ week/);
   });
   it('the estimate and where it comes from', () => {
     const t = text(render());

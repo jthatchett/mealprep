@@ -4174,6 +4174,22 @@ function dietBreakNote({ phase, today, deload, trainingGoal }) {
 // the first week's water swing), day 28 for a bulk's monthly trend. Waits on
 // any cut, and on any phase that follows a different one. A run of back-to-back
 // rows of the same type counts from the first.
+// The pace verdict, actual vs target in display units (%/week, a bulk's
+// %/month): on pace within ±0.2%/week on a cut, ±0.25%/month on a bulk;
+// maintenance holds within ±0.25%/week. null without an actual pace.
+function paceVerdict(type, actual, targetPct) {
+  if (actual == null) return null;
+  if (type === "maintenance") {
+    return Math.abs(actual) <= 0.25 ? { ok: true, text: "Holding steady" }
+      : { ok: false, text: actual > 0 ? "Drifting up" : "Drifting down" };
+  }
+  const tol = rateIsMonthly(type) ? 0.25 : 0.2;
+  const diff = actual - targetPct;
+  if (Math.abs(diff) <= tol) return { ok: true, text: "On pace" };
+  if (type === "deficit") return { ok: false, text: actual >= 0 ? "Not losing yet" : diff > 0 ? "Losing slower than target" : "Losing faster than target" };
+  return { ok: false, text: actual <= 0 ? "Not gaining yet" : diff < 0 ? "Gaining slower than target" : "Gaining faster than target" };
+}
+
 function paceStartsOn(rows, phase, monthly) {
   if (!phase) return null;
   const sorted = [...(rows || [])].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
@@ -4236,20 +4252,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, tr
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   // pace: actual vs target, in display units
-  let pace = null;
-  if (actual != null) {
-    if (phase.phase_type === "maintenance") {
-      pace = Math.abs(actual) <= 0.25 ? { ok: true, text: "Holding steady" }
-        : { ok: false, text: actual > 0 ? "Drifting up" : "Drifting down" };
-    } else {
-      const tol = monthly ? 0.25 : 0.2;
-      const diff = actual - targetPct;
-      const losing = phase.phase_type === "deficit";
-      if (Math.abs(diff) <= tol) pace = { ok: true, text: "On pace" };
-      else if (losing) pace = { ok: false, text: actual >= 0 ? "Not losing yet" : diff > 0 ? "Losing slower than target" : "Losing faster than target" };
-      else pace = { ok: false, text: actual <= 0 ? "Not gaining yet" : diff < 0 ? "Gaining slower than target" : "Gaining faster than target" };
-    }
-  }
+  const pace = paceVerdict(phase.phase_type, actual, targetPct);
 
   // projected weight at the planned end, at the target pace
   let projection = null;
@@ -6930,51 +6933,90 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
       <div style={S.ptKicker}>YOUR NUTRITION</div>
       <div style={S.ptTitle}>Phases</div>
 
-      {/* the phase in effect */}
+      {/* the phase in effect: where you are in it, then how fast your weight is
+          actually moving against the goal, in pounds (what people check first) */}
       <div style={{ ...S.ptCurrent, borderLeft: `4px solid ${dietPhase ? PHASE_COLORS[dietPhase.phase_type] : line}` }}>
         <div style={S.pcTop}>
           <div style={S.pcKicker}>CURRENT PHASE</div>
           {dietPhase && <span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
         </div>
-        {dietPhase ? (
-          <>
-            <div style={S.ptBigName}>{dietPhase.phase_name}</div>
-            <div style={S.pcWeek}>
-              Week {prog.week}{prog.plannedWeeks ? ` of ${prog.plannedWeeks}` : ""} · since {shortDate(dietPhase.start_date)}
-              {prog.overrun ? " · past planned end" : ""}
-            </div>
-            <div style={S.ptStats}>
-              <div>
-                <div style={S.pcStatN}>{followed ? fmtK(followed.target.cal) : "—"}</div>
-                <div style={S.pcStatL}>kcal / day (applied)</div>
+        {dietPhase ? (() => {
+          const color = PHASE_COLORS[dietPhase.phase_type];
+          const monthly = rateIsMonthly(dietPhase.phase_type);
+          const per = monthly ? "month" : "week";
+          const toUnits = (wk) => wk * (monthly ? WEEKS_PER_MONTH : 1);
+          const goalPct = toUnits(phaseRatePct(dietPhase));
+          const weight = pace.ready ? pace.avg : weightLb;
+          const lb = (pct) => (weight ? Math.abs((pct / 100) * weight) : null);
+          const actualPct = pace.ready ? toUnits(pace.pctPerWeek) : null;
+          const verdict = paceVerdict(dietPhase.phase_type, actualPct, goalPct);
+          const maint = dietPhase.phase_type === "maintenance";
+          const dir = (pct) => (pct < 0 ? "Losing" : pct > 0 ? "Gaining" : "Holding");
+          const weeksLeft = prog.plannedWeeks && !prog.overrun ? Math.max(0, Math.ceil(daysBetween(today, dietPhase.planned_end_date) / 7)) : null;
+          return (
+            <>
+              <div style={{ ...S.ptWeek, color }}>
+                {dietPhase.phase_name.toUpperCase()} · WEEK {prog.week}{prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}
               </div>
-              <div>
-                <div style={S.pcStatN}>{pace.ready ? rateLabel(pace.monthly ? "surplus" : "deficit", pace.pctPerWeek).replace("week", "wk").replace("month", "mo") : "—"}</div>
-                <div style={S.pcStatL}>{pace.ready ? "actual trend (weigh-ins)" : paceFrom && today < paceFrom ? `actual trend from ${shortDate(paceFrom)}` : "actual trend: needs weigh-ins"}</div>
+              {prog.plannedWeeks ? (
+                <div style={S.pcTrack}><div style={{ ...S.pcFill, width: Math.min(100, (prog.week / prog.plannedWeeks) * 100) + "%", background: color }} /></div>
+              ) : null}
+              <div style={S.pcWeek}>
+                {shortDate(dietPhase.start_date)} – {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : "open-ended"}
+                {prog.overrun ? " · past planned end" : weeksLeft != null ? ` · ${weeksLeft} week${weeksLeft === 1 ? "" : "s"} left` : ""}
               </div>
-              <div>
-                <div style={S.pcStatN}>{rateLabel(dietPhase.phase_type, phaseRatePct(dietPhase)).replace("week", "wk").replace("month", "mo")}</div>
-                <div style={S.pcStatL}>target goal</div>
+
+              <div style={S.ptPaceBox}>
+                {actualPct != null ? (
+                  <>
+                    <div style={S.pcKicker}>YOUR WEIGHT, LAST {monthly ? "4" : "2"} WEEKS</div>
+                    <div style={S.ptPaceBig}>
+                      {Math.abs(actualPct) < 0.005 || lb(actualPct) < 0.05 ? "Holding steady" : `${dir(actualPct)} ${lb(actualPct).toFixed(1)} ${WEIGHT_UNIT} / ${per}`}
+                    </div>
+                    <div style={{ ...S.pcStatSub, color: verdict?.ok ? accent : "#ffb454" }}>
+                      {verdict?.ok ? "●" : "▲"} {verdict?.text}
+                      <span style={{ color: dim, fontWeight: 400 }}>
+                        {maint ? " · goal: hold steady" : ` · goal ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={S.pcKicker}>GOAL</div>
+                    <div style={S.ptPaceBig}>
+                      {maint ? "Hold your weight" : `${goalPct < 0 ? "Lose" : "Gain"} ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
+                    </div>
+                    <div style={{ ...S.pcStatSub, color: dim, fontWeight: 400 }}>
+                      {paceFrom && today < paceFrom
+                        ? `Your actual pace shows from ${shortDate(paceFrom)} (the first weeks are mostly water).`
+                        : `Your actual pace shows after 2 weeks with 4+ weigh-ins each${monthly ? " (bulks: this week and 4 weeks ago)" : ""}.`}
+                    </div>
+                  </>
+                )}
               </div>
-            </div>
-            {activeView?.showGap && (
-              <div style={S.ptNote}>
-                Applied {fmtK(activeView.saved)} kcal · your estimate and this pace give {fmtK(activeView.calculated)}. {gapReason(latestCheckin, dietPhase)}
+
+              <div style={S.ptMiniStats}>
+                <div><span style={{ fontWeight: 700 }}>{followed ? fmtK(followed.target.cal) : "—"}</span> <span style={{ color: dim }}>kcal / day</span></div>
+                {!maint && <div style={{ color: dim }}>goal {signPct(goalPct)} / {monthly ? "mo" : "wk"} of bodyweight</div>}
               </div>
-            )}
-            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-              <select value="" onChange={(e) => { const preset = phases.find((p) => p.id === e.target.value); if (preset) onSwitchPhase(preset); }}
-                style={{ ...S.fInput, flex: 1, minWidth: 140 }} aria-label="Switch phase">
-                <option value="" disabled>switch phase…</option>
-                {phases.filter((p) => p.id !== dietPhase.phase_id && isPhaseType(p.phase_type)).map((p) => (
-                  <option key={p.id} value={p.id}>{p.name} ({rateLabel(p.phase_type, presetRatePct(p))})</option>
-                ))}
-              </select>
-              {followed && <button style={{ ...S.ghostBtn, flex: 1, minWidth: 120 }} onClick={() => setEditing({ id: followed.id, focus: null })}>Edit this phase</button>}
-            </div>
-            <div style={S.ptHint}>Switching starts the new phase today with a fresh target: your estimate plus its default rate.</div>
-          </>
-        ) : (
+              {activeView?.showGap && (
+                <div style={S.ptNote}>
+                  Eating {fmtK(activeView.saved)} kcal; your maintenance and this goal point to {fmtK(activeView.calculated)}. {gapReason(latestCheckin, dietPhase)}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                {followed && <button style={{ ...S.ghostBtn, flex: 1, minWidth: 120 }} onClick={() => setEditing({ id: followed.id, focus: null })}>Edit goal & macros</button>}
+                <select value="" onChange={(e) => { const preset = phases.find((p) => p.id === e.target.value); if (preset) onSwitchPhase(preset); }}
+                  style={{ ...S.fInput, flex: 1, minWidth: 140 }} aria-label="Switch phase">
+                  <option value="" disabled>switch phase…</option>
+                  {phases.filter((p) => p.id !== dietPhase.phase_id && isPhaseType(p.phase_type)).map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}, from today</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          );
+        })() : (
           <div style={{ fontSize: 13, color: dim, marginTop: 4 }}>No phase set yet. Plan one on the calendar, or switch to one below.</div>
         )}
       </div>
@@ -8171,6 +8213,10 @@ const S = {
   ptTitle: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 30, lineHeight: 1.15, margin: "2px 0 14px", overflowWrap: "anywhere" },
   ptCurrent: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 14, marginBottom: 10 },
   ptBigName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24, marginTop: 4, overflowWrap: "anywhere" },
+  ptWeek: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24, letterSpacing: 0.5, marginTop: 6, overflowWrap: "anywhere" },
+  ptPaceBox: { marginTop: 14, paddingTop: 12, borderTop: `1px solid ${line}` },
+  ptPaceBig: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 22, margin: "2px 0 4px" },
+  ptMiniStats: { display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 13, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${line}` },
   ptStats: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 12, paddingTop: 12, borderTop: `1px solid ${line}` },
   ptBadge: { fontSize: 10, fontWeight: 800, letterSpacing: 0.8, borderRadius: 999, padding: "3px 8px", whiteSpace: "nowrap" },
   ptPanel: { background: panel2, border: `1px solid ${line}`, borderRadius: 12, padding: "12px 14px", marginBottom: 10 },
@@ -8253,7 +8299,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  paceVerdict, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
