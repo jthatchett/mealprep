@@ -6860,13 +6860,6 @@ function rateLabel(type, ratePctPerWeek) {
   const monthly = rateIsMonthly(type);
   return `${signPct(monthly ? ratePctPerWeek * WEEKS_PER_MONTH : ratePctPerWeek)} / ${monthly ? "month" : "week"}`;
 }
-function rateHintFor(type, name) {
-  if (type === "deficit") return isMiniCut(type, name)
-    ? "mini-cuts usually lose ~1.0–1.25 %/week (coaching practice, not studied)"
-    : "research range 0.5–1.0 % loss/week";
-  if (type === "surplus") return "research range ~1–2 %/month (0.25–0.5 %/week) for novice–intermediate · slower if advanced";
-  return "";
-}
 const ESTIMATE_SOURCE = {
   learned: "from your logged food and weigh-ins",
   adjusted: "your own number, from a check-in Edit",
@@ -7145,6 +7138,8 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
   const [draft, setDraft] = useState({ p: r0(preset.target.p), f: r0(preset.target.f), c: r0(preset.target.c), at: view.saved });
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [showHow, setShowHow] = useState(false);       // "How is this calculated?"
+  const [showMore, setShowMore] = useState(false);     // name, use, history, remove
 
   // the rate typed (size only; the phase type gives the sign), per week
   const rateNum = parseFloat(rateText);
@@ -7196,133 +7191,133 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
   const lbPer = hasRate && rateWeekly != null && weightLb ? Math.abs((rateWeekly / 100) * weightLb * (monthly ? WEEKS_PER_MONTH : 1)) : null;
   const dayUses = kind === "day" && week ? DAYS.filter((d) => week[d]?.targetId === preset.id) : [];
 
+  // −/+ steps the rate: 0.05%/week on a cut (≈0.09 lb at 180 lb), 0.25%/month on a bulk
+  const step = monthly ? 0.25 : 0.05;
+  const stepRate = (dir) => {
+    const cur = isNaN(rateNum) ? Number(shownRate(startRate)) : Math.abs(rateNum);
+    setRateText(Math.max(0, Math.round((cur + dir * step) / step) * step).toFixed(2));
+  };
+  const per = monthly ? "month" : "week";
+  const was = (k) => r0(preset.target[k]);
+  const helper = { p: "Adjusts carbs", f: `Min ${check.fatMin} g (20%)`, c: "Adjusts fat" };
+  const gapToCalc = active && kind !== "day" && !startingMaint && !useCalculated && calcAtNewRate != null && Math.abs(cal - calcAtNewRate) >= TARGET_GAP_SHOWN_KCAL;
+
   return (
     <div>
       <button style={{ ...S.linkBtn, marginBottom: 10 }} onClick={onBack}>‹ All targets</button>
-      <div style={S.ptKicker}>{kind === "day" ? "ONE-DAY TARGET" : "PHASE TARGET"}</div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
         <div style={S.ptTitle}>{preset.name}</div>
-        <span style={{ ...S.ptBadge, color: active ? accent : color, background: active ? "rgba(70,230,160,0.12)" : panel2 }}>
-          {active ? "ACTIVE" : kind === "day" ? "DAY OVERRIDE" : "PRESET"}
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ ...S.ptBadge, color: active ? accent : color, background: active ? "rgba(70,230,160,0.12)" : panel2 }}>
+            {active ? "ACTIVE" : kind === "day" ? "ONE DAY" : "PRESET"}
+          </span>
+          <button style={S.ptMore} onClick={() => setShowMore(!showMore)} aria-label="More options">⋯</button>
+        </div>
       </div>
       <div style={{ ...S.ptEditor, borderTop: `4px solid ${color}` }}>
 
-        {/* rate */}
+        {/* 1 · the goal, in pounds; the % is what's stored */}
         {hasRate && (
           <div style={S.ptBlock}>
-            <div style={S.ptBlockHead}>
-              <span style={{ fontSize: 15, fontWeight: 700 }}>Target rate</span>
-              <span style={{ ...S.ptTag, color }}>{kind === "deficit" ? "WEIGHT LOSS" : "WEIGHT GAIN"}</span>
+            <div style={S.pcKicker}>GOAL</div>
+            <div style={S.ptPaceBig}>
+              {kind === "deficit" ? "Lose" : "Gain"} {lbPer != null ? `${lbPer.toFixed(1)} ${WEIGHT_UNIT}` : rateWeekly != null ? `${Math.abs(rateNum).toFixed(2)}%` : "—"} / {per}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+              <button style={S.ptStep} onClick={() => stepRate(-1)} aria-label={`Slower: −${step}%`}>−</button>
               <NumInput value={rateText} onChange={(e) => setRateText(e.target.value)} autoFocus={focus === "rate"}
-                aria-label="Target rate" style={{ ...S.fInput, width: 96, fontSize: 20, fontWeight: 700 }} />
-              <span style={{ color: dim, fontSize: 13 }}>% of bodyweight / {monthly ? "month" : "week"}</span>
-            </div>
-            <div style={S.ptHint}>
-              {lbPer != null ? `≈ ${lbPer.toFixed(2)} ${WEIGHT_UNIT} per ${monthly ? "month" : "week"} · ` : ""}{rateHintFor(kind, preset.name)}
+                aria-label="Target rate" style={{ ...S.fInput, width: 84, fontSize: 18, fontWeight: 700, textAlign: "center" }} />
+              <button style={S.ptStep} onClick={() => stepRate(1)} aria-label={`Faster: +${step}%`}>+</button>
+              <span style={{ color: dim, fontSize: 13 }}>% of bodyweight / {per}</span>
             </div>
             {rateWeekly == null && <div style={S.ptErr}>Enter the rate as a number.</div>}
             {rateCheck.level === "block" && <div style={S.ptErr}>✕ Won't save: {rateCheck.message}.</div>}
             {rateCheck.level === "warn" && <div style={S.ptWarn}>▲ {rateCheck.message}</div>}
-            <div style={S.ptHint}>
-              {active
-                ? <>This is the rate of the phase in effect (since {shortDate(row.start_date)}); RepReport reads it too. Other phases on the calendar keep their own rates.{" "}
-                    New {preset.name} phases start at {rateLabel(kind, presetRatePct(preset))}.</>
-                : <>The default for new {preset.name} phases.{view.planned.length ? ` Already planned: ${view.planned.map((r) => `${shortDate(r.start_date)} at ${rateLabel(kind, phaseRatePct(r))}`).join(", ")} — each keeps its own rate (change it on the calendar).` : ""}</>}
-            </div>
+            {!active && view.planned.length > 0 && (
+              <div style={S.ptHint}>Already planned: {view.planned.map((r) => `${shortDate(r.start_date)} at ${rateLabel(kind, phaseRatePct(r))}`).join(", ")}. Those keep their own rate.</div>
+            )}
             {active && rateChanged && (
-              <label style={{ ...S.useRow, marginTop: 6 }}>
+              <label style={{ ...S.useRow, marginTop: 8 }}>
                 <input type="checkbox" checked={alsoDefault} onChange={(e) => setAlsoDefault(e.target.checked)} />
-                <span>Also start new {preset.name} phases at this rate</span>
+                <span>Also use this rate for future {preset.name} phases</span>
               </label>
             )}
           </div>
         )}
 
-        {/* calories */}
+        {/* 2 · the calories it gives */}
         <div style={S.ptBlock}>
-          <div style={S.ptBlockHead}>
-            <span style={S.pcKicker}>{kind === "day" ? "DAY CALORIES" : startingMaint ? "STARTING MAINTENANCE ESTIMATE" : "CALORIE TARGET"}</span>
-            <span style={{ ...S.ptBadge, color: dim, background: panel2 }}>{kind === "day" || startingMaint ? "SET BY YOU" : calWhy === "calculated" ? "CALCULATED" : calWhy === "shift" ? "FROM NEW RATE" : active ? "APPLIED" : "SAVED"}</span>
-          </div>
+          <div style={S.pcKicker}>{kind === "day" ? "CALORIES FOR THE DAY" : startingMaint ? "YOUR MAINTENANCE (STARTING ESTIMATE)" : "CALORIES"}</div>
           {kind === "day" || startingMaint ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
               <NumInput value={calText} onChange={(e) => setCalText(e.target.value)} aria-label="Calories"
                 style={{ ...S.fInput, width: 120, fontSize: 20, fontWeight: 700 }} />
               <span style={{ color: dim, fontSize: 13 }}>kcal / day</span>
             </div>
           ) : (
-            <div><span style={S.ptBig}>{fmtK(cal)}</span> <span style={{ color: dim, fontSize: 13 }}>kcal / day</span></div>
-          )}
-          <div style={S.ptHint}>
-            {kind === "day" ? <>
-              A one-day override (like a refeed): no weekly rate, and it doesn't follow your estimate, so your number stays until you change it.
-              {basis ? ` That's ${cal - Math.round(basis.kcal) >= 0 ? "+" : "−"}${fmtK(Math.abs(cal - basis.kcal))} kcal vs your ${fmtK(basis.kcal)} maintenance estimate (${signPct(((cal - basis.kcal) / basis.kcal) * 100, 0)}).` : ""}
-              {dayUses.length ? ` Used this week on ${dayUses.map((d) => DAY_NAMES[d]).join(", ")}.` : " Pick it for a day in that week's plan (the day's TARGETS menu)."}
-            </> : startingMaint ? <>
-              Until your data takes over, your Maintenance calories are the estimate every target is calculated from. After you save, use “Update them” on the Phases screen to refit your other targets to it.
-            </> : <>
-              {basis ? `From your ${hasRate ? "rate and " : ""}estimated maintenance · maintenance ${fmtK(basis.kcal)} kcal (${basis.source === "starting" ? "starting estimate" : basis.source === "adjusted" ? "your check-in number" : "learned"})` : "No maintenance estimate yet, so calories stay as saved"}
-              {hasRate && weightLb ? ` · weight ${r1(weightLb)} ${WEIGHT_UNIT} · pace ${paceKcal(rateWeekly ?? startRate, weightLb) >= 0 ? "+" : "−"}${fmtK(Math.abs(paceKcal(rateWeekly ?? startRate, weightLb)))} kcal/day` : ""}
-              {hasRate && !weightLb ? " · no weigh-ins yet, so a pace can't be turned into calories" : ""}.
-            </>}
-          </div>
-          {active && kind !== "day" && !startingMaint && (
-            <div style={S.ptNote}>
-              {calWhy === "shift" && <>Your new rate moves the applied {fmtK(view.saved)} by {cal - view.saved >= 0 ? "+" : "−"}{fmtK(Math.abs(cal - view.saved))} kcal, the difference the two paces need at your weight. </>}
-              {calcAtNewRate != null && Math.abs(cal - calcAtNewRate) >= TARGET_GAP_SHOWN_KCAL && !useCalculated && <>
-                Your estimate and this pace give {fmtK(calcAtNewRate)}. {gapReason(latestCheckin, row)}{" "}
-                <button style={S.linkBtn} onClick={() => setUseCalculated(true)}>Use {fmtK(calcAtNewRate)} now</button>
-              </>}
-              {useCalculated && <>Using the full {fmtK(cal)} from your estimate now (your choice; a check-in would move at most {CHECKIN_MAX_CHANGE} a week). <button style={S.linkBtn} onClick={() => setUseCalculated(false)}>undo</button></>}
-              {!calWhy && calcAtNewRate != null && Math.abs(cal - calcAtNewRate) < TARGET_GAP_SHOWN_KCAL && <>Matches your estimate and pace. Applies from today when you save; past days keep their targets.</>}
-              {!calWhy && calcAtNewRate == null && <>Applies from today when you save; past days keep their targets.</>}
+            <div style={{ marginTop: 2 }}>
+              {cal !== view.saved && <span style={{ color: dim, fontSize: 18, fontWeight: 600 }}>{fmtK(view.saved)} → </span>}
+              <span style={S.ptBig}>{fmtK(cal)}</span> <span style={{ color: dim, fontSize: 13 }}>kcal / day</span>
             </div>
+          )}
+          {kind === "day" && (
+            <div style={S.ptHint}>
+              {basis ? `${cal - Math.round(basis.kcal) >= 0 ? "+" : "−"}${fmtK(Math.abs(cal - basis.kcal))} kcal vs your ${fmtK(basis.kcal)} maintenance (${signPct(((cal - basis.kcal) / basis.kcal) * 100, 0)}). ` : ""}
+              {dayUses.length ? `Used this week on ${dayUses.map((d) => DAY_NAMES[d]).join(", ")}.` : "Pick it for a day in that week's plan."}
+            </div>
+          )}
+          {startingMaint && <div style={S.ptHint}>Every target is worked out from this until your logged data takes over.</div>}
+          {gapToCalc && (
+            <div style={S.ptHint}>
+              Your maintenance points to {fmtK(calcAtNewRate)}. <button style={S.linkBtn} onClick={() => setUseCalculated(true)}>Use {fmtK(calcAtNewRate)}</button>
+            </div>
+          )}
+          {useCalculated && <div style={S.ptHint}>Using the full {fmtK(cal)} now. <button style={S.linkBtn} onClick={() => setUseCalculated(false)}>undo</button></div>}
+          {kind !== "day" && !startingMaint && (
+            <>
+              <button style={{ ...S.linkBtn, color: dim, fontSize: 12, marginTop: 8 }} onClick={() => setShowHow(!showHow)}>{showHow ? "Hide" : "How is this calculated?"}</button>
+              {showHow && (
+                <div style={S.ptHint}>
+                  {basis
+                    ? <>Maintenance {fmtK(basis.kcal)} kcal ({basis.source === "starting" ? "starting estimate" : basis.source === "adjusted" ? "your check-in number" : `learned from your log${basis.asOf ? `, ${shortDate(basis.asOf)}` : ""}`})
+                        {hasRate && weightLb ? <>{" "}{paceKcal(rateWeekly ?? startRate, weightLb) < 0 ? "−" : "+"} {fmtK(Math.abs(paceKcal(rateWeekly ?? startRate, weightLb)))} kcal for {lbPer != null ? `${lbPer.toFixed(1)} ${WEIGHT_UNIT}/${per}` : "this rate"} at {r1(weightLb)} {WEIGHT_UNIT} (3,500 kcal per lb)</> : ""}
+                        {hasRate && !weightLb ? ". No weigh-ins yet, so the rate can't be turned into calories" : ""}.</>
+                    : "No maintenance estimate yet, so calories stay as saved. Use Calculate my targets for a starting estimate."}
+                  {active && calWhy === "shift" && <> A new rate moves what you're eating now by the difference between the two rates, so a check-in's step in progress isn't lost.</>}
+                  {gapToCalc && <> {gapReason(latestCheckin, row)}</>}
+                  {active && <> Applies from today; past days keep their targets.</>}
+                </div>
+              )}
+            </>
           )}
         </div>
 
-        {/* macros */}
-        <div style={S.ptBlock}>
-          <div style={S.ptBlockHead}>
-            <span style={{ fontSize: 15, fontWeight: 700 }}>Macros</span>
-            <span style={{ fontSize: 12, fontWeight: 700, color: check.ok ? accent : "#ff8a5c" }}>
-              {fmtK(check.total)} kcal total{check.total !== cal ? ` (target ${fmtK(cal)})` : ""}
-            </span>
-          </div>
+        {/* 3 · macros, balanced inside the calories */}
+        <div style={{ ...S.ptBlock, borderBottom: "none", paddingBottom: 0 }}>
           <div style={S.ptMacroGrid}>
-            {[["Protein", "p", "Adjusts carbs"], ["Fat", "f", `Min ${check.fatMin} g · 20%`], ["Carbs", "c", "Adjusts fat"]].map(([lab, k, sub]) => (
+            {[["Protein", "p"], ["Fat", "f"], ["Carbs", "c"]].map(([lab, k]) => (
               <div key={k}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: dim, marginBottom: 4 }}>{lab}</div>
                 <NumInput inputMode="numeric" value={m[k]} onChange={(e) => setMacro(k, e.target.value)} aria-label={lab}
                   style={{ ...S.fInput, fontSize: 18, fontWeight: 700 }} />
-                <div style={{ fontSize: 11, color: k === "f" ? accent : dim, marginTop: 4 }}>{sub}</div>
+                <div style={{ fontSize: 11, color: k === "f" ? accent : dim, marginTop: 4 }}>
+                  {m[k] !== was(k) ? <>was {was(k)} g{k === "f" ? ` · min ${check.fatMin}` : ""}</> : helper[k]}
+                </div>
               </div>
             ))}
           </div>
-          {check.total !== cal && check.ok && <div style={S.ptHint}>Whole grams can't always land exactly: within {Math.abs(check.total - cal)} kcal of the target.</div>}
-          {(changes.length > 0 || m.fatRaised) && (
-            <div style={S.ptChanges}>
-              <div style={{ fontWeight: 700, marginBottom: 2 }}>What saving changes</div>
-              <div style={{ color: dim }}>{changes.join(" · ") || "Nothing yet"}</div>
-              {m.fatRaised && <div style={{ color: dim }}>Fat raised to its {check.fatMin} g minimum for {fmtK(cal)} kcal.</div>}
-              <div style={{ color: accent, fontWeight: 700, marginTop: 2 }}>
-                {cal === view.saved ? `Calories stay at ${fmtK(cal)}` : `Calories ${fmtK(view.saved)} → ${fmtK(cal)}`}
-              </div>
-            </div>
-          )}
+          {check.total !== cal && check.ok && <div style={S.ptHint}>Macros total {fmtK(check.total)} kcal (whole grams can't always land exactly).</div>}
           {check.errors.map((e) => <div key={e} style={S.ptErr}>✕ {e}</div>)}
           {check.notes.map((n) => <div key={n} style={S.ptWarn}>▲ {n}</div>)}
         </div>
 
-        <button style={{ ...S.primaryBtn, width: "100%", padding: "13px 14px", fontSize: 15, opacity: canSave ? 1 : 0.5 }} disabled={!canSave} onClick={save}>
-          {busy ? "Saving…" : active ? "Save goal & macros · applies today" : hasRate ? "Save goal & macros" : "Save target"}
+        <button style={{ ...S.primaryBtn, width: "100%", padding: "13px 14px", fontSize: 15, marginTop: 16, opacity: canSave ? 1 : 0.5 }} disabled={!canSave} onClick={save}>
+          {busy ? "Saving…" : active ? "Save · applies today" : "Save"}
         </button>
-        <div style={S.ptHint}>Fat minimum: 20% of this calorie target. Protein and carbs have no hard limits yet.</div>
+      </div>
 
-        {/* settings */}
-        <div style={{ ...S.ptBlock, borderBottom: "none", marginTop: 14 }}>
+      {showMore && (
+        <div style={{ ...S.ptPanel, marginTop: 10 }}>
           <label style={S.useRow}>
             <span style={{ width: 52 }}>Name</span>
             <input value={preset.name} onChange={(e) => set("name", e.target.value)} style={{ ...S.fInput, flex: 1 }} />
@@ -7334,12 +7329,6 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
               {PRESET_USES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
             </select>
           </label>
-          {preset.example && (
-            <div style={S.exampleNote}>
-              Example numbers. Change them to yours{kind === "maintenance" ? "; your maintenance calories are where the calorie coaching starts" : ""}.{" "}
-              <button style={S.linkBtn} onClick={() => set("example", false)}>these are mine</button>
-            </div>
-          )}
           <TargetChanges rows={(targetHistory || []).filter((h) => h.preset_id === preset.id)} />
           {!active && (confirmRemove ? (
             <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}>
@@ -7351,7 +7340,13 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
             <button style={S.xBtnSm} onClick={() => setConfirmRemove(true)}>✕ remove target</button>
           ))}
         </div>
-      </div>
+      )}
+      {preset.example && (
+        <div style={S.exampleNote}>
+          Example numbers. Change them to yours.{" "}
+          <button style={S.linkBtn} onClick={() => set("example", false)}>these are mine</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -8217,6 +8212,8 @@ const S = {
   ptPaceBox: { marginTop: 14, paddingTop: 12, borderTop: `1px solid ${line}` },
   ptPaceBig: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 22, margin: "2px 0 4px" },
   ptMiniStats: { display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 13, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${line}` },
+  ptStep: { width: 40, height: 40, borderRadius: 10, border: `1px solid ${line}`, background: panel2, color: text, fontSize: 20, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flex: "none" },
+  ptMore: { background: "transparent", border: `1px solid ${line}`, color: dim, borderRadius: 8, width: 34, height: 30, fontSize: 16, cursor: "pointer" },
   ptStats: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 12, paddingTop: 12, borderTop: `1px solid ${line}` },
   ptBadge: { fontSize: 10, fontWeight: 800, letterSpacing: 0.8, borderRadius: 999, padding: "3px 8px", whiteSpace: "nowrap" },
   ptPanel: { background: panel2, border: `1px solid ${line}`, borderRadius: 12, padding: "12px 14px", marginBottom: 10 },

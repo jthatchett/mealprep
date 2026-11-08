@@ -68,32 +68,31 @@ describe('Phases tab', () => {
 });
 
 describe('target editor', () => {
-  it('the cut in effect: rate field, applied calories, the way to the calculated number, live fat minimum', () => {
+  it('the cut in effect: goal in pounds with steppers, calories, balanced macros, nothing extra', () => {
     const t = text(render({ initialEdit: { id: 'phase-cut', focus: 'rate' } }));
-    expect(t).toMatch(/PHASE TARGET Cut ACTIVE/);
-    expect(t).toMatch(/Target rate WEIGHT LOSS .*% of bodyweight \/ week ≈ 0\.90 lb per week/);
-    expect(t).toMatch(/CALORIE TARGET APPLIED 2,250 kcal \/ day/);
-    expect(t).toContain('Your estimate and this pace give 2,050.');
-    expect(t).toContain('Use 2,050 now');
-    expect(t).toMatch(/Min 50 g · 20%/); // 20% of 2,250 = 50 g
-    expect(t).toContain('Save goal & macros · applies today');
-    expect(t).not.toMatch(/DAY CALORIES|aria-label="Calories"/);
+    expect(t).toMatch(/Cut ACTIVE ⋯ GOAL Lose 0\.9 lb \/ week − \+ % of bodyweight \/ week CALORIES 2,250 kcal \/ day/);
+    expect(t).toContain('Your maintenance points to 2,050. Use 2,050');
+    expect(t).toContain('How is this calculated?');
+    expect(t).toMatch(/Protein Adjusts carbs Fat Min 50 g \(20%\) Carbs Adjusts fat/); // 20% of 2,250 = 50 g
+    expect(t).toContain('Save · applies today');
+    for (const gone of ['What saving changes', 'research range', 'RepReport reads it', 'APPLIED', 'CALCULATED', 'Fat minimum: 20% of this', 'Name']) expect(t).not.toContain(gone);
   });
-  it("a preset not in effect: calories calculated from its rate, and what saving changes", () => {
+  it('a preset not in effect: the calories it would move to, macros showing what they were', () => {
     const t = text(render({ initialEdit: { id: 'phase-minicut' } }));
-    expect(t).toMatch(/CALORIE TARGET CALCULATED 1,960 kcal \/ day/);
-    expect(t).toMatch(/maintenance 2,500 kcal \(learned\) · weight 180 lb · pace −540 kcal\/day/);
-    expect(t).toMatch(/What saving changes Calories 1,770 → 1,960 · Carbs 120 → 168 g/);
-    expect(t).toContain('The default for new Mini-cut phases.');
+    expect(t).toMatch(/GOAL Lose 1\.1 lb \/ week/); // 0.60% of 180 lb
+    expect(t).toMatch(/CALORIES 1,770 → 1,960 kcal \/ day/);
+    expect(t).toMatch(/Carbs was 120 g/);
+    expect(t).toMatch(/ Save( |$)/);
   });
   it('a planned phase keeps its own rate', () => {
-    expect(text(render({ initialEdit: { id: 'phase-bulk' } }))).toContain('Already planned: Jan 11 at +1.30% / month — each keeps its own rate');
+    expect(text(render({ initialEdit: { id: 'phase-bulk' } }))).toContain('Already planned: Jan 11 at +1.30% / month. Those keep their own rate.');
   });
-  it('a refeed: day calories set directly, compared with maintenance, no weekly goal', () => {
+  it('a refeed: day calories set directly, compared with maintenance, no goal', () => {
     const t = text(render({ initialEdit: { id: 'phase-weekend' } }));
-    expect(t).toMatch(/ONE-DAY TARGET Weekend\/Refeed DAY OVERRIDE/);
-    expect(t).not.toMatch(/Target rate/);
-    expect(t).toContain("That's +608 kcal vs your 2,500 maintenance estimate (+24%).");
-    expect(t).toMatch(/Min 70 g · 20%/);
+    expect(t).toMatch(/Weekend\/Refeed ONE DAY/);
+    expect(t).not.toMatch(/GOAL/);
+    expect(t).toContain('CALORIES FOR THE DAY');
+    expect(t).toContain('+608 kcal vs your 2,500 maintenance (+24%).');
+    expect(t).toMatch(/Min 70 g \(20%\)/);
   });
 });
