@@ -1153,13 +1153,14 @@ function resolveCheckinReason(reason, { ck, row, weightLb, today, half = false }
 }
 // The week a catch-up starts it's explained once, with the choice to hold
 // where they are instead (owner's design, Nov 2026).
-function catchUpCopy(hold) {
+function catchUpCopy(hold, cal = null) {
   const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1);
   const kcal = Math.round(Math.abs(paceKcal(hold.ratePct, hold.now)) / 10) * 10;
   const lbWeek = Math.abs((hold.ratePct / 100) * hold.now).toFixed(1);
   return {
-    title: `You're ${lb} lb ${under ? "under" : "over"} ${hold.anchor.toFixed(1)} lb`,
-    body: `Calories go ${under ? "up" : "down"} about ${kcal} a day (about ${lbWeek} lb a week) until you're back.`,
+    title: `You're ${lb} lb ${under ? "under" : "over"} your maintenance weight`,
+    context: `You started maintenance at ${hold.anchor.toFixed(1)} lb${hold.anchorDate ? ` on ${shortDate(hold.anchorDate)}` : ""} and you're at ${hold.now.toFixed(1)} now.`,
+    body: `To get back, calories ${cal != null ? `go to ${Math.round(cal).toLocaleString("en-US")} this week, ` : ""}about ${kcal} ${under ? "over" : "under"} your maintenance (≈${lbWeek} lb a week).`,
   };
 }
 const catchUpStarting = (hold) => !!hold?.ratePct && hold.weeksRun === 0;
@@ -4062,12 +4063,12 @@ function DayStatusRow({ included, onChange }) {
 // expect, before anything changes. OK applies it; or hold where you are.
 function CatchUpProposal({ c, onAccept, onHoldCurrent }) {
   const [busy, setBusy] = useState(false);
-  const copy = catchUpCopy(c.hold);
+  const copy = catchUpCopy(c.hold, c.suggestion.cal);
   return (
     <div style={S.ciCard}>
       <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
       <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{copy.title}</div>
-      <div style={S.ciSub}>{copy.body}</div>
+      <div style={S.ciSub}>{copy.context} {copy.body}</div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <button style={{ ...S.primaryBtn, flex: 1 }} disabled={busy} onClick={async () => { setBusy(true); await onAccept(); setBusy(false); }}>OK</button>
         <button style={{ ...S.ghostBtn, flex: 1 }} disabled={busy} onClick={onHoldCurrent}>Stay at {c.hold.now.toFixed(1)} lb</button>
@@ -4128,8 +4129,8 @@ function AutoCheckinNotice({ c, phases = [], onReason }) {
         <div style={{ ...S.ciLine, marginTop: 8 }}>{outcome}</div>
       ) : catchUpStarting(hold) ? (
         <>
-          <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{catchUpCopy(hold).title}</div>
-          <div style={S.ciSub}>{catchUpCopy(hold).body}</div>
+          <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>{catchUpCopy(hold, now).title}</div>
+          <div style={S.ciSub}>{catchUpCopy(hold, now).context} {catchUpCopy(hold, now).body}</div>
         </>
       ) : hold?.ratePct ? (
         <>
