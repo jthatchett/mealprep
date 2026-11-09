@@ -34,7 +34,44 @@ The weekly check-in ties these together: it compares what you logged with how yo
 
 - **New accounts start with example targets.** They're marked as examples, so nothing treats them as your real maintenance until you edit them or use the calculator. *(App's choice)*
 - **Day overrides:** any weekday can use a different target than the phase, for example a Saturday refeed. It's set in that week's plan, and a new week starts with the previous week's overrides. Day-only targets can't be picked as a diet phase, so RepReport never mistakes a refeed for a cut.
-- **Target history:** every change to a target is dated, so a past day is always judged against the target it had then.
+- **Target history:** every change to a target is dated, so a past day is always judged against the target it had then. Every path below (editor saves, check-ins, a phase starting, targets following the estimate) changes a target from today; nothing rewrites a past day, a logged meal or a past check-in.
+
+### The Phases tab
+One card per saved target, plus the phase in effect and the maintenance estimate behind every number. *(Owner's design, Nov 2026)*
+
+- **The phase in effect** (the same overview on the Plan tab's card and on Phases) leads with where you are ("CUT · WEEK 6 / 12", a progress bar and its dates), then **what the scale is doing in pounds**: "Losing 0.8 lb / week · On pace · goal 0.9 lb / week" (the same 2-week trend and on-pace tolerance as the Plan card; bulks per month over 4 weeks). Until that trend exists it shows the goal in pounds ("Lose 0.9 lb / week") and when the actual pace will show. Calories and the goal as % of bodyweight sit below. *(Owner's request, Nov 2026)*
+- **Your weight in the phase:** Start (maintenance: Holding, the weight it holds, see [Maintenance holds your starting weight](#maintenance-holds-your-starting-weight)), Now and (cuts and bulks) Goal at the planned end, each a week's average of weigh-ins, then one line: "On plan you'd be at 176.2 today: 1.8 lb behind" (cuts and bulks) or "Down 3.5 lb since this maintenance started 10 weeks ago". The 2-week pace can't see a slow drift: −0.2%/week reads "Holding steady" at maintenance indefinitely, about 3.5 lb over 10 weeks at 180 lb. *(Owner's request, Nov 2026)*
+- **The maintenance estimate** is labeled by source: **learned** (the latest check-in, from your data), **your number** (a check-in Edit with different calories), or **starting estimate** (your Maintenance target, before your data takes over; see [section 5](#5-maintenance-estimate-and-the-weekly-check-in)). With none, it says so and points to the calculator. A due check-in's new estimate shows as "would move it to …, not applied until you finish the check-in".
+- **Phase Targets:** each card shows its goal in pounds at your weight ("Lose 0.9 lb/wk", a bulk "Gain 1.8 lb/mo", maintenance "Hold your weight", a refeed "One day"; tap it to edit the rate), calories and macros, and ACTIVE or PLANNED (with the date) when it is. Its change history is in the editor's ⋯ menu. *(Owner's design, Nov 2026)* *(App's choice)*
+
+### Editing a target
+**Rate → calories → macros.** Calories are calculated, never typed (except a one-day target's, and Maintenance's while it's the starting estimate; see below).
+
+- **The editor shows four things, in order:** the goal in pounds ("Lose 0.9 lb / week"), the calories it gives ("2,050 → 1,870"), the macros, and Save. Under the calories, one line: "Maintenance 2,500 kcal · this goal is 450 kcal/day under it." Name, use, history and remove are in the ⋯ menu. *(Owner's request, Nov 2026, after ranking what each line was doing)*
+- **The rate** is stored as % of bodyweight and shown in pounds at your weight. −/+ step it by 0.05%/week on a cut (about 0.09 lb at 180 lb) or 0.25%/month on a bulk, or type it (cuts lose, bulks gain). The limits in [section 3](#3-diet-phases) apply: a warning past them, no save past the hard limit. *(Step sizes are the app's choice)*
+- **Calories from the rate:** the estimate plus what the pace needs (1% of bodyweight a week = bodyweight × 35 kcal a day), to the nearest 10. *Example:* 2,500 kcal maintenance, 180 lb, 0.5%/week → 2,500 − 450 = **2,050**.
+- **Macros balance inside those calories** (4 kcal/g protein and carbs, 9 kcal/g fat, whole grams):
+  - protein or fat changed → carbs take the difference
+  - carbs changed → fat takes the difference
+
+  *Example:* 165 P / 70 F / 190 C = 2,050. Fat to 74 → carbs 181. Carbs to 199 instead → fat 66. Calories stay at 2,050.
+- **Rounding:** whole grams can't always land exactly (1 g of fat is 2¼ g of carbs), so the macros may total up to half a gram of the balancing macro off the target: ±2 kcal when carbs balance, ±4.5 when fat does. The editor doesn't call out a few kcal of rounding; the save check still holds the total within these limits. *Example:* fat 71 → carbs 188 → 2,051. *(App's choice)*
+- **Fat is at least 20% of the target's calories,** one-day targets included, rounded **up** to a whole gram so it never lands under 20%: 2,000 kcal → 45 g (44 g is 19.8%), 2,050 → 46 g, 2,250 → 50 g. It moves with the calories. *(Owner's choice, Nov 2026)*
+- **When the calories change** (a new rate, a new estimate, a phase starting), protein and fat stay, carbs take the difference, and fat rises to its new minimum if needed. Each macro changed from what's saved shows "was 190 g" under it.
+- **What can't be saved, and why:** fat under its minimum ("…carbs can be 245 g at most"), carbs below 0 because protein and fat already exceed the calories ("Lower fat to 50 g or less, or protein to 355 g or less"), or a total off the target by more than the rounding above. The save button stays off and nothing is adjusted for you: never protein, the calories, the rate or anything in RepReport.
+- **Protein and carbs have no hard limits** beyond 0 yet. Protein under the check-in's floor ([Macro split](#macro-split)) gets a note, not a block. *(Owner's decision pending, Nov 2026)*
+
+**Which phase an edit changes:**
+- **A preset not in effect:** its rate is its **default rate**, the one new phases start or are planned at (a blank rate on the calendar uses it too), and the one its calories are calculated at. Saving applies the calculated calories. Phases already on the calendar keep their own rates; the editor lists them.
+- **The phase in effect:** the rate is that phase's own (its diet_phases row, which RepReport reads). Changing it moves the applied calories by the difference the two paces need at your weight, the same as "Slow to 0.5%/week", so a check-in's step still in progress or a Keep carries over instead of jumping. *Example:* estimate 2,500, kept at 2,250 on a −0.7% cut (1,870 by the numbers); −0.5% → 2,430. It shows how far that is from what the estimate and pace give, and why ("You chose Keep at the Nov 2 check-in" / "A check-in moves calories at most 250 kcal a week"), with **Use 2,050** to take the full number at once (your choice, not capped, like the Slow button). A checkbox also makes the new rate the preset's default; otherwise the default is untouched. Saved from today; past days keep their targets. The calendar's rate edit for the phase in effect moves its calories the same way. Only that row changes: later planned phases keep their rates. *(Owner's request, Nov 2026)*
+- **Macro-only edits never change the calories,** and no edit here moves the maintenance estimate.
+
+### Targets follow the estimate
+- **Automatically, all the time:** whenever the app has your estimate, weigh-ins and targets loaded (opening it, a check-in, a weigh-in, editing the starting maintenance), every phase target not in use that's **50+ kcal** off what the estimate and its goal give is brought in line: calories to the new number, protein and fat kept (fat up to its 20% minimum), carbs take the difference, dated in its history. *Example:* estimate 2,500 at 180 lb, Mini-cut at 0.6%/week: 2,500 − 540 = 1,960, so a Mini-cut sitting at 1,770 moves to 1,960; a Bulk at 2,707 against 2,710 stays. The 50 kcal keeps weight changes alone from nudging the cards every few days: the goal part of a 0.5%/week cut moves only ~25 kcal over 10 lb; maintenance itself moves more (~65–100 kcal per 10 lb), and the check-ins pick that up as they learn it. Never changed this way: the target in use (only check-ins, a phase starting, your edits), one-day targets, goal rates, past days; nor, while the estimate is still your Maintenance target, Maintenance itself. Existing accounts line up once, the first time the app opens after this. *(Owner's choice, Nov 2026; replaces the "Update" button)*
+- **Presets not in effect follow each recorded estimate from your data:** when a check-in is completed (Use, Edit or Keep), every cut, bulk and maintenance preset not in effect is recalculated at the new estimate and its own default rate, with protein and fat kept. Unlike the check-in's suggestion, the protein floor isn't applied here, and there's no ±250 cap: nobody is eating those targets yet. The card shows "Updated Nov 9: was 2,050". *(Owner's request, Nov 2026)*
+- **A phase that starts gets a fresh target:** when a phase comes into effect (a switch, a planned start date arriving, maintenance after a cut), its preset is recalculated from the recorded estimate and **that phase's own rate**, once per phase. *Example:* estimate 2,560, a planned cut at −0.5% starts → 2,110, whatever the Cut preset held. Without an estimate (or, for a cut or bulk, a weigh-in) the saved target is kept. The first time this runs on an existing account it only records which phase is in effect; nothing changes. *(Owner's request, Nov 2026)*
+- **One-day targets (refeeds) don't follow the estimate.** A refeed has no weekly rate, so its calories are set directly in its editor, which shows them against the estimate ("+608 kcal vs your 2,500 maintenance estimate, +24%") and the days it's used. The calculator still sets a refeed to maintenance calories, as before. Your number is never overwritten by a new estimate. *(App's choice: a refeed is a deliberate day, not a pace)*
+- **Maintenance while it's the starting estimate:** its calories are the starting estimate itself, so they stay editable (labeled "Starting maintenance estimate") until a check-in learns your real one; after that they're calculated like the rest.
 
 ### Starting targets calculator
 A first estimate of maintenance from a short profile. The weekly check-in corrects it once you have a few weeks of data.
@@ -61,7 +98,7 @@ From that maintenance, each target is built:
 **Which phase is in effect on a date:** the latest-starting phase on or before that date that hasn't been closed. A later phase simply takes over from an earlier one, so you can plan ahead without closing anything. RepReport resolves phases with the same rule.
 
 ### Target rate of weight change
-Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month**, because a week of bulk gain is smaller than day-to-day noise.
+Stored per phase as % of bodyweight. Each preset also has a default rate (the phase type's below unless you change it on the Phases tab): what a new phase starts at. A phase on the calendar keeps its own rate. Cuts are shown per week; bulks per **month**, because a week of bulk gain is smaller than day-to-day noise.
 
 | Phase | Default | Warning past | Won't save past |
 |---|---|---|---|
@@ -99,6 +136,11 @@ Stored per phase as % of bodyweight. Cuts are shown per week; bulks per **month*
   - **Off pace:** otherwise, shown as "Losing slower than target", "Not gaining yet", and similar.
   - **Maintenance:** "Holding steady" within ±0.25%/week.
 - **Projection:** the phase card shows your projected weight at the planned end date, at your target pace.
+- **Behind plan (cuts and bulks):** the 2-week pace can read "On pace" while the phase as a whole is behind (slow early weeks). Once you're more than a week of the goal pace behind the plan line from your start (0.9 lb on a 0.5%/week cut at 180 lb), the label turns amber: "▲ On pace now · 1.8 lb behind plan". Calories never drop on their own to catch up. **Get back on plan**, on the Plan tab's phase card where the pace shows every day, offers three ways, each redrawing the plan from today's weight *(owner's choice, Nov 2026)*:
+  - **Finish Plan Later:** "Reach your goal (170.1 lb) by Jan 9 at the same 0.9 lb/wk": the same goal at the same pace, a later end date (and the maintenance after it moves too). *Example:* 178.0 lb, goal 170.1 → Jan 9 instead of Dec 26. Not offered into a phase already planned after it.
+  - **Same Date, Adjusted Goal:** "Reach 171.9 lb by Dec 26 at the same 0.9 lb/wk".
+  - **Same Date, Same Goal, Faster:** "Reach your goal (170.1 lb) by Dec 26 by increasing your rate of loss to 1.1 lb/wk" (0.64%/week). It gets the usual rate checks: a warning past them ("…Finishing the plan later keeps your pace."), and it isn't offered past the 1.5%/week limit. RepReport reads the new rate.
+  - An open-ended bulk has no end to move: **Plan from today** only.
 
 *(App's choice for the tolerances)*
 
@@ -129,21 +171,44 @@ Meal Prep estimates your real maintenance from what you logged and how your weig
 Shown on Monday, or later that week if you missed it, until you complete it:
 1. **Confirm** which of last week's days were fully logged.
 2. **See** the maintenance estimate, your actual rate against the phase target, and suggested targets.
-3. **Choose** Apply, Adjust (edit first) or Keep current. Every decision is saved.
+3. **Choose** Use, Edit or Keep. Every decision is saved.
+   - **Use:** the suggestion becomes the target in effect.
+   - **Edit:** calories have their own field; macros balance inside them as in the Phases editor (fat at least 20%). Changing the calories is the Adjust above: they become the estimate, less the pace. Keeping the suggested calories and changing only the split is recorded as a Use and leaves the estimate alone. *(Owner's choice, Nov 2026: before, any split change counted as an Adjust, so a split tweak on a capped week could move the estimate)*
+   - **Keep:** the target in effect doesn't change.
+   - **At maintenance the check-in does itself:** once the estimate rests on your data, the week's check-in is completed with its suggestion when you open the app, and Plan shows "Weekly check-in: Calories 2,500 → 2,681" with **OK** and **Something off?**. Cuts and bulks still ask Use / Edit / Keep. The first one from your data says what it replaced: "Your real maintenance is 2,680 calories. That's 180 more than the starting estimate. Each weekly check-in fine-tunes it from your latest logging and weigh-ins." *(Owner's wording, Nov 2026; numbers are kept out of comma runs like "2,680, 180", which read as one long number)*
+   - **Something off?** offers the reasons someone at maintenance wouldn't want the change, each with its own fix, so none of them turns into a quiet, lasting Keep *(owner's choice, Nov 2026)*:
+     - **My log was incomplete** → the check-in is withdrawn and last week's days open to fix; it runs again from them.
+     - **My weight is temporarily off** (travel, illness, a salty weekend, the menstrual cycle) → "Got it. Your calories stay at 2,500 this week. Next week's check-in will update them again."
+     - **I want to lose or gain slowly** → a slow cut (−0.25%/week, ≈0.45 lb at 180) or bulk (+0.5%/month) starts today at its usual length (cut 12 weeks, bulk 16), then maintenance. Calories and the end date show before you tap.
+     - **Hold my current weight instead** → only while winning back a drift: the weight to hold becomes today's, and calories go to plain maintenance.
+     - **I can't eat that right now** → only when the change is 150 kcal or 6% of calories, whichever is less (2,500 → 150; 1,700 → 102): smaller changes are the estimate's routine weekly steps (at most ±150) and within logging error. Offers "Meet halfway: 2,591 · you'll lose about 0.2 lb a week" or "Stay at 2,500 this week · you'll lose about 0.4 lb a week". One week only; the next check-in applies the full number. Two weeks running, it adds: "If this is what you can eat, a slow cut makes it the plan instead of a drift", with the slow option. *(150 kcal / 6% is the owner's choice, Nov 2026)* *Why:* a Keep or a skipped check-in let maintenance drift: guessed at 2,500 with a real maintenance of 2,680, someone keeping 2,500 is 5.4 lb down after 15 weeks; with the check-ins applied they hold at 179.3. *(Owner's choice, Nov 2026)*
+   - Whichever you pick, the presets not in effect follow the new estimate once it rests on your data ([Targets follow the estimate](#targets-follow-the-estimate)).
 
 The card keeps it short: which days count, the estimate's change this week (old → new), and the suggested targets. It doesn't show the raw 3-week number on its own, since that single reading swings with water weight; the estimate only moves part way toward it. *(Owner's request, Nov 2026)*
 
 **Suggested targets:**
 - **Calories:** maintenance plus whatever produces your phase's target rate, moved **at most ±250 kcal** per check-in (±300 on that first data-based check-in, when the estimate jumps to your own data).
+- **Except at maintenance, where there's no step:** calories go straight to your maintenance (plus any catch-up). The estimate from your data is already trusted in full, and stepping toward it held people under or over maintenance for extra weeks, still drifting. *Example:* calculator 2,140, real 2,680: the old step gave 2,440 in week 1 (still 240 under, still losing); now 2,680, or 2,884 with a 2.4 lb catch-up. The cost: a noisy first estimate (a water swing can put it ~±150 off) goes in as is; the estimate's 30% steps take it out over a few weeks, about 1 lb at most, within day-to-day range. Simulated with the app's functions, a 20%-low calculator lands within 25 kcal of the real maintenance even with water spikes, and holding weight is back by week 9–12 with no overshoot. *(Owner's choice, Nov 2026)*
 - **A warning appears** if the result implies losing more than 1% of bodyweight a week.
 - **Suggestions only appear once the estimate rests on your own data,** never on the starting guess alone.
 
 *(Research-backed for the 1% ceiling; the ±250 cap is the app's choice)*
 
+### Maintenance holds your starting weight
+Maintenance aims to keep you at the weight you began it at, not just to stop the scale moving. *(Owner's choice, Nov 2026)*
+- **The weight it holds:** a week's average of weigh-ins up to the maintenance's start, or, after a cut or bulk, up to its day 19 (the day before its pace counts), once the water from the change has settled. The phase card shows it as "Holding 180.0 lb".
+- **More than 1% away** (1.8 lb at 180 lb), each check-in aims to win back a quarter of what's left that week, as a pace on top of the estimate, **but never faster than the default bulk pace, +1%/month (about 0.23%/week)**, either way. Since any gap past 1% is over that, a catch-up runs at a steady ~0.4 lb a week (about +200 kcal/day at 176 lb) and eases off for the last ~1.6 lb. At maintenance the check-in moves calories there directly, with no weekly step. *(Owner's choice, Nov 2026: a quarter a week alone planned 0.50%/week in week 1, past the app's own +2%/month fast-bulk warning)*
+- **It stops** once back within 0.25% (about 0.45 lb), or after 16 applied check-ins as a safety stop, and the check-ins hold from there. A Keep doesn't count as a week of it.
+- *Example (simulated with the app's own functions):* real maintenance 2,680, guessed 2,500, targets kept for 10 weeks → 176.0 lb. From then on: 2,750, 2,891, 2,885 … 2,823, 2,779, 2,749, 2,678 kcal; back to 179.7 lb after 11 weeks, with no overshoot.
+- **The week a catch-up starts, it asks first.** Instead of applying itself, the check-in states it and waits. *Example, the usual case (back from the holidays):* "You're 2.4 lb over your maintenance weight. You started maintenance at 180.0 lb on Oct 6. You're at 182.4 now. To get back: about 2,480 calories a day (210 under maintenance, ≈0.4 lb a week)." with **OK** or **Stay at 182.4 lb** (today's weight becomes the one to hold, and the check-in applies plain maintenance). A catch-up from the first weeks of learning your maintenance is rarer: it takes an onboarding estimate about 12% or more off. No forecast of weeks or of what the scale will do: the fact, the action, the pace. Later weeks lead with "1.4 lb to go · Back to 180.0 lb at about 0.4 lb a week", and the Plan card shows "Getting back to 180.0 lb · 1.4 lb to go" while it runs. *(Owner's design, Nov 2026)*
+- A small drift (under 1%) is left to the estimate, and the phase card calls it "Within your normal day-to-day range" (one morning swings 1–2 lb on water and food): it learns your real maintenance within about 2 weeks of enough data, which stops it. *Example:* guessed 7% low, the person settles 0.7 lb under.
+
+*(Owner's choice for holding the starting weight and the +1%/month cap; the 1% trigger, 0.25% stop, quarter-per-week and 16-week safety stop are the app's choice)*
+
 ### Macro split
 For any calorie target:
 - **Protein:** never cut; raised to at least **2.0 g/kg** on a cut (Helms 2014) or **1.6 g/kg** otherwise (Morton 2018). *(Research-backed)*
-- **Fat:** kept, but never below **20% of calories** (Helms 2014: 15–30%). *(Research-backed range; 20% is the app's choice)*
+- **Fat:** kept, but never below **20% of calories**, rounded up to a whole gram (Helms 2014: 15–30%). *(Research-backed range; 20% is the owner's choice)*
 - **Carbs:** the rest.
 
 ---
@@ -248,10 +313,13 @@ These live in both apps. A change to one must be made in the other:
 - the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match, including the example's `beforeSets`/`afterSets`
 - the protein summary: Meal Prep computes it (`buildProteinStatus`) and saves it to `app_data.status` (`sbSaveStatus`); RepReport only displays it (`proteinSummary`); the field names in between must match
 - the goal check (`goalCheck`, `goalPhaseOf`, `goalPlanCheck`), wording included: RepReport writes the goal (`buildGoalStatus`), both apps run the same check on it
+- each phase's `target_rate_pct` (%/week): Meal Prep writes it (calendar, Phases tab, Slow button), RepReport reads it for a cut's planned pace and the goal line. A preset's default rate (`rate_pct`) lives only in Meal Prep's saved data, which RepReport never reads. Tests on both sides pin the effect of an edit (Meal Prep `tests/`, RepReport `tests/mealprep-rate-edit.test.js`).
 
 ---
 
 ## Open problems
+
+- **Protein and carb limits.** Only the 20% fat minimum is enforced in the editor. Hard limits for protein and carbs are still to be decided.
 
 - **Goal words wait for limits.** The goal line gives your pace as a number. Words like "lean" or "aggressive" need agreed limits first (see [Your training goal](#your-training-goal-from-repreport)).
 - **Duplicated logic can drift.** The shared rules above are copied, not shared code, so a change in one app can silently disagree with the other.
