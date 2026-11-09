@@ -7421,10 +7421,10 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
   );
 }
 
-// The phase heading on one line: full size up to "CUT · WEEK 6 / 12", smaller
-// for longer ones ("MAINTENANCE · WEEK 10 / 12"), never under 14px; a name
-// longer still is cut with an ellipsis.
-const headingSize = (t) => Math.max(14, Math.min(24, Math.floor(390 / Math.max(1, t.length))));
+// The phase heading on one line, the same size for every phase: 17px is the
+// largest that fits "MAINTENANCE · WEEK 10 / 12" beside "plan ›" on a phone
+// (measured at 390px). A longer custom name is cut with an ellipsis.
+const PHASE_HEADING_PX = 17;
 
 // The phase in effect at a glance, the same on the Plan and Phases cards:
 // where you are in it, how fast your weight is actually moving against the
@@ -7467,7 +7467,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   return (
     <>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-                <div style={{ ...S.ptWeek, color, fontSize: headingSize(heading), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+                <div style={{ ...S.ptWeek, color, fontSize: PHASE_HEADING_PX, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
                   {heading}
                 </div>
                 {headerRight}
