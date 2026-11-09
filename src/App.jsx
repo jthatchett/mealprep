@@ -3664,6 +3664,7 @@ export default function App() {
             onCompleteCheckin={completeCheckin}
             onCheckinReason={resolveAutoCheckin}
             onAcceptCatchUp={acceptCatchUp}
+            onReplan={replan}
             onHoldCurrent={holdCurrentWeight}
             reviewDays={reviewDays}
             onOpenMonth={() => setShowMonth(true)}
@@ -3696,7 +3697,6 @@ export default function App() {
             week={todayWeek}
             onSavePreset={savePresetTarget}
             onSaveActive={saveActiveTarget}
-            onReplan={replan}
             onSwitchPhase={switchPhase}
             onOpenCalendar={() => { setTab("plan"); setShowMonth(true); }}
             onOpenCalc={openCalc}
@@ -3725,7 +3725,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, onAcceptCatchUp, onHoldCurrent, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, onAcceptCatchUp, onHoldCurrent, onReplan = null, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -3865,7 +3865,7 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
         <AutoCheckinNotice c={coaching} phases={phases} onReason={onCheckinReason} />
       )}
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
-      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} hold={coaching?.hold} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
+      <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} hold={coaching?.hold} onReplan={onReplan} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
         strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
         trainingGoal={training?.active ? training.goal || null : null} nudge={nudge} onDismissNudge={onDismissNudge} />
 
@@ -4636,7 +4636,7 @@ function paceStartsOn(rows, phase, monthly) {
   return addDaysISO(start, monthly ? 27 : 19);
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, hold = null, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null, nudge = false, onDismissNudge }) {
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, hold = null, onReplan = null, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null, nudge = false, onDismissNudge }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -4684,7 +4684,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   // pace: actual vs target, in display units
-  const pace = behindVerdict(paceVerdict(phase.phase_type, actual, targetPct), planStatus(phase, (presets || []).find((p) => p.id === phase.phase_id), bwLog, today));
+  const followedPreset = (presets || []).find((p) => p.id === phase.phase_id) || null;
+  const plan = planStatus(phase, followedPreset, bwLog, today);
+  const pace = behindVerdict(paceVerdict(phase.phase_type, actual, targetPct), plan);
 
   // projected weight at the planned end, at the target pace
   let projection = null;
@@ -4771,6 +4773,10 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
         <div style={{ ...S.pcPace, color: pace.ok ? accent : "#ffb454" }}>
           {pace.ok ? "●" : "▲"} {pace.text}
         </div>
+      )}
+      {/* behind plan: the ways back, where the pace is seen every day */}
+      {plan?.behind && followedPreset && onReplan && (
+        <BehindPlan row={phase} preset={followedPreset} plan={plan} today={today} dietPhases={dietPhases} onReplan={onReplan} />
       )}
       {weighPrompt && <div style={S.pcNeed}>{weighPrompt}</div>}
       {nudge && (
@@ -7327,7 +7333,7 @@ function gapReason(latest, row) {
   return "Your weight or the estimate has moved since this target was set; your next check-in suggests an update.";
 }
 
-function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, coaching = null, training = null, week = null, onSavePreset, onSaveActive, onReplan = () => {}, onSwitchPhase, onOpenCalendar, onOpenCalc, initialEdit = null }) {
+function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory, coaching = null, training = null, week = null, onSavePreset, onSaveActive, onSwitchPhase, onOpenCalendar, onOpenCalc, initialEdit = null }) {
   const [editing, setEditing] = useState(initialEdit); // { id, focus: "rate" | null }
   const today = todayISO();
   const basis = coaching?.basis || null;
@@ -7458,10 +7464,6 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
                 </div>
               )}
 
-              {plan?.behind && followed && (
-                <BehindPlan row={dietPhase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} weightUnit={WEIGHT_UNIT}
-                  onReplan={onReplan} />
-              )}
 
               <div style={S.ptMiniStats}>
                 <div><span style={{ fontWeight: 700 }}>{followed ? fmtK(followed.target.cal) : "—"}</span> <span style={{ color: dim }}>kcal / day</span></div>
@@ -8801,7 +8803,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,

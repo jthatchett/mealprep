@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { planStatus, behindOptions, behindVerdict, Phases } from '../src/App.jsx';
+import { planStatus, behindOptions, behindVerdict, Phases, PhaseCard } from '../src/App.jsx';
 import { presets } from './fixtures.js';
 
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -67,16 +67,22 @@ describe('the three ways back (178.0 lb today, goal 170.1 by Dec 26, 7 weeks lef
   });
 });
 
-describe('on the Phases card', () => {
+describe('where it shows', () => {
   beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 8, 12)); });
   afterEach(() => vi.useRealTimers());
-  it('shows "behind plan" and the way back', () => {
-    const html = renderToStaticMarkup(React.createElement(Phases, {
+  const text = (el) => renderToStaticMarkup(el).replace(/<!-- -->/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  it('the Plan card: "behind plan" and the way back', () => {
+    const t = text(React.createElement(PhaseCard, { dietPhases: [cut], bwLog: bw, presets: presets(), week: null, estimate: null, onOpenMonth: () => {}, onReplan: async () => {}, hasRepReport: false }));
+    expect(t).toMatch(/1\.8 lb behind plan/);
+    expect(t).toContain('Get back on plan ›');
+  });
+  it('the Phases card: the label only', () => {
+    const t = text(React.createElement(Phases, {
       phases: presets(), setPhases: () => {}, dietPhase: cut, dietPhases: [cut], bwLog: bw, targetHistory: [],
       coaching: { basis: { kcal: 2500, source: 'learned', asOf: day(-6) }, weightLb: 178, due: false, grounded: true, thisWeek: null, last: null },
       onSavePreset: () => {}, onSaveActive: async () => true, onSwitchPhase: () => {}, onOpenCalendar: () => {}, onOpenCalc: () => {},
-    })).replace(/<!-- -->/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    expect(html).toMatch(/1\.8 lb behind plan/);
-    expect(html).toContain('Get back on plan ›');
+    }));
+    expect(t).toMatch(/1\.8 lb behind plan/);
+    expect(t).not.toContain('Get back on plan');
   });
 });
