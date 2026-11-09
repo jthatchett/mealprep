@@ -7458,7 +7458,6 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
   const anchorDate = dietPhase.phase_type === "maintenance" ? hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : planAnchorDate(dietPhase, followed);
   const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
-  const weeksLeft = prog.plannedWeeks && !prog.overrun ? Math.max(0, Math.ceil(daysBetween(today, dietPhase.planned_end_date) / 7)) : null;
   return (
     <>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
@@ -7472,7 +7471,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               ) : null}
               <div style={S.pcWeek}>
                 {shortDate(dietPhase.start_date)} – {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : "open-ended"}
-                {prog.overrun ? " · past planned end" : weeksLeft != null ? ` · ${weeksLeft} week${weeksLeft === 1 ? "" : "s"} left` : ""}
+                {prog.overrun ? " · past planned end" : ""}
               </div>
 
               <div style={S.ptPaceBox}>
