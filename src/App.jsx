@@ -4666,11 +4666,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
 
   const monthly = rateIsMonthly(phase.phase_type);
   const ratePct = phaseRatePct(phase);                                   // % per week
-  const targetPct = monthly ? ratePct * WEEKS_PER_MONTH : ratePct;       // in display units
-  const per = monthly ? "mo" : "wk";
   const trend = monthly ? monthlyWeightTrend(bwLog, today) : weightTrend(bwLog, today);
-  const latest = (bwLog || []).length ? Number(bwLog[bwLog.length - 1].weight) : null;
-  const refWeight = trend.ready ? trend.avg : latest;
   // weekly phases keep the last trend through a gap in weigh-ins, as the
   // volume note does, so the two never disagree
   const last = !monthly && !trend.ready ? latestTrendRate(bwLog, today) : null;
@@ -4683,51 +4679,18 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   const actualAge = trend.ready ? 0 : last?.age ?? null;
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
-  // pace: actual vs target, in display units
   const followedPreset = (presets || []).find((p) => p.id === phase.phase_id) || null;
-  const plan = planStatus(phase, followedPreset, bwLog, today);
-  const pace = behindVerdict(paceVerdict(phase.phase_type, actual, targetPct), plan);
-
-  // projected weight at the planned end, at the target pace
-  let projection = null;
-  if (refWeight && phase.planned_end_date && !prog.overrun && ratePct !== 0) {
-    const weeksToEnd = daysBetween(today, phase.planned_end_date) / 7;
-    if (weeksToEnd > 0) {
-      const end = refWeight * Math.pow(1 + ratePct / 100, weeksToEnd);
-      const by = parseISO(phase.planned_end_date).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-      projection = `≈ ${end.toFixed(1)} ${WEIGHT_UNIT} by ${by} at target pace`;
-    }
-  }
-
-  const targetShort = phase.phase_type === "maintenance" ? "hold ±0.25%" : `${sign(targetPct, 2)}%`;
-  // what's still needed before there's a pace to show
-  let weighPrompt = null;
-  if (paceWaiting) {
-    weighPrompt = `Your pace shows from ${shortDate(paceFrom)}, once this ${phase.phase_type === "deficit" ? (isMiniCut(phase.phase_type, phase.phase_name) ? "mini-cut" : "cut") : phase.phase_type === "surplus" ? "bulk" : "phase"} has its own weigh-ins (the first week after a change is mostly water).`;
-  } else if (actual == null) {
-    const now = Math.min(trend.recentCount, TREND_MIN_WEIGHINS);
-    const before = Math.min(monthly ? trend.oldCount : trend.priorCount, TREND_MIN_WEIGHINS);
-    const more = TREND_MIN_WEIGHINS - now;
-    weighPrompt = before >= TREND_MIN_WEIGHINS && more > 0
-      ? `Weigh in ${more} more time${more === 1 ? "" : "s"} this week to see your pace.`
-      : `Your pace shows once you have ${monthly ? "4+ weigh-ins this week and 4 weeks ago" : "2 weeks with 4+ weigh-ins each"} (${now}/${TREND_MIN_WEIGHINS} this week).`;
-  }
   // % vs maintenance only against an estimate from your own data
   const vsMaint = estimate?.estimated && cals ? ((cals.avg - estimate.kcal) / estimate.kcal) * 100 : null;
 
   return (
     <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
-      <div style={S.pcTop}>
-        <div>
-          <div style={S.pcKicker}>CURRENT PHASE</div>
-          <div style={{ ...S.pcName, color }}>
-            {phase.phase_name.toUpperCase()} · WEEK {prog.week}
-          </div>
-        </div>
-        <button style={S.pcLink} onClick={onOpenMonth}>
-          {prog.overrun ? "past planned end" : "plan"} ›
-        </button>
-      </div>
+      <div style={S.pcKicker}>CURRENT PHASE</div>
+      <PhaseOverview phase={phase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followedPreset} weightLb={weightLb} hold={hold}
+        cal={cals ? cals.avg : null}
+        calNote={vsMaint == null ? null : Math.abs(vsMaint) < 0.5 ? "your maintenance" : `${Math.abs(Math.round(vsMaint))}% ${vsMaint < 0 ? "under" : "over"} your ${Math.round(estimate.kcal).toLocaleString()} maintenance`}
+        onReplan={onReplan}
+        headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>} />
       {goal && (
         <div style={{ marginTop: 8 }}>
           <div style={{ ...S.viNote, color: text, marginTop: 0 }}>{goal.summary} <span style={{ color: dim }}>(your RepReport block)</span></div>
@@ -4741,60 +4704,12 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
         return breakNote && <div style={{ ...S.viNote, color: dim }}>{breakNote}</div>;
       })()}
 
-      <div style={S.pcStats}>
-        <div>
-          <div style={S.pcStatL}>Calories</div>
-          <div style={S.pcStatN}>{cals ? Math.round(cals.avg).toLocaleString() : "—"}</div>
-          {vsMaint != null && (
-            <div style={{ ...S.pcStatSub, color }}>{Math.abs(vsMaint) < 0.5 ? "maintenance" : `${sign(vsMaint, 0)}% vs maint.`}</div>
-          )}
-        </div>
-        <div>
-          <div style={S.pcStatL}>Pace /{per}</div>
-          <div style={S.pcStatN}>{actual != null ? `${sign(actual, 1)}%` : "—"}</div>
-          <div style={{ ...S.pcStatSub, color: dim }}>
-            target {targetShort}{actualAge > 0 ? ` · ${actualAge}d ago` : ""}
-          </div>
-        </div>
-        <div>
-          <div style={S.pcStatL}>Phase length</div>
-          <div style={S.pcStatN}>{prog.plannedWeeks ? `${prog.week} / ${prog.plannedWeeks}` : `wk ${prog.week}`}</div>
-          {pct != null ? (
-            <div style={{ ...S.pcTrack, marginTop: 6 }}>
-              <div style={{ ...S.pcFill, width: pct + "%", background: color }} />
-            </div>
-          ) : (
-            <div style={{ ...S.pcStatSub, color: dim }}>open-ended</div>
-          )}
-        </div>
-      </div>
-
-      {pace && (
-        <div style={{ ...S.pcPace, color: pace.ok ? accent : "#ffb454" }}>
-          {pace.ok ? "●" : "▲"} {pace.text}
-        </div>
-      )}
-      {/* behind plan: the ways back, where the pace is seen every day */}
-      {plan?.behind && followedPreset && onReplan && (
-        <BehindPlan row={phase} preset={followedPreset} plan={plan} today={today} dietPhases={dietPhases} onReplan={onReplan} />
-      )}
-      {weighPrompt && <div style={S.pcNeed}>{weighPrompt}</div>}
       {nudge && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 13 }}>
           <button style={{ ...S.pcLink, flex: 1, textAlign: "left", padding: 0 }} onClick={onOpenMonth}>Planning a bulk or cut next? Set it up on the calendar ›</button>
           <button style={{ background: "none", border: "none", color: dim, cursor: "pointer", fontSize: 14, padding: 0 }} onClick={onDismissNudge} aria-label="dismiss">✕</button>
         </div>
       )}
-      {estimate?.estimated && (
-        <div style={S.pcEstimate}>
-          Maintenance ≈ <b>{Math.round(estimate.kcal).toLocaleString()} kcal</b>
-          <span style={{ color: dim }}> · from your log and weigh-ins</span>
-        </div>
-      )}
-      {projection && <div style={S.pcProj}>{projection}</div>}
-      {hold?.ratePct ? (
-        <div style={{ ...S.pcProj, color: text }}>Getting back to {hold.anchor.toFixed(1)} lb · {Math.abs(hold.gapLb).toFixed(1)} lb to go</div>
-      ) : null}
 
       {/* Training volume only means something with RepReport (owner's call, Nov 2026). */}
       {hasRepReport && (<>
@@ -7376,99 +7291,10 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
           {dietPhase && <span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
         </div>
         {dietPhase ? (() => {
-          const color = PHASE_COLORS[dietPhase.phase_type];
-          const monthly = rateIsMonthly(dietPhase.phase_type);
-          const per = monthly ? "month" : "week";
-          const toUnits = (wk) => wk * (monthly ? WEEKS_PER_MONTH : 1);
-          const goalPct = toUnits(phaseRatePct(dietPhase));
-          const weight = pace.ready ? pace.avg : weightLb;
-          const lb = (pct) => (weight ? Math.abs((pct / 100) * weight) : null);
-          const actualPct = pace.ready ? toUnits(pace.pctPerWeek) : null;
-          const plan = planStatus(dietPhase, followed, bwLog, today);
-          const verdict = behindVerdict(paceVerdict(dietPhase.phase_type, actualPct, goalPct), plan);
-          const maint = dietPhase.phase_type === "maintenance";
-          const dir = (pct) => (pct < 0 ? "Losing" : pct > 0 ? "Gaining" : "Holding");
-          // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
-          const anchorDate = dietPhase.phase_type === "maintenance" ? coaching?.hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : planAnchorDate(dietPhase, followed);
-          const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
-          const hold = coaching?.hold;
-          const weeksLeft = prog.plannedWeeks && !prog.overrun ? Math.max(0, Math.ceil(daysBetween(today, dietPhase.planned_end_date) / 7)) : null;
           return (
             <>
-              <div style={{ ...S.ptWeek, color }}>
-                {dietPhase.phase_name.toUpperCase()} · WEEK {prog.week}{prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}
-              </div>
-              {prog.plannedWeeks ? (
-                <div style={S.pcTrack}><div style={{ ...S.pcFill, width: Math.min(100, (prog.week / prog.plannedWeeks) * 100) + "%", background: color }} /></div>
-              ) : null}
-              <div style={S.pcWeek}>
-                {shortDate(dietPhase.start_date)} – {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : "open-ended"}
-                {prog.overrun ? " · past planned end" : weeksLeft != null ? ` · ${weeksLeft} week${weeksLeft === 1 ? "" : "s"} left` : ""}
-              </div>
-
-              <div style={S.ptPaceBox}>
-                {actualPct != null ? (
-                  <>
-                    <div style={S.pcKicker}>YOUR WEIGHT, LAST {monthly ? "4" : "2"} WEEKS</div>
-                    <div style={S.ptPaceBig}>
-                      {Math.abs(actualPct) < 0.005 || lb(actualPct) < 0.05 ? "Holding steady" : `${dir(actualPct)} ${lb(actualPct).toFixed(1)} ${WEIGHT_UNIT} / ${per}`}
-                    </div>
-                    <div style={{ ...S.pcStatSub, color: verdict?.ok ? accent : "#ffb454" }}>
-                      {verdict?.ok ? "●" : "▲"} {verdict?.text}
-                      <span style={{ color: dim, fontWeight: 400 }}>
-                        {maint ? " · goal: hold steady" : ` · goal ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
-                      </span>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={S.pcKicker}>GOAL</div>
-                    <div style={S.ptPaceBig}>
-                      {maint ? "Hold your weight" : `${goalPct < 0 ? "Lose" : "Gain"} ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
-                    </div>
-                    <div style={{ ...S.pcStatSub, color: dim, fontWeight: 400 }}>
-                      {paceFrom && today < paceFrom
-                        ? `Your actual pace shows from ${shortDate(paceFrom)} (the first weeks are mostly water).`
-                        : `Your actual pace shows after 2 weeks with 4+ weigh-ins each${monthly ? " (bulks: this week and 4 weeks ago)" : ""}.`}
-                    </div>
-                  </>
-                )}
-              </div>
-
-              {wts && wts.now != null && (
-                <div style={S.ptWeights}>
-                  {[
-                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", shortDate(anchorDate)],
-                    ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
-                    maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
-                  ].filter(Boolean).map(([lab, n, sub]) => (
-                    <div key={lab}>
-                      <div style={S.pcStatL}>{lab}</div>
-                      <div style={S.pcStatN}>{n} <span style={{ fontSize: 11, color: dim, fontWeight: 400 }}>{WEIGHT_UNIT}</span></div>
-                      <div style={{ fontSize: 11, color: dim }}>{sub}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {wts?.change != null && (
-                <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
-                  {maint
-                    ? hold?.ratePct
-                      ? `${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} ${wts.change < 0 ? "under" : "over"}: calories are ${Math.abs(Math.round(paceKcal(hold.ratePct, weightLb)))} kcal/day ${hold.ratePct > 0 ? "above" : "below"} maintenance to get you back, less each week as you close in.`
-                      : Math.abs((wts.change / wts.start) * 100) <= HOLD_TRIGGER_PCT
-                        ? "Holding steady · within your normal day-to-day range."
-                        : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${shortDate(anchorDate)}. Your next check-in brings you back.`
-                    : wts.planNow != null
-                      ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
-                      : ""}
-                </div>
-              )}
-
-
-              <div style={S.ptMiniStats}>
-                <div><span style={{ fontWeight: 700 }}>{followed ? fmtK(followed.target.cal) : "—"}</span> <span style={{ color: dim }}>kcal / day</span></div>
-                {!maint && <div style={{ color: dim }}>goal {signPct(goalPct)} / {monthly ? "mo" : "wk"} of bodyweight</div>}
-              </div>
+              <PhaseOverview phase={dietPhase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followed}
+                weightLb={weightLb} hold={coaching?.hold} cal={followed ? followed.target.cal : null} />
               {activeView?.showGap && (
                 <div style={S.ptNote}>
                   Eating {fmtK(activeView.saved)} kcal; your maintenance and this goal point to {fmtK(activeView.calculated)}. {gapReason(latestCheckin, dietPhase)}
@@ -7592,6 +7418,127 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
         <PhaseHistory dietPhases={dietPhases} bwLog={bwLog} presets={phases} targetHistory={targetHistory} />
       </div>
     </div>
+  );
+}
+
+// The phase in effect at a glance, the same on the Plan and Phases cards:
+// where you are in it, how fast your weight is actually moving against the
+// goal in pounds, the weight you started from (or are holding) and where the
+// plan puts you, then calories. onReplan: offer the ways back when behind.
+function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null }) {
+  const prog = phaseProgress(dietPhase, today);
+  const pace = paceReading(dietPhases, bwLog, today);
+  const paceFrom = paceStartsOn(dietPhases, dietPhase, rateIsMonthly(dietPhase.phase_type));
+  // until there's a pace: when it will show, or the weigh-ins still needed
+  let weighPrompt = null;
+  if (paceFrom && today < paceFrom) {
+    weighPrompt = `Your actual pace shows from ${shortDate(paceFrom)} (the first weeks after a change are mostly water).`;
+  } else if (!pace.ready) {
+    const isMonthly = rateIsMonthly(dietPhase.phase_type);
+    const t = isMonthly ? monthlyWeightTrend(bwLog, today) : weightTrend(bwLog, today);
+    const now = Math.min(t.recentCount ?? 0, TREND_MIN_WEIGHINS);
+    const before = Math.min((isMonthly ? t.oldCount : t.priorCount) ?? 0, TREND_MIN_WEIGHINS);
+    const more = TREND_MIN_WEIGHINS - now;
+    weighPrompt = before >= TREND_MIN_WEIGHINS && more > 0
+      ? `Weigh in ${more} more time${more === 1 ? "" : "s"} this week to see your pace.`
+      : `Your pace shows once you have ${isMonthly ? "4+ weigh-ins this week and 4 weeks ago" : "2 weeks with 4+ weigh-ins each"} (${now}/${TREND_MIN_WEIGHINS} this week).`;
+  }
+  const color = PHASE_COLORS[dietPhase.phase_type];
+  const monthly = rateIsMonthly(dietPhase.phase_type);
+  const per = monthly ? "month" : "week";
+  const toUnits = (wk) => wk * (monthly ? WEEKS_PER_MONTH : 1);
+  const goalPct = toUnits(phaseRatePct(dietPhase));
+  const weight = pace.ready ? pace.avg : weightLb;
+  const lb = (pct) => (weight ? Math.abs((pct / 100) * weight) : null);
+  const actualPct = pace.ready ? toUnits(pace.pctPerWeek) : null;
+  const plan = planStatus(dietPhase, followed, bwLog, today);
+  const verdict = behindVerdict(paceVerdict(dietPhase.phase_type, actualPct, goalPct), plan);
+  const maint = dietPhase.phase_type === "maintenance";
+  const dir = (pct) => (pct < 0 ? "Losing" : pct > 0 ? "Gaining" : "Holding");
+  // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
+  const anchorDate = dietPhase.phase_type === "maintenance" ? hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : planAnchorDate(dietPhase, followed);
+  const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
+  const weeksLeft = prog.plannedWeeks && !prog.overrun ? Math.max(0, Math.ceil(daysBetween(today, dietPhase.planned_end_date) / 7)) : null;
+  return (
+    <>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+                <div style={{ ...S.ptWeek, color }}>
+                  {dietPhase.phase_name.toUpperCase()} · WEEK {prog.week}{prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}
+                </div>
+                {headerRight}
+              </div>
+              {prog.plannedWeeks ? (
+                <div style={S.pcTrack}><div style={{ ...S.pcFill, width: Math.min(100, (prog.week / prog.plannedWeeks) * 100) + "%", background: color }} /></div>
+              ) : null}
+              <div style={S.pcWeek}>
+                {shortDate(dietPhase.start_date)} – {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : "open-ended"}
+                {prog.overrun ? " · past planned end" : weeksLeft != null ? ` · ${weeksLeft} week${weeksLeft === 1 ? "" : "s"} left` : ""}
+              </div>
+
+              <div style={S.ptPaceBox}>
+                {actualPct != null ? (
+                  <>
+                    <div style={S.pcKicker}>YOUR WEIGHT, LAST {monthly ? "4" : "2"} WEEKS</div>
+                    <div style={S.ptPaceBig}>
+                      {Math.abs(actualPct) < 0.005 || lb(actualPct) < 0.05 ? "Holding steady" : `${dir(actualPct)} ${lb(actualPct).toFixed(1)} ${WEIGHT_UNIT} / ${per}`}
+                    </div>
+                    <div style={{ ...S.pcStatSub, color: verdict?.ok ? accent : "#ffb454" }}>
+                      {verdict?.ok ? "●" : "▲"} {verdict?.text}
+                      <span style={{ color: dim, fontWeight: 400 }}>
+                        {maint ? " · goal: hold steady" : ` · goal ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={S.pcKicker}>GOAL</div>
+                    <div style={S.ptPaceBig}>
+                      {maint ? "Hold your weight" : `${goalPct < 0 ? "Lose" : "Gain"} ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
+                    </div>
+                    <div style={{ ...S.pcStatSub, color: dim, fontWeight: 400 }}>{weighPrompt}</div>
+                  </>
+                )}
+              </div>
+
+              {wts && wts.now != null && (
+                <div style={S.ptWeights}>
+                  {[
+                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", shortDate(anchorDate)],
+                    ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
+                    maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
+                  ].filter(Boolean).map(([lab, n, sub]) => (
+                    <div key={lab}>
+                      <div style={S.pcStatL}>{lab}</div>
+                      <div style={S.pcStatN}>{n} <span style={{ fontSize: 11, color: dim, fontWeight: 400 }}>{WEIGHT_UNIT}</span></div>
+                      <div style={{ fontSize: 11, color: dim }}>{sub}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {wts?.change != null && (
+                <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
+                  {maint
+                    ? hold?.ratePct
+                      ? `${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} ${wts.change < 0 ? "under" : "over"}: calories are ${Math.abs(Math.round(paceKcal(hold.ratePct, weightLb)))} kcal/day ${hold.ratePct > 0 ? "above" : "below"} maintenance to get you back, less each week as you close in.`
+                      : Math.abs((wts.change / wts.start) * 100) <= HOLD_TRIGGER_PCT
+                        ? "Holding steady · within your normal day-to-day range."
+                        : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${shortDate(anchorDate)}. Your next check-in brings you back.`
+                    : wts.planNow != null
+                      ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
+                      : ""}
+                </div>
+              )}
+
+
+              {plan?.behind && followed && onReplan && (
+                <BehindPlan row={dietPhase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} onReplan={onReplan} />
+              )}
+
+              <div style={S.ptMiniStats}>
+                <div><span style={{ fontWeight: 700 }}>{cal != null ? fmtK(cal) : "—"}</span> <span style={{ color: dim }}>kcal / day</span>{calNote ? <span style={{ color: dim }}> · {calNote}</span> : null}</div>
+                {!maint && <div style={{ color: dim }}>goal {signPct(goalPct)} / {monthly ? "mo" : "wk"} of bodyweight</div>}
+              </div>
+    </>
   );
 }
 
