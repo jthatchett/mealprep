@@ -1498,7 +1498,9 @@ function refitTarget(preset, cal, info) {
 // minimum), carbs take the change. Day targets (refeeds) are left alone:
 // they're set directly. Run when a check-in records a new estimate from
 // your data; the same array back when nothing changed.
-function realignPresets(presets, { estimate, weightLb, skipIds = [], date, reason = "estimate", source = "learned" }) {
+// minChangeKcal: leave a target alone when it's already within that of where
+// it should be (the automatic update's 50 kcal; check-ins align exactly).
+function realignPresets(presets, { estimate, weightLb, skipIds = [], date, reason = "estimate", source = "learned", minChangeKcal = 0 }) {
   if (estimate == null) return presets;
   let changed = false;
   const next = (presets || []).map((p) => {
@@ -1506,12 +1508,32 @@ function realignPresets(presets, { estimate, weightLb, skipIds = [], date, reaso
     const rate = presetRatePct(p);
     const cal = phaseCalTarget(estimate, rate, weightLb);
     if (cal == null) return p;
+    if (minChangeKcal && Math.abs(cal - Number(p.target.cal)) < minChangeKcal) return p;
     const r = refitTarget(p, cal, { date, reason, estimate: Math.round(estimate), source, ratePct: roundRate(rate), weightLb: weightLb ? r1(weightLb) : null });
     if (!r) return p;
     changed = true;
     return { ...p, target: r.target, fit: r.fit, example: false };
   });
   return changed ? next : presets;
+}
+
+// Phase targets follow your maintenance, automatically (owner's choice, Nov
+// 2026): whenever the app has everything loaded, a phase's preset starts
+// fresh when its phase does (phaseStartUpdate), and every phase target not in
+// use that's 50+ kcal off what the estimate and its goal give is brought in
+// line (realignPresets): protein and fat kept, carbs take it. The one in use
+// changes only through check-ins, a phase starting, or your edits; one-day
+// targets never; while the estimate is your Maintenance target itself (a
+// starting estimate), that target isn't recalculated from itself.
+const AUTO_ALIGN_MIN_KCAL = 50;
+function alignPhaseTargets(presets, { row, basis, weightLb, date }) {
+  const started = phaseStartUpdate(presets, { row, estimate: basis?.kcal ?? null, weightLb, date, source: basis?.source || null });
+  if (!basis) return started;
+  const maint = basis.source === "starting" ? maintenancePreset(started) : null;
+  return realignPresets(started, {
+    estimate: basis.kcal, weightLb, date, reason: "estimate", source: basis.source, minChangeKcal: AUTO_ALIGN_MIN_KCAL,
+    skipIds: [row?.phase_id, maint?.id].filter(Boolean),
+  });
 }
 
 // When a phase comes into effect (switched to, or a planned phase's start
@@ -3227,7 +3249,8 @@ export default function App() {
     return true;
   };
 
-  /* ---------- a phase's fresh target when it starts ----------
+  /* ---------- phase targets follow maintenance (alignPhaseTargets) ----------
+     and a phase's fresh target when it starts:
      When a phase comes into effect (switched to, a planned start date
      arriving, or maintenance after a cut), its preset is recalculated from
      the recorded estimate and that phase's own rate (phaseStartUpdate). Waits
@@ -3237,7 +3260,7 @@ export default function App() {
     if (!loaded || !store || !dietLoaded || !checkinsLoaded || !bwLoaded || !historyReady || loadError) return;
     const row = phaseOnDate(dietPhases, todayISO());
     const basis = coaching?.basis || null;
-    const next = phaseStartUpdate(store.phases || [], { row, estimate: basis?.kcal ?? null, weightLb: coaching?.weightLb ?? null, date: todayISO(), source: basis?.source || null });
+    const next = alignPhaseTargets(store.phases || [], { row, basis, weightLb: coaching?.weightLb ?? null, date: todayISO() });
     if (next !== store.phases) setPhases((prev) => (prev === store.phases ? next : prev));
   }, [loaded, store, dietLoaded, checkinsLoaded, bwLoaded, historyReady, loadError, dietPhases, coaching]);
 
@@ -7282,8 +7305,6 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
   const impact = Math.round(volumeImpactPct(vctx));
   // this week's check-in would move the estimate: shown as proposed, not applied
   const proposed = coaching?.due && coaching.grounded && coaching.raw?.raw != null && basis && Math.abs(coaching.estimate - basis.kcal) >= 1 ? Math.round(coaching.estimate) : null;
-  const stale = basis ? phases.filter((p) => !(dietPhase && p.id === dietPhase.phase_id) && presetView(p, ctx).showGap) : [];
-  // a hidden reason a preset would stay put: no weight for its pace (realignPresets skips it)
 
   return (
     <div>
@@ -7338,14 +7359,6 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
             {proposed != null && (
               <div style={{ ...S.ptNote, color: "#ffb454" }}>
                 This week's check-in would move it to {fmtK(proposed)} kcal. Not applied until you finish the check-in on Plan.
-              </div>
-            )}
-            {stale.length > 0 && weightLb && (
-              <div style={S.ptNote}>
-                {stale.length === 1 ? `${stale[0].name} doesn't` : `${stale.length} phase targets don't`} match this estimate yet.{" "}
-                <button style={S.linkBtn} onClick={() => setPhases((prev) => realignPresets(prev, { estimate: basis.kcal, weightLb, skipIds: [dietPhase?.phase_id, basis.source === "starting" ? maintenancePreset(prev)?.id : null].filter(Boolean), date: today, reason: "estimate", source: basis.source }))}>
-                  Update {stale.length === 1 ? "it" : "them"}
-                </button>
               </div>
             )}
           </>
@@ -7403,11 +7416,6 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
               <div><span style={S.ptKcal}>{fmtK(p.target.cal)}</span> <span style={{ color: dim, fontSize: 11 }}>kcal / day</span></div>
               <div style={S.ptMacros}>{r0(p.target.p)}P · {r0(p.target.f)}F · {r0(p.target.c)}C</div>
               {!v.check.ok && <div style={{ ...S.ptCardNote, color: "#ff8a5c" }}>Needs a fix: {v.check.errors[0].split(". ")[0]}.</div>}
-              {v.showGap && !v.active && weightLb ? (
-                <button style={S.ptUpdate} onClick={() => setPhases((prev) => realignPresets(prev, { estimate: basis.kcal, weightLb, skipIds: prev.filter((x) => x.id !== p.id).map((x) => x.id), date: today, reason: "estimate", source: basis.source }))}>
-                  Update to {fmtK(v.calculated)}
-                </button>
-              ) : null}
               <button style={S.ptLink} onClick={() => setEditing({ id: p.id, focus: null })}>View &amp; edit ›</button>
             </div>
           );
@@ -7740,7 +7748,7 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
               {dayUses.length ? `Used this week on ${dayUses.map((d) => DAY_NAMES[d]).join(", ")}.` : "Pick it for a day in that week's plan."}
             </div>
           )}
-          {startingMaint && <div style={S.ptHint}>Every target is worked out from this until your logged data takes over.</div>}
+          {startingMaint && <div style={S.ptHint}>Every target is worked out from this until your logged data takes over; your other phase targets follow it.</div>}
           {gapToCalc && (
             <div style={S.ptHint}>
               Your maintenance points to {fmtK(calcAtNewRate)}. <button style={S.linkBtn} onClick={() => setUseCalculated(true)}>Use {fmtK(calcAtNewRate)}</button>
@@ -8696,7 +8704,6 @@ const S = {
   ptGoalBtn: { background: "none", border: "none", padding: "4px 0", textAlign: "left", fontSize: 12, fontWeight: 800, letterSpacing: 0.3, cursor: "pointer", fontFamily: "inherit" },
   ptKcal: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24 },
   ptMacros: { color: dim, fontSize: 12, paddingTop: 6, borderTop: `1px solid ${line}` },
-  ptUpdate: { background: "transparent", border: `1px solid ${accent}`, color: accent, borderRadius: 8, padding: "6px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textAlign: "center", marginTop: 4 },
   ptCardNote: { color: dim, fontSize: 11, lineHeight: 1.35 },
   ptLink: { background: "none", border: "none", padding: "4px 0 0", color: accent, fontWeight: 700, fontSize: 13, textAlign: "left", cursor: "pointer", fontFamily: "inherit", marginTop: "auto" },
   ptEditor: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 14, marginTop: 6 },
@@ -8765,7 +8772,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,

@@ -206,3 +206,37 @@ describe('protein summary for RepReport: refeeds and target changes', () => {
     expect(s.proteinTarget).toBe(165);
   });
 });
+
+describe('phase targets follow maintenance automatically', async () => {
+  const { alignPhaseTargets } = await import('../src/App.jsx');
+  const learned = { kcal: 2500, source: 'learned' };
+  const cutRow = { id: 'r1', phase_id: 'phase-cut', phase_type: 'deficit', phase_name: 'Cut', start_date: '2026-10-01', target_rate_pct: -0.5 };
+  const stamped = (list) => list.map((p) => ({ ...p, startedFor: p.id === 'phase-cut' ? 'r1' : null }));
+  it("a target not in use that's 50+ kcal off lines up: the mini-cut, 1,770 → 1,960", () => {
+    const next = alignPhaseTargets(stamped(presets()), { row: cutRow, basis: learned, weightLb: W, date: '2026-11-09' });
+    expect(byId(next, 'phase-minicut').target).toMatchObject({ p: 165, f: 70, cal: 1960 });
+  });
+  it('one already within 50 kcal is left alone (the bulk: 2,707 vs 2,710)', () => {
+    const next = alignPhaseTargets(stamped(presets()), { row: cutRow, basis: learned, weightLb: W, date: '2026-11-09' });
+    expect(byId(next, 'phase-bulk').target.cal).toBe(2707);
+  });
+  it('the target in use and one-day targets never change', () => {
+    const list = stamped(presets()).map((p) => (p.id === 'phase-cut' ? { ...p, target: { p: 165, f: 70, c: 240, cal: 2250 } } : p));
+    const next = alignPhaseTargets(list, { row: cutRow, basis: learned, weightLb: W, date: '2026-11-09' });
+    expect(byId(next, 'phase-cut').target.cal).toBe(2250);
+    expect(byId(next, 'phase-weekend')).toEqual(byId(list, 'phase-weekend'));
+  });
+  it('runs once: a second pass changes nothing (same array back)', () => {
+    const once = alignPhaseTargets(stamped(presets()), { row: cutRow, basis: learned, weightLb: W, date: '2026-11-09' });
+    expect(alignPhaseTargets(once, { row: cutRow, basis: learned, weightLb: W, date: '2026-11-09' })).toBe(once);
+  });
+  it("on a starting estimate, Maintenance isn't recalculated from itself", () => {
+    const list = stamped(presets()).map((p) => (p.id === 'phase-maintenance' ? { ...p, target: { ...p.target, cal: 2520 } } : p));
+    const next = alignPhaseTargets(list, { row: cutRow, basis: { kcal: 2400, source: 'starting' }, weightLb: W, date: '2026-11-09' });
+    expect(byId(next, 'phase-maintenance').target.cal).toBe(2520);
+  });
+  it('no estimate yet: nothing moves', () => {
+    const list = stamped(presets());
+    expect(alignPhaseTargets(list, { row: cutRow, basis: null, weightLb: W, date: '2026-11-09' })).toBe(list);
+  });
+});
