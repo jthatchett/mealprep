@@ -7485,7 +7485,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                     <div style={{ ...S.pcStatSub, color: verdict?.ok ? accent : "#ffb454" }}>
                       {verdict?.ok ? "●" : "▲"} {verdict?.text}
                       <span style={{ color: dim, fontWeight: 400 }}>
-                        {maint ? " · goal: hold steady" : ` · goal ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
+                        {maint ? " · goal: hold steady" : ` · goal ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT} / ${per} (${Math.abs(goalPct).toFixed(2)}% of bodyweight)` : `${Math.abs(goalPct).toFixed(2)}% of bodyweight / ${per}`}`}
                       </span>
                     </div>
                   </>
@@ -7495,6 +7495,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                     <div style={S.ptPaceBig}>
                       {maint ? "Hold your weight" : `${goalPct < 0 ? "Lose" : "Gain"} ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}` : `${Math.abs(goalPct).toFixed(2)}%`} / ${per}`}
                     </div>
+                    {!maint && lb(goalPct) != null && <div style={{ ...S.pcStatSub, color: dim, fontWeight: 400, marginBottom: 2 }}>{Math.abs(goalPct).toFixed(2)}% of bodyweight a {per}</div>}
                     <div style={{ ...S.pcStatSub, color: dim, fontWeight: 400 }}>{weighPrompt}</div>
                   </>
                 )}
@@ -7536,7 +7537,6 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
 
               <div style={S.ptMiniStats}>
                 <div><span style={{ fontWeight: 700 }}>{cal != null ? fmtK(cal) : "—"}</span> <span style={{ color: dim }}>kcal / day</span>{calNote ? <span style={{ color: dim }}> · {calNote}</span> : null}</div>
-                {!maint && <div style={{ color: dim }}>goal {signPct(goalPct)} / {monthly ? "mo" : "wk"} of bodyweight</div>}
               </div>
     </>
   );
