@@ -7210,6 +7210,13 @@ const signPct = (n, d = 2) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).
 // differences under this are rounding and weight drift that the next check-in absorbs, not worth a line
 const TARGET_GAP_SHOWN_KCAL = 50;
 
+// "Lose 0.9 lb/wk", "Gain 1.8 lb/mo" at your weight (the % without one)
+function goalLbText(type, ratePctPerWeek, weightLb) {
+  const monthly = rateIsMonthly(type);
+  const pct = monthly ? ratePctPerWeek * WEEKS_PER_MONTH : ratePctPerWeek;
+  const amount = weightLb ? `${Math.abs((pct / 100) * weightLb).toFixed(1)} lb` : `${Math.abs(pct).toFixed(2)}%`;
+  return `${pct < 0 ? "Lose" : "Gain"} ${amount}/${monthly ? "mo" : "wk"}`;
+}
 // "−0.50% / week", "+1.00% / month", "Hold" for a weekly rate on a phase type
 function rateLabel(type, ratePctPerWeek) {
   if (type === "maintenance") return "Hold";
@@ -7367,8 +7374,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
       )}
 
       {/* the saved targets */}
-      <div style={S.ptSection}>Saved targets</div>
-      <div style={S.ptHint}>Cuts, bulks and maintenance follow your maintenance estimate at their own rate. A one-day target is set directly.</div>
+      <div style={S.ptSection}>Saved Phase Targets</div>
       <div style={S.ptGrid}>
         {phases.map((p) => {
           const v = presetView(p, ctx);
@@ -7377,29 +7383,31 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
             <div key={p.id} style={{ ...S.ptCard, ...(v.active ? { borderColor: color } : {}) }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 4, background: color, flex: "none" }} />
-                <span style={S.ptCardName}>{p.name}</span>
+                <span style={S.ptCardName}>{p.name.replace(/\//g, "/\u200B")}</span>
               </div>
-              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
-                {v.active && <span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
-                {!v.active && v.kind && v.kind !== "day" && <span style={{ ...S.ptBadge, color: dim, background: panel2 }}>PRESET</span>}
-                {v.planned[0] && <span style={{ ...S.ptBadge, color: PHASE_COLORS.maintenance, background: "rgba(122,167,255,0.12)" }}>PLANNED {shortDate(v.planned[0].start_date).toUpperCase()}</span>}
-              </div>
+              {(v.active || v.planned[0]) && (
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                  {v.active && <span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
+                  {v.planned[0] && <span style={{ ...S.ptBadge, color: PHASE_COLORS.maintenance, background: "rgba(122,167,255,0.12)" }}>PLANNED {shortDate(v.planned[0].start_date).toUpperCase()}</span>}
+                </div>
+              )}
               {v.kind === "day" ? (
-                <div style={{ ...S.ptGoal, color: dim }}>ONE-DAY TARGET</div>
+                <div style={{ ...S.ptGoal, color: dim }}>One day</div>
+              ) : v.kind === "maintenance" ? (
+                <div style={{ ...S.ptGoal, color }}>Hold your weight</div>
               ) : v.kind ? (
                 <button style={{ ...S.ptGoalBtn, color }} onClick={() => setEditing({ id: p.id, focus: "rate" })} aria-label={`Edit ${p.name} rate`}>
-                  {v.kind === "maintenance" ? "GOAL Hold" : `GOAL ${rateLabel(v.kind, v.ratePct)}`}{v.kind !== "maintenance" ? " ✎" : ""}
+                  {goalLbText(v.kind, v.ratePct, weightLb)} ✎
                 </button>
               ) : null}
               <div><span style={S.ptKcal}>{fmtK(p.target.cal)}</span> <span style={{ color: dim, fontSize: 11 }}>kcal / day</span></div>
               <div style={S.ptMacros}>{r0(p.target.p)}P · {r0(p.target.f)}F · {r0(p.target.c)}C</div>
-              {v.showGap && !v.active && (
-                <div style={S.ptCardNote}>At your estimate: {fmtK(v.calculated)} (not applied)</div>
-              )}
               {!v.check.ok && <div style={{ ...S.ptCardNote, color: "#ff8a5c" }}>Needs a fix: {v.check.errors[0].split(". ")[0]}.</div>}
-              {p.fit?.date && p.fit.from && (
-                <div style={S.ptCardNote}>Updated {shortDate(p.fit.date)}: was {fmtK(p.fit.from.cal)}</div>
-              )}
+              {v.showGap && !v.active && weightLb ? (
+                <button style={S.ptUpdate} onClick={() => setPhases((prev) => realignPresets(prev, { estimate: basis.kcal, weightLb, skipIds: prev.filter((x) => x.id !== p.id).map((x) => x.id), date: today, reason: "estimate", source: basis.source }))}>
+                  Update to {fmtK(v.calculated)}
+                </button>
+              ) : null}
               <button style={S.ptLink} onClick={() => setEditing({ id: p.id, focus: null })}>View &amp; edit ›</button>
             </div>
           );
@@ -8683,11 +8691,12 @@ const S = {
   ptSection: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 20, marginTop: 18 },
   ptGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginTop: 10 },
   ptCard: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 12, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 },
-  ptCardName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 16, overflowWrap: "anywhere" },
+  ptCardName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 16, overflowWrap: "break-word", minWidth: 0 },
   ptGoal: { fontSize: 11, fontWeight: 800, letterSpacing: 0.5, marginTop: 4 },
   ptGoalBtn: { background: "none", border: "none", padding: "4px 0", textAlign: "left", fontSize: 12, fontWeight: 800, letterSpacing: 0.3, cursor: "pointer", fontFamily: "inherit" },
   ptKcal: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24 },
   ptMacros: { color: dim, fontSize: 12, paddingTop: 6, borderTop: `1px solid ${line}` },
+  ptUpdate: { background: "transparent", border: `1px solid ${accent}`, color: accent, borderRadius: 8, padding: "6px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textAlign: "center", marginTop: 4 },
   ptCardNote: { color: dim, fontSize: 11, lineHeight: 1.35 },
   ptLink: { background: "none", border: "none", padding: "4px 0 0", color: accent, fontWeight: 700, fontSize: 13, textAlign: "left", cursor: "pointer", fontFamily: "inherit", marginTop: "auto" },
   ptEditor: { background: panel, border: `1px solid ${line}`, borderRadius: 12, padding: 14, marginTop: 6 },
