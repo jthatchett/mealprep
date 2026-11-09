@@ -7421,12 +7421,18 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
   );
 }
 
+// The phase heading on one line: full size up to "CUT · WEEK 6 / 12", smaller
+// for longer ones ("MAINTENANCE · WEEK 10 / 12"), never under 14px; a name
+// longer still is cut with an ellipsis.
+const headingSize = (t) => Math.max(14, Math.min(24, Math.floor(390 / Math.max(1, t.length))));
+
 // The phase in effect at a glance, the same on the Plan and Phases cards:
 // where you are in it, how fast your weight is actually moving against the
 // goal in pounds, the weight you started from (or are holding) and where the
 // plan puts you, then calories. onReplan: offer the ways back when behind.
 function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null }) {
   const prog = phaseProgress(dietPhase, today);
+  const heading = `${dietPhase.phase_name.toUpperCase()} · WEEK ${prog.week}${prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}`;
   const pace = paceReading(dietPhases, bwLog, today);
   const paceFrom = paceStartsOn(dietPhases, dietPhase, rateIsMonthly(dietPhase.phase_type));
   // until there's a pace: when it will show, or the weigh-ins still needed
@@ -7461,8 +7467,8 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   return (
     <>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-                <div style={{ ...S.ptWeek, color }}>
-                  {dietPhase.phase_name.toUpperCase()} · WEEK {prog.week}{prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}
+                <div style={{ ...S.ptWeek, color, fontSize: headingSize(heading), whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+                  {heading}
                 </div>
                 {headerRight}
               </div>
