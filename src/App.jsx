@@ -7342,7 +7342,7 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
             )}
             {stale.length > 0 && weightLb && (
               <div style={S.ptNote}>
-                {stale.length === 1 ? `${stale[0].name} doesn't` : `${stale.length} saved targets don't`} match this estimate yet.{" "}
+                {stale.length === 1 ? `${stale[0].name} doesn't` : `${stale.length} phase targets don't`} match this estimate yet.{" "}
                 <button style={S.linkBtn} onClick={() => setPhases((prev) => realignPresets(prev, { estimate: basis.kcal, weightLb, skipIds: [dietPhase?.phase_id, basis.source === "starting" ? maintenancePreset(prev)?.id : null].filter(Boolean), date: today, reason: "estimate", source: basis.source }))}>
                   Update {stale.length === 1 ? "it" : "them"}
                 </button>
@@ -7373,8 +7373,8 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
         </div>
       )}
 
-      {/* the saved targets */}
-      <div style={S.ptSection}>Saved Phase Targets</div>
+      {/* the phase targets */}
+      <div style={S.ptSection}>Phase Targets</div>
       <div style={S.ptGrid}>
         {phases.map((p) => {
           const v = presetView(p, ctx);

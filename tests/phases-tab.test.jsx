@@ -58,7 +58,7 @@ describe('Phases tab', () => {
   });
   it('cards: rates per week (cuts) and per month (bulks), a one-day target, planned and active', () => {
     const t = text(render());
-    expect(t).toMatch(/Saved Phase Targets Cut ACTIVE Lose 0\.9 lb\/wk ✎ 2,250 kcal \/ day 165P · 70F · 240C/);
+    expect(t).toMatch(/Phase Targets Cut ACTIVE Lose 0\.9 lb\/wk ✎ 2,250 kcal \/ day 165P · 70F · 240C/);
     expect(t).toMatch(/Mini-cut Lose 1\.1 lb\/wk ✎ 1,770 kcal \/ day 165P · 70F · 120C Update to 1,960/);
     expect(t).toMatch(/Maintenance Hold your weight 2,500 kcal/);
     expect(t).toMatch(/Bulk PLANNED JAN 11 Gain 1\.8 lb\/mo ✎ 2,707 kcal/);
