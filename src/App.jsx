@@ -7617,11 +7617,11 @@ function BehindPlan({ row, preset, plan, today, dietPhases, onReplan }) {
       ) : (
         <div style={{ marginTop: 4 }}>
           {o.restart && opt("restart", "Plan from today", `Keep ${pace} from ${plan.wts.now.toFixed(1)} lb.`, () => go("restart"))}
-          {o.later && !o.later.blockedBy && opt("later", "Finish later", `${o.later.goal.toFixed(1)} lb by ${shortDate(o.later.end)} at the same ${pace}.`, () => go("later", o.later.end))}
+          {o.later && !o.later.blockedBy && opt("later", "Finish Plan Later", `Reach your goal (${o.later.goal.toFixed(1)} lb) by ${shortDate(o.later.end)} at the same ${pace}.`, () => go("later", o.later.end))}
           {o.later?.blockedBy && <div style={{ ...S.ptHint, marginBottom: 6 }}>Finishing later would run into the phase planned for {shortDate(o.later.blockedBy)}; move that on the calendar first.</div>}
-          {o.lighter && opt("lighter", "Same date, lighter goal", `${o.lighter.goal.toFixed(1)} lb by ${shortDate(o.lighter.end)} at the same ${pace}.`, () => go("lighter"))}
-          {o.faster && opt("faster", "Same date and goal, faster", `${o.faster.goal.toFixed(1)} lb by ${shortDate(o.faster.end)} at ${lbPace(o.faster.ratePct)}.`, () => go("faster", o.faster.ratePct),
-            o.faster.warning ? <div style={{ color: "#ffb454", fontSize: 12, marginTop: 4 }}>▲ {o.faster.warning.replace(" You can still save it.", "")} Finishing later keeps your pace.</div> : null)}
+          {o.lighter && opt("lighter", "Same Date, Adjusted Goal", `Reach ${o.lighter.goal.toFixed(1)} lb by ${shortDate(o.lighter.end)} at the same ${pace}.`, () => go("lighter"))}
+          {o.faster && opt("faster", "Same Date, Same Goal, Faster", `Reach your goal (${o.faster.goal.toFixed(1)} lb) by ${shortDate(o.faster.end)} by increasing your rate of ${row.phase_type === "deficit" ? "loss" : "gain"} to ${lbPace(o.faster.ratePct)}.`, () => go("faster", o.faster.ratePct),
+            o.faster.warning ? <div style={{ color: "#ffb454", fontSize: 12, marginTop: 4 }}>▲ {o.faster.warning.replace(" You can still save it.", "")} Finishing the plan later keeps your pace.</div> : null)}
           {o.lighter && !o.faster && <div style={S.ptHint}>Keeping both the date and the goal would mean losing faster than a {row.phase_type === "deficit" ? (isMiniCut(row.phase_type, preset.name) ? "mini-cut" : "cut") : "bulk"} can be set to.</div>}
           <button style={{ ...S.linkBtn, color: dim, fontSize: 12, marginTop: 4 }} onClick={() => setOpen(false)}>not now</button>
         </div>

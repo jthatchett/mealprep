@@ -136,9 +136,9 @@ Stored per phase as % of bodyweight. Each preset also has a default rate (the ph
   - **Maintenance:** "Holding steady" within ±0.25%/week.
 - **Projection:** the phase card shows your projected weight at the planned end date, at your target pace.
 - **Behind plan (cuts and bulks):** the 2-week pace can read "On pace" while the phase as a whole is behind (slow early weeks). Once you're more than a week of the goal pace behind the plan line from your start (0.9 lb on a 0.5%/week cut at 180 lb), the label turns amber: "▲ On pace now · 1.8 lb behind plan". Calories never drop on their own to catch up. **Get back on plan** offers three ways, each redrawing the plan from today's weight *(owner's choice, Nov 2026)*:
-  - **Finish later:** the same goal at the same pace, a later end date (and the maintenance after it moves too). *Example:* 178.0 lb, goal 170.1 → Jan 9 instead of Dec 26. Not offered into a phase already planned after it.
-  - **Same date, lighter goal:** 171.9 lb by Dec 26 at the same pace.
-  - **Same date and goal, faster:** 0.64%/week (1.1 lb). It gets the usual rate checks: a warning past them ("…Finishing later keeps your pace."), and it isn't offered past the 1.5%/week limit. RepReport reads the new rate.
+  - **Finish Plan Later:** "Reach your goal (170.1 lb) by Jan 9 at the same 0.9 lb/wk": the same goal at the same pace, a later end date (and the maintenance after it moves too). *Example:* 178.0 lb, goal 170.1 → Jan 9 instead of Dec 26. Not offered into a phase already planned after it.
+  - **Same Date, Adjusted Goal:** "Reach 171.9 lb by Dec 26 at the same 0.9 lb/wk".
+  - **Same Date, Same Goal, Faster:** "Reach your goal (170.1 lb) by Dec 26 by increasing your rate of loss to 1.1 lb/wk" (0.64%/week). It gets the usual rate checks: a warning past them ("…Finishing the plan later keeps your pace."), and it isn't offered past the 1.5%/week limit. RepReport reads the new rate.
   - An open-ended bulk has no end to move: **Plan from today** only.
 
 *(App's choice for the tolerances)*
