@@ -41,3 +41,28 @@ describe('a cut: start, now, where the plan puts you, the goal at the end', () =
     expect(phaseWeights(row, [], TODAY)).toEqual({ start: null, now: null, change: null });
   });
 });
+
+describe('the maintenance card: noise vs drift', async () => {
+  const React = (await import('react')).default;
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { PhaseCard } = await import('../src/App.jsx');
+  const { vi } = await import('vitest');
+  const text = (el) => renderToStaticMarkup(el).replace(/<!-- -->/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const row = { id: 'm', phase_id: 'phase-maintenance', phase_type: 'maintenance', phase_name: 'Maintenance', start_date: day(-63), end_date: null, planned_end_date: null, target_rate_pct: 0 };
+  const card = (pct) => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 8, 12));
+    try {
+      return text(React.createElement(PhaseCard, { dietPhases: [row], bwLog: log(70, 180, pct), presets: [{ id: 'phase-maintenance', name: 'Maintenance', phase_type: 'maintenance', target: { p: 145, f: 80, c: 300, cal: 2500 } }],
+        week: null, estimate: null, onOpenMonth: () => {}, hasRepReport: false, weightLb: 180 }));
+    } finally { vi.useRealTimers(); }
+  };
+  it('a small loss inside the steady range reads as holding steady, once', () => {
+    const t = card(-0.1);
+    expect(t).toContain('Holding steady ● On target · goal: hold your weight');
+    expect(t).not.toMatch(/Losing 0\.\d lb/);
+    expect(t.match(/Holding steady/g)).toHaveLength(1);
+  });
+  it('a real drift still shows, in pounds', () => {
+    expect(card(-0.4)).toMatch(/Losing 0\.7 lb \/ week ▲ Drifting down/);
+  });
+});

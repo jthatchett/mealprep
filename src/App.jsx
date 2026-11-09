@@ -7479,12 +7479,13 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                   <>
                     <div style={S.pcKicker}>YOUR WEIGHT, LAST {monthly ? "4" : "2"} WEEKS</div>
                     <div style={S.ptPaceBig}>
-                      {Math.abs(actualPct) < 0.005 || lb(actualPct) < 0.05 ? "Holding steady" : `${dir(actualPct)} ${lb(actualPct).toFixed(1)} ${WEIGHT_UNIT} / ${per}`}
+                      {/* at maintenance, inside the steady range a small drift is noise */}
+                      {Math.abs(actualPct) < 0.005 || lb(actualPct) < 0.05 || (maint && verdict?.ok) ? "Holding steady" : `${dir(actualPct)} ${lb(actualPct).toFixed(1)} ${WEIGHT_UNIT} / ${per}`}
                     </div>
                     <div style={{ ...S.pcStatSub, color: verdict?.ok ? accent : "#ffb454" }}>
-                      {verdict?.ok ? "●" : "▲"} {verdict?.text}
+                      {verdict?.ok ? "●" : "▲"} {maint && verdict?.ok ? "On target" : verdict?.text}
                       <span style={{ color: dim, fontWeight: 400 }}>
-                        {maint ? " · goal: hold steady" : ` · goal ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT} / ${per} (${Math.abs(goalPct).toFixed(2)}% of bodyweight)` : `${Math.abs(goalPct).toFixed(2)}% of bodyweight / ${per}`}`}
+                        {maint ? " · goal: hold your weight" : ` · goal ${lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT} / ${per} (${Math.abs(goalPct).toFixed(2)}% of bodyweight)` : `${Math.abs(goalPct).toFixed(2)}% of bodyweight / ${per}`}`}
                       </span>
                     </div>
                   </>
@@ -7521,7 +7522,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                     ? hold?.ratePct
                       ? `${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} ${wts.change < 0 ? "under" : "over"}: calories are ${Math.abs(Math.round(paceKcal(hold.ratePct, weightLb)))} kcal/day ${hold.ratePct > 0 ? "above" : "below"} maintenance to get you back, less each week as you close in.`
                       : Math.abs((wts.change / wts.start) * 100) <= HOLD_TRIGGER_PCT
-                        ? "Holding steady · within your normal day-to-day range."
+                        ? "Within your normal day-to-day range."
                         : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${shortDate(anchorDate)}. Your next check-in brings you back.`
                     : wts.planNow != null
                       ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
