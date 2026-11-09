@@ -4688,7 +4688,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
       <div style={S.pcKicker}>CURRENT PHASE</div>
       <PhaseOverview phase={phase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followedPreset} weightLb={weightLb} hold={hold}
         cal={cals ? cals.avg : null}
-        calNote={vsMaint == null ? null : Math.abs(vsMaint) < 0.5 ? "your maintenance" : `${Math.abs(Math.round(vsMaint))}% ${vsMaint < 0 ? "under" : "over"} your ${Math.round(estimate.kcal).toLocaleString()} maintenance`}
+        calNote={vsMaint == null ? null : Math.abs(cals.avg - estimate.kcal) < 10 ? "your maintenance" : `${Math.abs(Math.round(cals.avg - estimate.kcal)).toLocaleString()} ${cals.avg < estimate.kcal ? "under" : "over"} your ${Math.round(estimate.kcal).toLocaleString()} maintenance`}
         onReplan={onReplan}
         headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>} />
       {goal && (
