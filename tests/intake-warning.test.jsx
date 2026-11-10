@@ -70,7 +70,7 @@ describe('what they see', () => {
       c: { today: iso(0), weekStart: iso(-1), intakeByDate, statusByDate: {} }, phase: row, presets: presets(), dietPhases: [row], bwLog: bw,
       planStore: null, targetHistory: [], onReplan: async () => {},
     })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    expect(html).toMatch(/^EATING UNDER TARGET You ate about 300 under your target this week, and you're losing 1\.\d lb a week against a 0\.\d goal\. Losing faster costs muscle\. Got it$/);
+    expect(html).toMatch(/^▲ EATING UNDER TARGET LAST 7 DAYS YOU ATE 1,750 kcal \/ day −300 vs 2,050 target LOSING 1\.\d lb \/ week \+0\.\d vs 0\.\d goal Losing faster than your goal costs muscle\. Got it$/);
   });
 });
 
@@ -87,7 +87,7 @@ describe('behind plan: the ways back, open, with one way to dismiss', () => {
       c: { today: iso(0), weekStart: iso(-1), intakeByDate, statusByDate: {} }, phase: row, presets: presets(), dietPhases: [row], bwLog: bw,
       planStore: null, targetHistory: [], onReplan: async () => {},
     })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    expect(t).toContain("If you're trying to catch up, push your end date back instead.");
+    expect(t).toContain("Losing faster than your goal costs muscle. If you're trying to catch up, push your end date back instead.");
     expect(t).toMatch(/Finish Plan Later .* Same Date, Adjusted Goal .* Same Date, Same Goal, Faster/);
     expect(t).not.toContain('not now');
     expect(t).not.toContain('Get back on plan ›');

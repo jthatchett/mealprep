@@ -4234,15 +4234,37 @@ function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, target
   const followed = (presets || []).find((p) => p.id === phase.phase_id) || null;
   const plan = planStatus(phase, followed, bwLog, today);
   const close = () => { setSeen(true); try { localStorage.setItem(key, "1"); } catch { /* private mode */ } };
-  return (
-    <div style={{ ...S.ciCard, borderColor: "#ffb454" }}>
-      <div style={{ ...S.ciKicker, color: "#ffb454" }}>{w.under ? "EATING UNDER TARGET" : "EATING OVER TARGET"}</div>
-      <div style={{ ...S.ciLine, marginTop: 6 }}>
-        You ate about {w.kcal} {w.under ? "under" : "over"} your {maint ? "maintenance" : "target"} this week, and you're {w.under ? "losing" : "gaining"} {lb(actualPct)} lb a {per}
-        {maint ? " while holding your weight" : ` against a ${lb(goalPct)} goal`}. {w.under ? "Losing faster costs muscle." : "Gaining faster than this mostly adds fat."}
-        {plan?.behind && w.under === (goalPct < 0) ? " If you're trying to catch up, push your end date back instead." : ""}
+  const amber = "#ffb454";
+  const catchUp = plan?.behind && w.under === (goalPct < 0);
+  const lbDiff = Math.abs(Number(lb(actualPct)) - Number(lb(goalPct)));
+  const tile = (label, big, unit, chip, sub) => (
+    <div style={S.iwTile}>
+      <div style={S.pcKicker}>{label}</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 2 }}>
+        <span style={S.iwBig}>{big}</span><span style={{ color: dim, fontSize: 12 }}>{unit}</span>
       </div>
-      {plan?.behind && followed && onReplan && w.under === (goalPct < 0) && (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+        <span style={S.iwChip}>{chip}</span><span style={{ color: dim, fontSize: 11 }}>{sub}</span>
+      </div>
+    </div>
+  );
+  return (
+    <div style={S.iwCard}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ ...S.ciKicker, color: amber }}>▲ {w.under ? "EATING UNDER TARGET" : "EATING OVER TARGET"}</div>
+        <span style={{ ...S.ptBadge, color: dim, background: panel2 }}>LAST 7 DAYS</span>
+      </div>
+      <div style={S.iwTiles}>
+        {tile("YOU ATE", fmtK(intake.ate), "kcal / day", `${w.under ? "−" : "+"}${w.kcal}`, `vs ${fmtK(intake.target)} ${maint ? "maintenance" : "target"}`)}
+        {tile(w.under ? "LOSING" : "GAINING", lb(actualPct), `lb / ${per}`,
+          maint ? `${w.under ? "−" : "+"}${lb(actualPct)}` : `+${lbDiff.toFixed(1)}`,
+          maint ? "vs holding steady" : `vs ${lb(goalPct)} goal`)}
+      </div>
+      <div style={{ fontSize: 14, fontWeight: 700, marginTop: 12 }}>
+        {w.under ? "Losing faster than your goal costs muscle." : "Gaining faster than your goal mostly adds fat."}
+      </div>
+      {catchUp && <div style={{ ...S.ciSub, marginTop: 4 }}>If you're trying to catch up, push your end date back instead.</div>}
+      {catchUp && followed && onReplan && (
         <BehindPlan row={phase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} startOpen canClose={false} onReplan={async (k, a) => { await onReplan(k, a); close(); }} />
       )}
       <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} onClick={close}>Got it</button>
@@ -8299,6 +8321,11 @@ const S = {
   ciSub: { color: dim, fontSize: 12, marginTop: 2, lineHeight: 1.45 },
   ciTable: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 },
   ciCell: { background: panel2, borderRadius: 8, padding: 8, fontSize: 14 },
+  iwCard: { background: panel, border: "1px solid #ffb454", borderLeft: "4px solid #ffb454", borderRadius: 12, padding: 14, marginBottom: 14 },
+  iwTiles: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 12 },
+  iwTile: { background: panel2, border: `1px solid ${line}`, borderRadius: 10, padding: "10px 12px", minWidth: 0 },
+  iwBig: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 26 },
+  iwChip: { color: "#ffb454", background: "rgba(255,180,84,0.12)", borderRadius: 999, padding: "2px 8px", fontSize: 12, fontWeight: 800 },
   ciReason: { display: "block", width: "100%", textAlign: "left", background: panel2, border: `1px solid ${line}`, borderRadius: 8, padding: "10px 12px", marginBottom: 6, color: text, fontSize: 13, lineHeight: 1.4, cursor: "pointer", fontFamily: "inherit" },
   ciNotes: { color: dim, fontSize: 12, lineHeight: 1.5, marginTop: 8 },
   dsRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, color: dim, padding: "8px 2px", marginBottom: 10 },
