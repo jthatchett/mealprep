@@ -136,7 +136,7 @@ async function sbSendFeedback(session, message) {
   const post = (s) => fetch(`${SUPABASE_URL}/rest/v1/feedback`, {
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${s.access_token}`, Prefer: "return=minimal" },
-    body: JSON.stringify({ app: "Meal Prep", message, screen: "data", app_version: "v0.1", user_agent: navigator.userAgent.slice(0, 300) }),
+    body: JSON.stringify({ app: "Meal Prep", message, screen: "settings", app_version: "v0.1", user_agent: navigator.userAgent.slice(0, 300) }),
   });
   let res = await post(session);
   if (res.status === 401) {
@@ -1878,8 +1878,8 @@ async function sbInsertCheckin(session, row) {
   if (!res.ok) throw new Error("Failed to save check-in: " + res.status);
 }
 
-// log (or overwrite) today's bodyweight
-async function sbLogBodyweight(session, weight) {
+// log (or overwrite) a day's bodyweight (today unless a date is given)
+async function sbLogBodyweight(session, weight, date = todayISO()) {
   // on_conflict targets the (user_id, date) unique key — without it PostgREST
   // merges on the primary key only, so a second save the same day 409s
   // instead of overwriting.
@@ -1891,9 +1891,18 @@ async function sbLogBodyweight(session, weight) {
       "Content-Type": "application/json",
       Prefer: "resolution=merge-duplicates",
     },
-    body: JSON.stringify({ user_id: session.user.id, date: todayISO(), weight }),
+    body: JSON.stringify({ user_id: session.user.id, date, weight }),
   });
   if (!res.ok) throw new Error("Failed to save bodyweight: " + res.status);
+}
+
+// remove a day's weigh-in (the weight log's "remove")
+async function sbDeleteBodyweight(session, date) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bodyweight_log?user_id=eq.${session.user.id}&date=eq.${date}`, {
+    method: "DELETE",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` },
+  });
+  if (!res.ok) throw new Error("Failed to remove weigh-in: " + res.status);
 }
 
 /* ---------- seeded data (VERIFY = best-effort macros to correct) ---------- */
@@ -2451,6 +2460,7 @@ function ConsentScreen({ session, onConfirmed, onSignOut }) {
    ============================================================ */
 export default function App() {
   const [tab, setTab] = useState("plan");
+  const [page, setPage] = useState(null); // full-screen page over the tabs: "settings" | "weight" | null
   const [store, setStore] = useState(null); // { foods, phases, week } — atomic
   const storeRef = useRef(null); // the latest store, for async checks outside render
   storeRef.current = store;
@@ -3046,14 +3056,30 @@ export default function App() {
   };
 
   const saveBodyweight = async (weight) => {
+    if (await saveWeighIn(todayISO(), weight)) setShowBwModal(false);
+  };
+  // the weight log: add, change or remove any past day's weigh-in
+  const saveWeighIn = async (day, weight) => {
     try {
-      await sbLogBodyweight(session, weight);
-      const day = todayISO();
+      await sbLogBodyweight(session, weight, day);
       setBwLog((log) => [...log.filter((r) => r.date !== day), { date: day, weight }].sort((a, b) => (a.date < b.date ? -1 : 1)));
-      setShowBwModal(false);
+      if (day === todayISO()) setShowBwModal(false);
+      return true;
     } catch (e) {
       dbg("log bodyweight FAILED: " + e.message);
       window.alert("Couldn't save — " + e.message);
+      return false;
+    }
+  };
+  const removeWeighIn = async (day) => {
+    try {
+      await sbDeleteBodyweight(session, day);
+      setBwLog((log) => log.filter((r) => r.date !== day));
+      return true;
+    } catch (e) {
+      dbg("remove bodyweight FAILED: " + e.message);
+      window.alert("Couldn't remove — " + e.message);
+      return false;
     }
   };
 
@@ -3672,6 +3698,27 @@ export default function App() {
           <button style={S.saveBannerBtn} onClick={() => setSaveError(null)}>dismiss</button>
         </div>
       )}
+      {page === "settings" ? (
+        <Settings
+          foods={foods}
+          phases={phases}
+          week={planStore}
+          setFoods={setFoods}
+          setPhases={setPhases}
+          setWeek={setPlanStore}
+          debugLog={debugLog}
+          session={session}
+          onBack={() => setPage(null)}
+          onSignOut={signOut}
+          onReplayTour={ob ? () => { saveOb({ ...obRef.current, tour: false }); setPage(null); } : null}
+          onReplayTips={ob ? () => { saveOb({ ...obRef.current, tips: {} }); setPage(null); } : null}
+          onDeleteStart={() => { accountGoneRef.current = true; }}
+          onDeleteFailed={() => { accountGoneRef.current = false; }}
+          onAccountDeleted={handleAccountDeleted}
+        />
+      ) : page === "weight" ? (
+        <WeightLog bwLog={bwLog} dietPhases={dietPhases} onBack={() => setPage(null)} onSave={saveWeighIn} onRemove={removeWeighIn} />
+      ) : (<>
       <header style={S.header}>
         <div style={S.brand}>
           <span style={S.brandMark}>◢</span>
@@ -3680,16 +3727,14 @@ export default function App() {
             <div style={S.brandSub}>{session.user?.email || "synced"}</div>
           </div>
           <div style={{flex:1}} />
-          <button style={{...S.ghostBtn, padding:"6px 10px", fontSize:11}} onClick={signOut}>
-            sign out
-          </button>
+          <WeightButton today={bwLog.find((r) => r.date === todayISO()) || null} onClick={() => setPage("weight")} />
+          <button style={S.iconBtn} onClick={() => setPage("settings")} aria-label="settings" title="settings">⚙</button>
         </div>
         <nav style={S.nav}>
           {[
             ["plan", "Plan"],
             ["foods", "Foods"],
             ["phases", "Phases"],
-            ["data", "Data"],
           ].map(([k, label]) => (
             <button
               key={k}
@@ -3771,22 +3816,8 @@ export default function App() {
             onOpenCalc={openCalc}
           />
         )}
-        {tab === "data" && (
-          <Data
-            foods={foods}
-            phases={phases}
-            week={planStore}
-            setFoods={setFoods}
-            setPhases={setPhases}
-            setWeek={setPlanStore}
-            debugLog={debugLog}
-            session={session}
-            onDeleteStart={() => { accountGoneRef.current = true; }}
-            onDeleteFailed={() => { accountGoneRef.current = false; }}
-            onAccountDeleted={handleAccountDeleted}
-          />
-        )}
       </main>
+      </>)}
     </div>
   );
 }
@@ -7917,7 +7948,200 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
 /* ============================================================
    DATA (export / import / reset)
    ============================================================ */
-function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, session, onDeleteStart, onDeleteFailed, onAccountDeleted }) {
+/* ---------- weight log ----------
+   The header's scale button opens it: a chart of the last 8 weeks, then each
+   week's weigh-ins, average and change. Tap a day to add, change or remove
+   its weigh-in (the morning prompt still asks for today's). */
+function ScaleIcon({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="4" /><path d="M8 9a5 5 0 0 1 8 0" /><path d="M12 9.5l1.5-2" />
+    </svg>
+  );
+}
+
+// header button: today's weight once logged, otherwise the scale with a dot
+function WeightButton({ today, onClick }) {
+  return (
+    <button style={S.iconBtn} onClick={onClick} aria-label={today ? `weight log, today ${today.weight} lb` : "weight log, not weighed in today"} title="weight log">
+      <ScaleIcon />
+      {today ? Number(today.weight).toFixed(1) : <span style={S.iconDot} />}
+    </button>
+  );
+}
+
+const fmtLb = (n) => Number(n).toFixed(1);
+const WEIGHT_LOG_WEEKS = 3;     // weeks shown before "show earlier weeks"
+const WEIGHT_LOG_MORE = 4;      // weeks each "show earlier weeks" adds
+const WEIGHT_CHART_DAYS = 56;   // the chart's 8 weeks
+
+// Monday-to-Sunday weeks, newest first, from this week back to the week of
+// the first weigh-in: each with its 7 days ({ date, weight | null }), the
+// average of its weigh-ins (null with none) and the change from the
+// previous week's average (null when either week has none).
+function weightWeeks(bwLog, today) {
+  const by = new Map((bwLog || []).map((r) => [r.date, Number(r.weight)]));
+  if (!by.size) return [];
+  const first = mondayOf([...by.keys()].sort()[0]);
+  const weeks = [];
+  for (let m = mondayOf(today); m >= first; m = addDaysISO(m, -7)) {
+    const days = Array.from({ length: 7 }, (_, i) => { const d = addDaysISO(m, i); return { date: d, weight: by.has(d) ? by.get(d) : null }; });
+    const got = days.filter((d) => d.weight != null);
+    weeks.push({ monday: m, days, avg: got.length ? got.reduce((a, d) => a + d.weight, 0) / got.length : null, count: got.length });
+  }
+  weeks.forEach((w, i) => { const prev = weeks[i + 1]; w.change = w.avg != null && prev?.avg != null ? w.avg - prev.avg : null; });
+  return weeks;
+}
+
+function WeightChart({ bwLog, dietPhases, weeks, today }) {
+  const W = 340, H = 140, L = 26, R = 6, T = 6, B = 18;
+  const start = addDaysISO(today, -(WEIGHT_CHART_DAYS - 1));
+  const pts = (bwLog || []).filter((r) => r.date >= start && r.date <= today).map((r) => ({ date: r.date, w: Number(r.weight) }));
+  if (pts.length < 2) return <div style={{ ...S.note, margin: 0 }}>The chart fills in as you weigh in.</div>;
+  const ws = pts.map((p) => p.w);
+  const lo = Math.floor(Math.min(...ws) - 0.5), hi = Math.ceil(Math.max(...ws) + 0.5);
+  const x = (iso) => L + (daysBetween(start, iso) / (WEIGHT_CHART_DAYS - 1)) * (W - L - R);
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  // phase shading: one band per run of days on the same phase type
+  const bands = [];
+  for (let i = 0; i < WEIGHT_CHART_DAYS; i++) {
+    const d = addDaysISO(start, i); const t = phaseOnDate(dietPhases, d)?.phase_type || null;
+    const last = bands[bands.length - 1];
+    if (last && last.t === t) last.to = d; else bands.push({ t, from: d, to: d });
+  }
+  const dayW = (W - L - R) / (WEIGHT_CHART_DAYS - 1);
+  // weekly averages, drawn at each week's middle (today for this week)
+  const avg = weeks.filter((w) => w.avg != null && addDaysISO(w.monday, 6) >= start)
+    .map((w) => { const mid = addDaysISO(w.monday, 3); const at = mid > today ? today : mid < start ? start : mid; return [x(at), y(w.avg)]; }).reverse();
+  const types = [...new Set(bands.map((b) => b.t).filter(Boolean))];
+  const ticks = [hi - 0.5, (hi + lo) / 2, lo + 0.5].map((v) => Math.round(v));
+  return (
+    <>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }} role="img" aria-label="weigh-ins over the last 8 weeks">
+        {bands.filter((b) => b.t).map((b) => (
+          <rect key={b.from} x={x(b.from) - dayW / 2} y={T} width={x(b.to) - x(b.from) + dayW} height={H - T - B} fill={PHASE_COLORS[b.t]} opacity="0.09" />
+        ))}
+        {[...new Set(ticks)].map((v) => (
+          <g key={v}>
+            <line x1={L} x2={W - R} y1={y(v)} y2={y(v)} stroke={line} strokeDasharray="2 3" />
+            <text x={0} y={y(v) + 3} fontSize="9" fill={dim}>{v}</text>
+          </g>
+        ))}
+        {pts.map((p) => <circle key={p.date} cx={x(p.date)} cy={y(p.w)} r="2.2" fill={text} opacity="0.45" />)}
+        {avg.length > 1 && <polyline points={avg.map((p) => p.join(",")).join(" ")} fill="none" stroke={accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />}
+        {[start, addDaysISO(start, 28), today].map((d, i) => (
+          <text key={d} x={x(d)} y={H - 4} fontSize="9" fill={dim} textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"}>{shortDate(d)}</text>
+        ))}
+      </svg>
+      <div style={{ fontSize: 11, color: dim, marginTop: 4 }}>
+        <span style={{ color: text, opacity: 0.6 }}>●</span> weigh-in · <span style={{ color: accent }}>━</span> weekly average
+        {types.map((t) => <span key={t}> · <span style={{ color: PHASE_COLORS[t] }}>■</span> {t === "deficit" ? "cut" : t === "surplus" ? "bulk" : "maintenance"}</span>)}
+      </div>
+    </>
+  );
+}
+
+function WeighInEditor({ date, current, onSave, onRemove, onClose }) {
+  const [val, setVal] = useState(current != null ? fmtLb(current) : "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const run = async (fn) => { setBusy(true); const ok = await fn(); setBusy(false); if (ok) onClose(); };
+  const save = () => {
+    const n = parseFloat(val);
+    if (!val || isNaN(n) || n <= 0) return setErr("enter a weight first");
+    run(() => onSave(date, n));
+  };
+  const label = parseISO(date).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+  return (
+    <div style={S.modalWrap} onClick={busy ? undefined : onClose}>
+      <div style={{ ...S.modal, maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: 24, textAlign: "center" }}>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, letterSpacing: 1, fontSize: 14, marginBottom: 4 }}>WEIGH-IN</div>
+          <p style={{ ...S.note, marginBottom: 16 }}>{label}</p>
+          <input autoFocus type="number" inputMode="decimal" placeholder="184.0" value={val}
+            onChange={(e) => { setVal(e.target.value); setErr(""); }}
+            onKeyDown={(e) => e.key === "Enter" && save()}
+            style={{ ...S.fInput, width: "100%", textAlign: "center", fontSize: 16, marginBottom: 8 }} />
+          {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+          <button style={{ ...S.primaryBtn, width: "100%", marginBottom: 8 }} onClick={save} disabled={busy}>{busy ? "saving…" : "save"}</button>
+          {current != null && (
+            <button style={{ ...S.ghostBtn, width: "100%", marginBottom: 8, color: "#ff5d7a" }} disabled={busy}
+              onClick={() => run(() => onRemove(date))}>remove this weigh-in</button>
+          )}
+          <button style={{ ...S.ghostBtn, width: "100%", background: "transparent", border: "none", color: dim }} onClick={onClose} disabled={busy}>cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeightLog({ bwLog, dietPhases, onBack, onSave, onRemove }) {
+  const today = todayISO();
+  const [shown, setShown] = useState(WEIGHT_LOG_WEEKS);
+  const [editing, setEditing] = useState(null); // ISO date being edited
+  const weeks = useMemo(() => weightWeeks(bwLog, today), [bwLog, today]);
+  const byDate = new Map((bwLog || []).map((r) => [r.date, Number(r.weight)]));
+  return (
+    <div>
+      <header style={{ ...S.header, flexDirection: "row", alignItems: "center", gap: 12 }}>
+        <button style={S.backBtn} onClick={onBack}>‹ Back</button>
+        <span style={S.pageTitle}>WEIGHT</span>
+        <div style={{ flex: 1 }} />
+        <button style={{ ...S.backBtn, color: accent, fontWeight: 700, fontSize: 13 }} onClick={() => setEditing(today)}>+ log a weigh-in</button>
+      </header>
+      <main style={S.main}>
+        {!weeks.length ? (
+          <div style={S.phaseCard}><p style={{ ...S.note, margin: 0 }}>No weigh-ins yet. Log your first one with "+ log a weigh-in". 4 or more a week keeps your trend ready.</p></div>
+        ) : (
+          <>
+            <div style={{ ...S.phaseCard, marginBottom: 14 }}>
+              <div style={S.setHead}>LAST 8 WEEKS</div>
+              <WeightChart bwLog={bwLog} dietPhases={dietPhases} weeks={weeks} today={today} />
+            </div>
+            <div style={S.phaseCard}>
+              <div style={S.setHead}>BY WEEK</div>
+              {weeks.slice(0, shown).map((w) => (
+                <div key={w.monday} style={{ borderTop: `1px solid ${line}`, padding: "10px 0" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, marginBottom: 6 }}>
+                    <span style={{ fontWeight: 700 }}>{shortDate(w.monday)} – {shortDate(addDaysISO(w.monday, 6))}</span>
+                    <span style={{ color: dim, whiteSpace: "nowrap" }}>
+                      {w.avg != null ? <>avg <b style={{ color: text }}>{fmtLb(w.avg)}</b>{w.change != null && <> · {w.change < 0 ? "−" : "+"}{fmtLb(Math.abs(w.change))} lb</>}</> : "no weigh-ins"}
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+                    {w.days.map((d, i) => {
+                      const future = d.date > today;
+                      return (
+                        <button key={d.date} disabled={future} onClick={() => setEditing(d.date)}
+                          aria-label={`${d.date}${d.weight != null ? `, ${fmtLb(d.weight)} lb` : ", no weigh-in"}`}
+                          style={{ background: panel2, border: "none", borderRadius: 6, padding: "4px 0", textAlign: "center", fontFamily: "inherit", cursor: future ? "default" : "pointer",
+                            opacity: future ? 0.35 : 1, ...(d.date === today ? { boxShadow: `inset 0 0 0 1px ${accent}` } : {}) }}>
+                          <div style={{ fontSize: 9, color: dim }}>{"MTWTFSS"[i]}</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: d.weight != null ? text : dim }}>{d.weight != null ? fmtLb(d.weight) : future ? " " : "—"}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              {shown < weeks.length && (
+                <button style={{ ...S.backBtn, width: "100%", fontSize: 12, paddingTop: 10, borderTop: `1px solid ${line}` }} onClick={() => setShown((n) => n + WEIGHT_LOG_MORE)}>show earlier weeks ›</button>
+              )}
+            </div>
+            <div style={{ fontSize: 12, color: dim, marginTop: 10 }}>Tap a day to add, change or remove that weigh-in.</div>
+          </>
+        )}
+      </main>
+      {editing && (
+        <WeighInEditor date={editing} current={byDate.has(editing) ? byDate.get(editing) : null}
+          onSave={onSave} onRemove={onRemove} onClose={() => setEditing(null)} />
+      )}
+    </div>
+  );
+}
+
+function Settings({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, session, onBack, onSignOut, onReplayTour, onReplayTips, onDeleteStart, onDeleteFailed, onAccountDeleted }) {
+  const [syncLogOpen, setSyncLogOpen] = useState(false);
   const [acctMsg, setAcctMsg] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteTyped, setDeleteTyped] = useState("");
@@ -8022,42 +8246,33 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, ses
     };
     reader.readAsText(file);
   };
+  const sec = (title, note) => (
+    <>
+      <div style={S.setHead}>{title}</div>
+      {note && <p style={{ ...S.note, marginTop: 0, marginBottom: 8 }}>{note}</p>}
+    </>
+  );
   return (
     <div>
-      <p style={S.note}>
-        Your data lives in this artifact's storage. Export regularly — it's your
-        insurance against losing the library if the artifact is rebuilt.
-      </p>
-      <div style={S.dataRow}>
-        <button style={S.primaryBtn} onClick={exportJSON}>
-          ⬇ export backup (.json)
-        </button>
-        <label style={S.ghostBtn}>
-          ⬆ import backup
-          <input
-            type="file"
-            accept="application/json"
-            onChange={importJSON}
-            style={{ display: "none" }}
-          />
-        </label>
-      </div>
-      {msg && <div style={S.verifyBanner}>{msg}</div>}
-
-      <p style={{...S.note, marginTop: 8, marginBottom: 8}}>
-        Legal (covers Meal Prep and RepReport) · general nutrition suggestions, not medical advice.
-      </p>
-      <div style={S.dataRow}>
-        <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>privacy policy</a>
-        <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>terms of use</a>
-      </div>
-
-      <p style={{...S.note, marginTop: 8, marginBottom: 8}}>
-        Feedback · bugs, confusing screens, ideas. Goes straight to the developer.
-      </p>
-      <div style={S.dataRow}>
-        <button style={S.ghostBtn} onClick={() => { setFeedbackOpen((o) => !o); setFeedbackState("idle"); }}>send feedback</button>
-      </div>
+      <header style={{ ...S.header, flexDirection: "row", alignItems: "center", gap: 12 }}>
+        <button style={S.backBtn} onClick={onBack}>‹ Back</button>
+        <span style={S.pageTitle}>SETTINGS</span>
+      </header>
+      <main style={S.main}>
+      {(onReplayTour || onReplayTips) && (
+        <div style={S.setSec}>
+          {sec("HELP", "See the welcome tour and the one-time tips again.")}
+          <div style={S.dataRow}>
+            {onReplayTour && <button style={S.ghostBtn} onClick={onReplayTour}>replay welcome tour</button>}
+            {onReplayTips && <button style={S.ghostBtn} onClick={onReplayTips}>replay tips</button>}
+          </div>
+        </div>
+      )}
+      <div style={S.setSec}>
+        {sec("FEEDBACK", "Bugs, confusing screens, ideas. Goes straight to the developer.")}
+        <div style={S.dataRow}>
+          <button style={S.ghostBtn} onClick={() => { setFeedbackOpen((o) => !o); setFeedbackState("idle"); }}>send feedback</button>
+        </div>
       {feedbackOpen && (
         <div style={{ ...S.phaseCard, marginBottom: 12 }}>
           {feedbackState === "sent" ? (
@@ -8079,35 +8294,17 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, ses
           )}
         </div>
       )}
-
-      <p style={{...S.note, marginTop: 8, marginBottom: 8}}>
-        Your account (covers Meal Prep and RepReport).
-      </p>
-      <div style={S.dataRow}>
-        <button style={S.ghostBtn} onClick={exportAll}>⬇ download all my data</button>
-        <button style={{ ...S.ghostBtn, color: "#ff5d7a" }} onClick={() => setDeleteOpen((o) => !o)}>delete account</button>
       </div>
-      {deleteOpen && (
-        <div style={{ ...S.phaseCard, marginBottom: 12 }}>
-          <p style={{ ...S.note, marginBottom: 10 }}>
-            This permanently deletes your login and everything in <strong style={{ color: "#e8efe9" }}>both Meal Prep and RepReport</strong>:
-            food log, weigh-ins, diet phases, training history, and photos. It can't be undone. Download your data first if you want a copy.
-          </p>
-          <label htmlFor="mp-delete-confirm" style={S.fLabel}>type DELETE to confirm</label>
-          <input id="mp-delete-confirm" value={deleteTyped} onChange={(e) => setDeleteTyped(e.target.value)}
-            autoCapitalize="characters" autoComplete="off" disabled={deleting}
-            style={{ ...S.fInput, marginBottom: 10, letterSpacing: 2 }} />
-          <div style={S.dataRow}>
-            <button style={S.ghostBtn} onClick={() => { setDeleteOpen(false); setDeleteTyped(""); }} disabled={deleting}>cancel</button>
-            <button style={{ ...S.primaryBtn, background: "#ff5d7a", borderColor: "#ff5d7a" }}
-              onClick={deleteAccount} disabled={deleteTyped.trim() !== "DELETE" || deleting}>
-              {deleting ? "deleting…" : "delete everything"}
-            </button>
-          </div>
+      <div style={S.setSec}>
+        {sec("BACKUP", "Everything saves to your account automatically. A backup file is an extra copy of your foods, targets and plans that you keep yourself.")}
+        <div style={S.dataRow}>
+          <button style={S.primaryBtn} onClick={exportJSON}>⬇ export backup</button>
+          <label style={S.ghostBtn}>
+            ⬆ import backup
+            <input type="file" accept="application/json" onChange={importJSON} style={{ display: "none" }} />
+          </label>
         </div>
-      )}
-      {acctMsg && <div style={S.verifyBanner}>{acctMsg}</div>}
-
+        {msg && <div style={S.verifyBanner}>{msg}</div>}
       {showExport && (
         <div style={{marginTop:12}}>
           <p style={{...S.note, marginBottom:8}}>
@@ -8130,33 +8327,63 @@ function Data({ foods, phases, week, setFoods, setPhases, setWeek, debugLog, ses
           />
         </div>
       )}
-      <div style={S.statRow}>
-        <Stat n={foods.length} label="foods" />
-        <Stat n={foods.filter((f) => f.type === "recipe").length} label="recipes" />
-        <Stat n={foods.filter((f) => f.verify).length} label="need verify" />
-        <Stat n={phases.length} label="phases" />
       </div>
-
-      <div style={{marginTop: 20}}>
-        <p style={{...S.note, marginBottom: 8}}>Storage diagnostics — add a food then check here:</p>
-        <div style={{background:"#0a0c0b", border:"1px solid #2a3133", borderRadius:10, padding:12, fontFamily:"monospace", fontSize:11, color:"#46e6a0", maxHeight:200, overflowY:"auto"}}>
-          {debugLog.length === 0
-            ? <span style={{color:"#7d8a85"}}>No events yet — add a food or phase to see log</span>
-            : debugLog.map((line, i) => <div key={i}>{line}</div>)
-          }
+      <div style={S.setSec}>
+        {sec("YOUR DATA", "Everything in both apps: food log, weigh-ins, phases, training.")}
+        <div style={S.dataRow}>
+          <button style={S.ghostBtn} onClick={exportAll}>⬇ download all my data</button>
         </div>
       </div>
+      <div style={S.setSec}>
+        {sec("LEGAL", "Covers Meal Prep and RepReport. General nutrition suggestions, not medical advice.")}
+        <div style={S.dataRow}>
+          <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>privacy policy</a>
+          <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{...S.ghostBtn, textDecoration: "none"}}>terms of use</a>
+        </div>
+      </div>
+      <div style={S.setSec}>
+        {sec("ACCOUNT", `${session.user?.email ? session.user.email + " · " : ""}one account for Meal Prep and RepReport.`)}
+        <div style={S.dataRow}>
+          <button style={S.ghostBtn} onClick={onSignOut}>sign out</button>
+          <button style={{ ...S.ghostBtn, color: "#ff5d7a" }} onClick={() => setDeleteOpen((o) => !o)}>delete account</button>
+        </div>
+      {deleteOpen && (
+        <div style={{ ...S.phaseCard, marginBottom: 12 }}>
+          <p style={{ ...S.note, marginBottom: 10 }}>
+            This permanently deletes your login and everything in <strong style={{ color: "#e8efe9" }}>both Meal Prep and RepReport</strong>:
+            food log, weigh-ins, diet phases, training history, and photos. It can't be undone. Download your data first if you want a copy.
+          </p>
+          <label htmlFor="mp-delete-confirm" style={S.fLabel}>type DELETE to confirm</label>
+          <input id="mp-delete-confirm" value={deleteTyped} onChange={(e) => setDeleteTyped(e.target.value)}
+            autoCapitalize="characters" autoComplete="off" disabled={deleting}
+            style={{ ...S.fInput, marginBottom: 10, letterSpacing: 2 }} />
+          <div style={S.dataRow}>
+            <button style={S.ghostBtn} onClick={() => { setDeleteOpen(false); setDeleteTyped(""); }} disabled={deleting}>cancel</button>
+            <button style={{ ...S.primaryBtn, background: "#ff5d7a", borderColor: "#ff5d7a" }}
+              onClick={deleteAccount} disabled={deleteTyped.trim() !== "DELETE" || deleting}>
+              {deleting ? "deleting…" : "delete everything"}
+            </button>
+          </div>
+        </div>
+      )}
+        {acctMsg && <div style={S.verifyBanner}>{acctMsg}</div>}
+      </div>
+      <div style={{ borderTop: `1px solid ${line}`, paddingTop: 12 }}>
+        <button style={{ ...S.backBtn, fontSize: 12 }} onClick={() => setSyncLogOpen((o) => !o)}>sync log (for bug reports) {syncLogOpen ? "▾" : "›"}</button>
+        {syncLogOpen && (
+          <div style={{ marginTop: 8, background:"#0a0c0b", border:"1px solid #2a3133", borderRadius:10, padding:12, fontFamily:"monospace", fontSize:11, color:"#46e6a0", maxHeight:200, overflowY:"auto"}}>
+            {debugLog.length === 0
+              ? <span style={{color:"#7d8a85"}}>Nothing yet. Add a food or phase to see what saves.</span>
+              : debugLog.map((line, i) => <div key={i}>{line}</div>)
+            }
+          </div>
+        )}
+      </div>
+      </main>
     </div>
   );
 }
-function Stat({ n, label }) {
-  return (
-    <div style={S.stat}>
-      <div style={S.statN}>{n}</div>
-      <div style={S.statL}>{label}</div>
-    </div>
-  );
-}
+
 
 /* ============================================================
    STYLES
@@ -8199,6 +8426,12 @@ const S = {
   },
   brandSub: { color: dim, fontSize: 10, letterSpacing: 1, marginTop: 1 },
   nav: { display: "flex", gap: 6 },
+  iconBtn: { background: "transparent", border: `1px solid ${line}`, color: text, borderRadius: 8, height: 34, minWidth: 34, padding: "0 9px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 15, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", position: "relative", boxSizing: "border-box", whiteSpace: "nowrap", marginLeft: 8 },
+  iconDot: { position: "absolute", top: 5, right: 5, width: 7, height: 7, borderRadius: 4, background: accent },
+  backBtn: { background: "none", border: "none", color: dim, fontSize: 14, padding: 0, cursor: "pointer", fontFamily: "inherit" },
+  pageTitle: { fontSize: 12, letterSpacing: 2, color: dim, fontWeight: 700 },
+  setSec: { marginBottom: 22 },
+  setHead: { fontSize: 11, letterSpacing: 1.5, color: dim, fontWeight: 700, marginBottom: 6 },
   navBtn: {
     flex: 1,
     padding: "9px 6px",
@@ -8826,22 +9059,6 @@ const S = {
 
   // data
   dataRow: { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" },
-  statRow: { display: "flex", gap: 8 },
-  stat: {
-    flex: 1,
-    background: panel,
-    border: `1px solid ${line}`,
-    borderRadius: 11,
-    padding: "14px 8px",
-    textAlign: "center",
-  },
-  statN: {
-    fontSize: 22,
-    fontWeight: 800,
-    fontFamily: "'Archivo', sans-serif",
-    color: accent,
-  },
-  statL: { fontSize: 10, color: dim, letterSpacing: 1, marginTop: 2 },
 };
 
 function Style() {
@@ -8865,4 +9082,5 @@ export {
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
+  weightWeeks, WeightLog, WeightButton, Settings,
 };
