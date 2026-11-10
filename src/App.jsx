@@ -4243,9 +4243,8 @@ function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, target
       <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 2 }}>
         <span style={S.iwBig}>{big}</span><span style={{ color: dim, fontSize: 12 }}>{unit}</span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-        <span style={S.iwChip}>{chip}</span><span style={{ color: dim, fontSize: 11 }}>{sub}</span>
-      </div>
+      <div style={{ marginTop: 6 }}><span style={S.iwChip}>{chip}</span></div>
+      <div style={{ color: dim, fontSize: 11, marginTop: 4 }}>{sub}</div>
     </div>
   );
   return (
