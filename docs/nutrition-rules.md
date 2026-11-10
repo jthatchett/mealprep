@@ -194,6 +194,13 @@ The card keeps it short: which days count, the estimate's change this week (old 
 
 *(Research-backed for the 1% ceiling; the ±250 cap is the app's choice)*
 
+### Eating well off target
+A food log alone can't tell eating less from logging less, so this warning needs the scale to agree. *(Owner's choice, Nov 2026)*
+- **When:** over the 7 days ending yesterday, on fully logged days (at least 4), you averaged **250+ kcal under** each day's target (a refeed day against its own), **and** the 2-week trend shows you losing faster than your goal by more than the card's on-pace band: 0.2%/week on a cut (a 0.5%/week cut: 0.7%/week or faster, about 1.3 lb at 180 lb). The mirror counts too: 250+ over on a bulk while gaining faster than 0.25%/month past its goal; and at maintenance, either way, outside the steady ±0.25%/week.
+- *Examples, a 0.5%/week cut at 2,050:* 1,750 logged and losing 1.4 lb/wk → warning. 1,750 logged but losing 0.9 → none (likely a logging gap). 2,050 logged and losing 1.4 → none (maintenance is higher than estimated; the check-in raises calories). 1,900 logged → none (inside normal logging error).
+- **What it says:** "You ate about 300 under your target this week, and you're losing 1.4 lb a week against a 0.9 goal. Losing faster costs muscle." (a bulk: "…gaining 0.8 lb a week against a 0.4 goal. Gaining faster than this mostly adds fat."). **Behind plan** (and off in the direction of the goal), it adds "If you're catching up, finishing the plan later keeps your pace." and the three ways back on plan; otherwise just **Got it**. Shown on Plan with that week's check-in, at most once a week.
+- *(250 kcal and the 4-day minimum, the same as RepReport's protein summary, are the app's choice; the scale bands are the card's own)*
+
 ### Maintenance holds your starting weight
 Maintenance aims to keep you at the weight you began it at, not just to stop the scale moving. *(Owner's choice, Nov 2026)*
 - **The weight it holds:** a week's average of weigh-ins up to the maintenance's start, or, after a cut or bulk, up to its day 19 (the day before its pace counts), once the water from the change has settled. The phase card shows it as "Holding 180.0 lb".
