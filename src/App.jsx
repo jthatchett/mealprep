@@ -7673,8 +7673,9 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
   const lbPer = hasRate && rateWeekly != null && weightLb ? Math.abs((rateWeekly / 100) * weightLb * (monthly ? WEEKS_PER_MONTH : 1)) : null;
   const dayUses = kind === "day" && week ? DAYS.filter((d) => week[d]?.targetId === preset.id) : [];
 
-  // −/+ steps the rate: 0.05%/week on a cut (≈0.09 lb at 180 lb), 0.25%/month on a bulk
-  const step = monthly ? 0.25 : 0.05;
+  // −/+ step: 0.1%/week on a cut (≈0.18 lb at 180 lb), 0.25%/month on a bulk
+  // (≈0.45 lb); a 0.05% step barely moved the pounds shown (owner's choice, Nov 2026)
+  const step = monthly ? 0.25 : 0.1;
   const stepRate = (dir) => {
     const cur = isNaN(rateNum) ? Number(shownRate(startRate)) : Math.abs(rateNum);
     setRateText(Math.max(0, Math.round((cur + dir * step) / step) * step).toFixed(2));
