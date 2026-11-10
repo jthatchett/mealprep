@@ -70,7 +70,7 @@ describe('what they see', () => {
       c: { today: iso(0), weekStart: iso(-1), intakeByDate, statusByDate: {} }, phase: row, presets: presets(), dietPhases: [row], bwLog: bw,
       planStore: null, targetHistory: [], onReplan: async () => {},
     })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    expect(html).toMatch(/^▲ EATING UNDER TARGET LAST 7 DAYS YOU ATE 1,750 kcal \/ day −300 vs 2,050 target LOSING 1\.\d lb \/ week \+0\.\d vs 0\.\d goal Losing faster than your goal costs muscle\. Got it$/);
+    expect(html).toMatch(/^▲ EATING UNDER TARGET LAST 7 DAYS YOU ATE 1,750 kcal \/ day −300 vs 2,050 target LOSING 1\.\d lb \/ week 0\.\d faster than your 0\.\d goal Losing faster than your goal costs muscle\. Got it$/);
   });
 });
 

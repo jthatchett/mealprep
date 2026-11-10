@@ -4256,9 +4256,10 @@ function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, target
       </div>
       <div style={S.iwTiles}>
         {tile("YOU ATE", fmtK(intake.ate), "kcal / day", `${w.under ? "−" : "+"}${w.kcal}`, `vs ${fmtK(intake.target)} ${maint ? "maintenance" : "target"}`)}
+        {/* said in words: a "+0.5" beside a loss read as gaining */}
         {tile(w.under ? "LOSING" : "GAINING", lb(actualPct), `lb / ${per}`,
-          maint ? `${w.under ? "−" : "+"}${lb(actualPct)}` : `+${lbDiff.toFixed(1)}`,
-          maint ? "vs holding steady" : `vs ${lb(goalPct)} goal`)}
+          maint ? (w.under ? "Drifting down" : "Drifting up") : `${lbDiff.toFixed(1)} faster`,
+          maint ? "goal: hold steady" : `than your ${lb(goalPct)} goal`)}
       </div>
       <div style={{ fontSize: 14, fontWeight: 700, marginTop: 12 }}>
         {w.under ? "Losing faster than your goal costs muscle." : "Gaining faster than your goal mostly adds fat."}
