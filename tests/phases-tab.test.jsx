@@ -31,7 +31,7 @@ describe('Phases tab', () => {
     expect(t).toMatch(/CURRENT PHASE ACTIVE CUT · WEEK 6 \/ 12 Oct 1 – Dec 23 GOAL/); // no "weeks left"
     // no weigh-ins: the goal in pounds, and when the actual pace will show
     expect(t).toMatch(/GOAL Lose 0\.9 lb \/ week 0\.50% of bodyweight a week Your pace shows once you have 2 weeks with 4\+ weigh-ins each \(0\/4 this week\)\./);
-    expect(t).toMatch(/2,250 kcal \/ day Eating/);
+    expect(t).toMatch(/2,250 kcal \/ day · 250 under your 2,500 maintenance Eating/); // same line as the Plan card
     expect(t).toContain('Eating 2,250 kcal; your maintenance and this goal point to 2,050. You chose Keep at the Nov 2 check-in, so this target stayed as it was.');
     expect(t).not.toContain('default rate');
   });

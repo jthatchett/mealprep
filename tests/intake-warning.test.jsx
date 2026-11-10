@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { intakeVsTarget, intakeWarning, IntakeWarning } from '../src/App.jsx';
+import { intakeVsTarget, intakeWarning, IntakeWarning, calVsMaintenance } from '../src/App.jsx';
 import { presets } from './fixtures.js';
 
 const cut = (ate, actualPct) => intakeWarning({ type: 'deficit', intake: { days: 7, ate, target: 2050 }, actualPct, goalPct: -0.5 });
@@ -71,5 +71,36 @@ describe('what they see', () => {
       planStore: null, targetHistory: [], onReplan: async () => {},
     })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     expect(html).toMatch(/^EATING UNDER TARGET You ate about 300 under your target this week, and you're losing 1\.\d lb a week against a 0\.\d goal\. Losing faster costs muscle\. Got it$/);
+  });
+});
+
+describe('behind plan: the ways back, open, with one way to dismiss', () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12)); });
+  afterEach(() => vi.useRealTimers());
+  it('shows the three options straight away, and only Got it to close', () => {
+    const iso = (n) => { const d = new Date(2026, 10, 10); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+    const row = { id: 'r1', phase_id: 'phase-cut', phase_type: 'deficit', phase_name: 'Cut', start_date: iso(-40), end_date: null, planned_end_date: iso(44), target_rate_pct: -0.5 };
+    // slow start, fast lately: behind plan overall
+    const bw = Array.from({ length: 41 }, (_, i) => ({ date: iso(i - 40), weight: +(181 - (i < 27 ? 0.05 * i : 0.05 * 27 + 0.2 * (i - 27))).toFixed(2) }));
+    const intakeByDate = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [iso(-1 - i), 1750]));
+    const t = renderToStaticMarkup(React.createElement(IntakeWarning, {
+      c: { today: iso(0), weekStart: iso(-1), intakeByDate, statusByDate: {} }, phase: row, presets: presets(), dietPhases: [row], bwLog: bw,
+      planStore: null, targetHistory: [], onReplan: async () => {},
+    })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    expect(t).toContain("If you're catching up, finishing the plan later keeps your pace.");
+    expect(t).toMatch(/Finish Plan Later .* Same Date, Adjusted Goal .* Same Date, Same Goal, Faster/);
+    expect(t).not.toContain('not now');
+    expect(t).not.toContain('Get back on plan ›');
+    expect(t.trim().endsWith('Got it')).toBe(true);
+  });
+});
+
+describe('calories against maintenance, in kcal', () => {
+  it('cards and history say it the same way', () => {
+    expect(calVsMaintenance(2050, 2500)).toBe('450 under your 2,500 maintenance');
+    expect(calVsMaintenance(2710, 2500)).toBe('210 over your 2,500 maintenance');
+    expect(calVsMaintenance(2505, 2500)).toBe('your maintenance');
+    expect(calVsMaintenance(2050, 2500, { short: true })).toBe('450 under maintenance'); // Phase History
+    expect(calVsMaintenance(2050, null)).toBe(null);
   });
 });

@@ -712,6 +712,14 @@ function transitionNote(rows, start, type, weeks, exclude = []) {
   return `Suggested: ~${prev.maintenanceWeeks} wk of maintenance after a ${blockLabel(prev)} before a ${type === "deficit" ? "cut" : "bulk"}. Your call — the training effect still fades on that schedule.`;
 }
 
+// "450 under your 2,500 maintenance" (short: "450 under maintenance")
+function calVsMaintenance(cal, maint, { short = false } = {}) {
+  if (cal == null || !(maint > 0)) return null;
+  const d = Math.round(cal - maint);
+  if (Math.abs(d) < 10) return short ? "at maintenance" : "your maintenance";
+  return `${Math.abs(d).toLocaleString("en-US")} ${d < 0 ? "under" : "over"} ${short ? "maintenance" : `your ${Math.round(maint).toLocaleString("en-US")} maintenance`}`;
+}
+
 // Average daily calorie target for a phase's week (weekday overrides such
 // as a Saturday refeed count), and its % against the Maintenance template.
 function phaseCalories(phaseRow, presets, week) {
@@ -724,7 +732,7 @@ function phaseCalories(phaseRow, presets, week) {
     : [followed.target.cal];
   const avg = cals.reduce((a, b) => a + b, 0) / cals.length;
   const pct = maint?.target.cal && !maint.example ? ((avg - maint.target.cal) / maint.target.cal) * 100 : null;
-  return { avg, pct, baseOnly: followed.target.cal, isMaintenance: followed === maint };
+  return { avg, pct, maintCal: maint?.target.cal && !maint.example ? maint.target.cal : null, baseOnly: followed.target.cal, isMaintenance: followed === maint };
 }
 
 /* ---------- target history ----------
@@ -4235,7 +4243,7 @@ function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, target
         {plan?.behind && w.under === (goalPct < 0) ? " If you're catching up, finishing the plan later keeps your pace." : ""}
       </div>
       {plan?.behind && followed && onReplan && w.under === (goalPct < 0) && (
-        <BehindPlan row={phase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} onReplan={async (k, a) => { await onReplan(k, a); close(); }} />
+        <BehindPlan row={phase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} startOpen canClose={false} onReplan={async (k, a) => { await onReplan(k, a); close(); }} />
       )}
       <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} onClick={close}>Got it</button>
     </div>
@@ -4799,7 +4807,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
       <div style={S.pcKicker}>CURRENT PHASE</div>
       <PhaseOverview phase={phase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followedPreset} weightLb={weightLb} hold={hold}
         cal={cals ? cals.avg : null}
-        calNote={vsMaint == null ? null : Math.abs(cals.avg - estimate.kcal) < 10 ? "your maintenance" : `${Math.abs(Math.round(cals.avg - estimate.kcal)).toLocaleString()} ${cals.avg < estimate.kcal ? "under" : "over"} your ${Math.round(estimate.kcal).toLocaleString()} maintenance`}
+        calNote={vsMaint == null ? null : calVsMaintenance(cals.avg, estimate.kcal)}
         onReplan={onReplan}
         headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>} />
       {goal && (
@@ -6570,7 +6578,7 @@ function PhaseHistory({ dietPhases, bwLog, presets, targetHistory }) {
       <div style={S.phKicker}>PHASE HISTORY</div>
       {blocks.slice().reverse().map((b) => {
         const color = PHASE_COLORS[b.type] || dim;
-        const calPct = b.cals?.pct == null ? null : Math.round(b.cals.pct);
+        const calNote = b.cals ? calVsMaintenance(b.cals.avg, b.cals.maintCal, { short: true }) : null;
         return (
           <div key={b.start} style={{ ...S.phRow, borderLeft: `3px solid ${color}` }}>
             <div style={{ minWidth: 0 }}>
@@ -6582,8 +6590,8 @@ function PhaseHistory({ dietPhases, bwLog, presets, targetHistory }) {
               </div>
             </div>
             <div style={{ textAlign: "right", fontSize: 12, flexShrink: 0 }}>
-              <div style={{ color: calPct ? color : dim, fontWeight: 600 }}>
-                {calPct == null ? "—" : calPct === 0 ? "0% cals" : `${sign(calPct)}% cals`}
+              <div style={{ color: calNote && calNote !== "at maintenance" ? color : dim, fontWeight: 600 }}>
+                {calNote ?? "—"}
               </div>
               <div style={{ color: b.impact ? color : dim }}>
                 {b.impact ? `${sign(b.impact)}% volume` : "baseline volume"}
@@ -7410,7 +7418,8 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
           return (
             <>
               <PhaseOverview phase={dietPhase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followed}
-                weightLb={weightLb} hold={coaching?.hold} cal={followed ? followed.target.cal : null} />
+                weightLb={weightLb} hold={coaching?.hold} cal={followed ? followed.target.cal : null}
+                calNote={followed && basis ? calVsMaintenance(followed.target.cal, basis.kcal) : null} />
               {activeView?.showGap && (
                 <div style={S.ptNote}>
                   Eating {fmtK(activeView.saved)} kcal; your maintenance and this goal point to {fmtK(activeView.calculated)}. {gapReason(latestCheckin, dietPhase)}
@@ -7653,8 +7662,8 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
 }
 
 // Behind plan: the three ways back, each one tap (onReplan does the writes).
-function BehindPlan({ row, preset, plan, today, dietPhases, onReplan }) {
-  const [open, setOpen] = useState(false);
+function BehindPlan({ row, preset, plan, today, dietPhases, onReplan, startOpen = false, canClose = true }) {
+  const [open, setOpen] = useState(startOpen);
   const [busy, setBusy] = useState(false);
   const own = followingMaintenance(dietPhases, row);
   const next = [...(dietPhases || [])].filter((r) => r.start_date > row.start_date && r.id !== row.id && r !== own)
@@ -7682,7 +7691,7 @@ function BehindPlan({ row, preset, plan, today, dietPhases, onReplan }) {
           {o.faster && opt("faster", "Same Date, Same Goal, Faster", `Reach your goal (${o.faster.goal.toFixed(1)} lb) by ${shortDate(o.faster.end)} by increasing your rate of ${row.phase_type === "deficit" ? "loss" : "gain"} to ${lbPace(o.faster.ratePct)}.`, () => go("faster", o.faster.ratePct),
             o.faster.warning ? <div style={{ color: "#ffb454", fontSize: 12, marginTop: 4 }}>▲ {o.faster.warning.replace(" You can still save it.", "")} Finishing the plan later keeps your pace.</div> : null)}
           {o.lighter && !o.faster && <div style={S.ptHint}>Keeping both the date and the goal would mean losing faster than a {row.phase_type === "deficit" ? (isMiniCut(row.phase_type, preset.name) ? "mini-cut" : "cut") : "bulk"} can be set to.</div>}
-          <button style={{ ...S.linkBtn, color: dim, fontSize: 12, marginTop: 4 }} onClick={() => setOpen(false)}>not now</button>
+          {canClose && <button style={{ ...S.linkBtn, color: dim, fontSize: 12, marginTop: 4 }} onClick={() => setOpen(false)}>not now</button>}
         </div>
       )}
     </div>
@@ -8861,7 +8870,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
