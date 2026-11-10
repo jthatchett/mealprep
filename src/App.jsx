@@ -4240,7 +4240,7 @@ function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, target
       <div style={{ ...S.ciLine, marginTop: 6 }}>
         You ate about {w.kcal} {w.under ? "under" : "over"} your {maint ? "maintenance" : "target"} this week, and you're {w.under ? "losing" : "gaining"} {lb(actualPct)} lb a {per}
         {maint ? " while holding your weight" : ` against a ${lb(goalPct)} goal`}. {w.under ? "Losing faster costs muscle." : "Gaining faster than this mostly adds fat."}
-        {plan?.behind && w.under === (goalPct < 0) ? " If you're trying to catch up, pushing your end date back is easier on your muscle than eating less." : ""}
+        {plan?.behind && w.under === (goalPct < 0) ? " If you're trying to catch up, push your end date back instead." : ""}
       </div>
       {plan?.behind && followed && onReplan && w.under === (goalPct < 0) && (
         <BehindPlan row={phase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} startOpen canClose={false} onReplan={async (k, a) => { await onReplan(k, a); close(); }} />
@@ -7689,7 +7689,7 @@ function BehindPlan({ row, preset, plan, today, dietPhases, onReplan, startOpen 
           {o.later?.blockedBy && <div style={{ ...S.ptHint, marginBottom: 6 }}>Finishing later would run into the phase planned for {shortDate(o.later.blockedBy)}; move that on the calendar first.</div>}
           {o.lighter && opt("lighter", "Same Date, Adjusted Goal", `Reach ${o.lighter.goal.toFixed(1)} lb by ${shortDate(o.lighter.end)} at the same ${pace}.`, () => go("lighter"))}
           {o.faster && opt("faster", "Same Date, Same Goal, Faster", `Reach your goal (${o.faster.goal.toFixed(1)} lb) by ${shortDate(o.faster.end)} by increasing your rate of ${row.phase_type === "deficit" ? "loss" : "gain"} to ${lbPace(o.faster.ratePct)}.`, () => go("faster", o.faster.ratePct),
-            o.faster.warning ? <div style={{ color: "#ffb454", fontSize: 12, marginTop: 4 }}>▲ {o.faster.warning.replace(" You can still save it.", "")} Pushing your end date back is easier on your muscle.</div> : null)}
+            o.faster.warning ? <div style={{ color: "#ffb454", fontSize: 12, marginTop: 4 }}>▲ {o.faster.warning.replace(" You can still save it.", "")} Finish Plan Later avoids that.</div> : null)}
           {o.lighter && !o.faster && <div style={S.ptHint}>Keeping both the date and the goal would mean losing faster than a {row.phase_type === "deficit" ? (isMiniCut(row.phase_type, preset.name) ? "mini-cut" : "cut") : "bulk"} can be set to.</div>}
           {canClose && <button style={{ ...S.linkBtn, color: dim, fontSize: 12, marginTop: 4 }} onClick={() => setOpen(false)}>not now</button>}
         </div>

@@ -87,7 +87,7 @@ describe('behind plan: the ways back, open, with one way to dismiss', () => {
       c: { today: iso(0), weekStart: iso(-1), intakeByDate, statusByDate: {} }, phase: row, presets: presets(), dietPhases: [row], bwLog: bw,
       planStore: null, targetHistory: [], onReplan: async () => {},
     })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    expect(t).toContain("If you're trying to catch up, pushing your end date back is easier on your muscle than eating less.");
+    expect(t).toContain("If you're trying to catch up, push your end date back instead.");
     expect(t).toMatch(/Finish Plan Later .* Same Date, Adjusted Goal .* Same Date, Same Goal, Faster/);
     expect(t).not.toContain('not now');
     expect(t).not.toContain('Get back on plan ›');
