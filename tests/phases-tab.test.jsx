@@ -86,6 +86,15 @@ describe('target editor', () => {
     expect(t).toMatch(/Carbs was 120 g/);
     expect(t).toMatch(/ Save( |$)/);
   });
+  it('the −/+ stepper moves a cut 0.1% a week and a bulk 0.25% a month', () => {
+    const raw = (id) => renderToStaticMarkup(React.createElement(Phases, {
+      phases: list(), setPhases: () => {}, dietPhase: cutRow, dietPhases: [cutRow, bulkRow], bwLog: [], targetHistory: [],
+      coaching: coaching(), onSavePreset: () => {}, onSaveActive: async () => true, onSwitchPhase: () => {}, onOpenCalendar: () => {}, onOpenCalc: () => {},
+      initialEdit: { id },
+    }));
+    expect(raw('phase-cut')).toContain('aria-label="Faster: +0.1%"');
+    expect(raw('phase-bulk')).toContain('aria-label="Faster: +0.25%"');
+  });
   it('a planned phase keeps its own rate', () => {
     expect(text(render({ initialEdit: { id: 'phase-bulk' } }))).toContain('Already planned: Jan 11 at +1.30% / month. Those keep their own rate.');
   });
