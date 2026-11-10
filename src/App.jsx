@@ -2542,6 +2542,7 @@ export default function App() {
   const [targetHistory, setTargetHistory] = useState([]); // target_history rows, oldest first
   const [historyReady, setHistoryReady] = useState(false); // target history loaded: target changes can be dated
   const [bwLoaded, setBwLoaded] = useState(false);         // weigh-ins loaded at least once
+  const [bwError, setBwError] = useState(null);            // the latest weigh-in load failed (today unknown)
   // latest history for the save path (its closure can be a render behind), and
   // whether it loaded — never record against a history we failed to read
   const historyRef = useRef({ loaded: false, rows: [] });
@@ -2708,6 +2709,7 @@ export default function App() {
     setCheckins([]);
     setCheckinsLoaded(false);
     setBwLoaded(false);
+    setBwError(null);
     setHistoryReady(false);
     // the next account must not inherit this one's training status or its
     // answer to the strength suggestion
@@ -2966,10 +2968,12 @@ export default function App() {
         dailyCheckDayRef.current = day;
         setBwLog(weights.value);
         setBwLoaded(true);
+        setBwError(null);
         const todayRow = weights.value.find((r) => r.date === day);
         if (!todayRow && !bwSkippedOn(day)) setShowBwModal(true);
       } else {
         failed.push("today's weigh-in");
+        setBwError(weights.reason?.message || "load failed");
         dbg("bodyweight load FAILED: " + weights.reason?.message);
       }
       setSideLoadError(failed.length ? `couldn't load ${failed.join(" or ")}` : null);
@@ -3055,33 +3059,16 @@ export default function App() {
     }
   };
 
+  // the morning prompt: today's weigh-in
   const saveBodyweight = async (weight) => {
-    if (await saveWeighIn(todayISO(), weight)) setShowBwModal(false);
+    const r = await weighIns.save(todayISO(), weight);
+    if (r.ok) { setShowBwModal(false); return; }
+    dbg("log bodyweight FAILED: " + r.error);
+    window.alert("Couldn't save — " + r.error);
   };
-  // the weight log: add, change or remove any past day's weigh-in
-  const saveWeighIn = async (day, weight) => {
-    try {
-      await sbLogBodyweight(session, weight, day);
-      setBwLog((log) => [...log.filter((r) => r.date !== day), { date: day, weight }].sort((a, b) => (a.date < b.date ? -1 : 1)));
-      if (day === todayISO()) setShowBwModal(false);
-      return true;
-    } catch (e) {
-      dbg("log bodyweight FAILED: " + e.message);
-      window.alert("Couldn't save — " + e.message);
-      return false;
-    }
-  };
-  const removeWeighIn = async (day) => {
-    try {
-      await sbDeleteBodyweight(session, day);
-      setBwLog((log) => log.filter((r) => r.date !== day));
-      return true;
-    } catch (e) {
-      dbg("remove bodyweight FAILED: " + e.message);
-      window.alert("Couldn't remove — " + e.message);
-      return false;
-    }
-  };
+  // the weight log: add, edit or remove the weigh-in for the date picked
+  const weighIns = weighInOps(session, setBwLog);
+  const bwStatus = bwError ? "error" : bwLoaded ? "ready" : "loading";
 
   // localStorage, not sessionStorage: iOS clears session storage whenever it
   // kills a suspended home-screen app, which would re-ask after a skip
@@ -3716,8 +3703,6 @@ export default function App() {
           onDeleteFailed={() => { accountGoneRef.current = false; }}
           onAccountDeleted={handleAccountDeleted}
         />
-      ) : page === "weight" ? (
-        <WeightLog bwLog={bwLog} dietPhases={dietPhases} onBack={() => setPage(null)} onSave={saveWeighIn} onRemove={removeWeighIn} />
       ) : (<>
       <header style={S.header}>
         <div style={S.brand}>
@@ -3727,9 +3712,16 @@ export default function App() {
             <div style={S.brandSub}>{session.user?.email || "synced"}</div>
           </div>
           <div style={{flex:1}} />
-          <WeightButton today={bwLog.find((r) => r.date === todayISO()) || null} onClick={() => setPage("weight")} />
+          <WeightButton today={bwLog.find((r) => r.date === todayISO()) || null} status={bwStatus} onClick={() => setPage("weight")} />
           <button style={S.iconBtn} onClick={() => setPage("settings")} aria-label="settings" title="settings">⚙</button>
         </div>
+        {page === "weight" ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 14, minHeight: 40 }}>
+            <button style={{ ...S.backBtn, minHeight: 40 }} onClick={() => setPage(null)}>‹ Back</button>
+            <span style={{ width: 1, height: 22, background: line }} />
+            <span style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 21 }}>Weight</span>
+          </div>
+        ) : (
         <nav style={S.nav}>
           {[
             ["plan", "Plan"],
@@ -3745,8 +3737,12 @@ export default function App() {
             </button>
           ))}
         </nav>
+        )}
       </header>
 
+      {page === "weight" ? (
+        <WeightLog bwLog={bwLog} dietPhases={dietPhases} status={bwStatus} onRetry={() => { setBwError(null); setBwLoaded(false); retrySideLoad(); }} onSave={weighIns.save} onRemove={weighIns.remove} />
+      ) : (
       <main style={S.main}>
         {tab === "plan" && (
           <Plan
@@ -3817,6 +3813,7 @@ export default function App() {
           />
         )}
       </main>
+      )}
       </>)}
     </div>
   );
@@ -7949,9 +7946,11 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
    DATA (export / import / reset)
    ============================================================ */
 /* ---------- weight log ----------
-   The header's scale button opens it: a chart of the last 8 weeks, then each
-   week's weigh-ins, average and change. Tap a day to add, change or remove
-   its weigh-in (the morning prompt still asks for today's). */
+   The header's scale button opens it: today's weigh-in first, then each
+   week's actual weigh-ins, newest first, where any past day can be added
+   or edited. A chart of weekly averages is optional (Weight trend). The
+   morning prompt still asks for today's weight. Dates are the phone's local
+   calendar date (todayISO), so a past day's entry is never shown as today's. */
 function ScaleIcon({ size = 18 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -7960,44 +7959,108 @@ function ScaleIcon({ size = 18 }) {
   );
 }
 
-// header button: today's weight once logged, otherwise the scale with a dot
-function WeightButton({ today, onClick }) {
+// header button. status: "loading" (no answer yet), "error" (couldn't load,
+// so whether today is logged is unknown) or "ready". Ready: today's weight
+// once logged, otherwise the scale with a dot. Never an earlier day's weight.
+function WeightButton({ today, status = "ready", onClick }) {
+  const label = status === "loading" ? "weight log, checking today's weigh-in"
+    : status === "error" ? "weight log, couldn't load weigh-ins"
+    : today ? `weight log, today ${fmtLb(today.weight)} lb` : "weight log, not weighed in today";
   return (
-    <button style={S.iconBtn} onClick={onClick} aria-label={today ? `weight log, today ${today.weight} lb` : "weight log, not weighed in today"} title="weight log">
+    <button style={{ ...S.iconBtn, ...(status === "loading" ? { color: dim } : {}) }} onClick={onClick} aria-label={label} title="weight log">
       <ScaleIcon />
-      {today ? Number(today.weight).toFixed(1) : <span style={S.iconDot} />}
+      {status === "error" ? <span style={S.iconWarn}>!</span>
+        : status === "ready" && today ? fmtLb(today.weight)
+        : status === "ready" ? <span style={S.iconDot} /> : null}
     </button>
   );
 }
 
-const fmtLb = (n) => Number(n).toFixed(1);
-const WEIGHT_LOG_WEEKS = 3;     // weeks shown before "show earlier weeks"
-const WEIGHT_LOG_MORE = 4;      // weeks each "show earlier weeks" adds
+// to a tenth, halves up (177.35 → 177.4; toFixed alone gives 177.3)
+const fmtLb = (n) => (Math.round(Number(n) * 10 + 1e-9) / 10).toFixed(1);
+const WEIGHT_LOG_WEEKS = 2;     // weeks shown before "Earlier weeks"
+const WEIGHT_LOG_MORE = 4;      // weeks each "Earlier weeks" adds
 const WEIGHT_CHART_DAYS = 56;   // the chart's 8 weeks
+const WEIGHT_MAX_LB = 1000;     // above this it's a typo (1766 for 176.6)
+
+// The weigh-in log with one day set to a weight (one entry per date: a
+// repeat save replaces it), or with one day removed. Oldest first, like the
+// load; other days are untouched.
+function upsertWeighIn(log, date, weight) {
+  return [...(log || []).filter((r) => r.date !== date), { date, weight }].sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+function withoutWeighIn(log, date) {
+  return (log || []).filter((r) => r.date !== date);
+}
+// a typed weight: the number, or why it can't be saved
+function parseWeighIn(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return { error: "Enter a weight." };
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return { error: "Enter a weight above 0." };
+  if (n >= WEIGHT_MAX_LB) return { error: `${t} lb looks like a typo. Check the number.` };
+  return { weight: Math.round(n * 10) / 10 };
+}
+
+// The writes behind the weight log, for the date picked (never silently
+// today): save upserts that date's row, remove deletes it; the visible log
+// changes only after the server says yes. Both resolve to { ok, error }.
+function weighInOps(session, setBwLog) {
+  return {
+    save: async (date, weight) => {
+      try { await sbLogBodyweight(session, weight, date); }
+      catch (e) { return { ok: false, error: e.message }; }
+      setBwLog((log) => upsertWeighIn(log, date, weight));
+      return { ok: true };
+    },
+    remove: async (date) => {
+      try { await sbDeleteBodyweight(session, date); }
+      catch (e) { return { ok: false, error: e.message }; }
+      setBwLog((log) => withoutWeighIn(log, date));
+      return { ok: true };
+    },
+  };
+}
 
 // Monday-to-Sunday weeks, newest first, from this week back to the week of
-// the first weigh-in: each with its 7 days ({ date, weight | null }), the
-// average of its weigh-ins (null with none) and the change from the
-// previous week's average (null when either week has none).
-function weightWeeks(bwLog, today) {
-  const by = new Map((bwLog || []).map((r) => [r.date, Number(r.weight)]));
-  if (!by.size) return [];
-  const first = mondayOf([...by.keys()].sort()[0]);
+// the first weigh-in (or `from`, if earlier). Each week: its days up to today
+// ({ date, weight | null }, newest first), and the count and average of its
+// real weigh-ins. Missing days stay missing: nothing is filled in.
+function weightWeeks(bwLog, today, from = null) {
+  const by = new Map((bwLog || []).filter((r) => r.date <= today).map((r) => [r.date, Number(r.weight)]));
+  const firstLogged = [...by.keys()].sort()[0] || null;
+  const start = [firstLogged, from].filter(Boolean).sort()[0];
+  if (!start) return [];
+  const first = mondayOf(start);
   const weeks = [];
   for (let m = mondayOf(today); m >= first; m = addDaysISO(m, -7)) {
-    const days = Array.from({ length: 7 }, (_, i) => { const d = addDaysISO(m, i); return { date: d, weight: by.has(d) ? by.get(d) : null }; });
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = addDaysISO(m, i);
+      if (d <= today) days.push({ date: d, weight: by.has(d) ? by.get(d) : null });
+    }
     const got = days.filter((d) => d.weight != null);
-    weeks.push({ monday: m, days, avg: got.length ? got.reduce((a, d) => a + d.weight, 0) / got.length : null, count: got.length });
+    weeks.push({ monday: m, sunday: addDaysISO(m, 6), days, count: got.length, partial: days.length < 7,
+      avg: got.length ? got.reduce((a, d) => a + d.weight, 0) / got.length : null });
   }
-  weeks.forEach((w, i) => { const prev = weeks[i + 1]; w.change = w.avg != null && prev?.avg != null ? w.avg - prev.avg : null; });
   return weeks;
 }
 
+// how many weeks before today's week a date's week is (0 = this week)
+const weeksBack = (iso, today) => Math.round(daysBetween(mondayOf(iso), mondayOf(today)) / 7);
+
+const dayLabel = (iso, opts = { weekday: "short", month: "short", day: "numeric" }) => parseISO(iso).toLocaleDateString("en-US", opts);
+
+// Weekly averages over the last 8 weeks, with each weigh-in as a dot. The
+// line joins weekly averages; it is not Meal Prep's trend calculation.
 function WeightChart({ bwLog, dietPhases, weeks, today }) {
   const W = 340, H = 140, L = 26, R = 6, T = 6, B = 18;
   const start = addDaysISO(today, -(WEIGHT_CHART_DAYS - 1));
   const pts = (bwLog || []).filter((r) => r.date >= start && r.date <= today).map((r) => ({ date: r.date, w: Number(r.weight) }));
-  if (pts.length < 2) return <div style={{ ...S.note, margin: 0 }}>The chart fills in as you weigh in.</div>;
+  const avgWeeks = weeks.filter((w) => w.avg != null && w.sunday >= start);
+  if (pts.length < 2 || avgWeeks.length < 2) {
+    return <p style={{ ...S.note, margin: 0 }}>Not enough weigh-ins to chart yet. It needs weigh-ins in at least 2 of the last 8 weeks.</p>;
+  }
   const ws = pts.map((p) => p.w);
   const lo = Math.floor(Math.min(...ws) - 0.5), hi = Math.ceil(Math.max(...ws) + 0.5);
   const x = (iso) => L + (daysBetween(start, iso) / (WEIGHT_CHART_DAYS - 1)) * (W - L - R);
@@ -8010,131 +8073,226 @@ function WeightChart({ bwLog, dietPhases, weeks, today }) {
     if (last && last.t === t) last.to = d; else bands.push({ t, from: d, to: d });
   }
   const dayW = (W - L - R) / (WEIGHT_CHART_DAYS - 1);
-  // weekly averages, drawn at each week's middle (today for this week)
-  const avg = weeks.filter((w) => w.avg != null && addDaysISO(w.monday, 6) >= start)
-    .map((w) => { const mid = addDaysISO(w.monday, 3); const at = mid > today ? today : mid < start ? start : mid; return [x(at), y(w.avg)]; }).reverse();
+  // each week's average at its middle day (today, for this week so far)
+  const avg = avgWeeks.map((w) => { const mid = addDaysISO(w.monday, 3); const at = mid > today ? today : mid < start ? start : mid; return [x(at), y(w.avg)]; }).reverse();
   const types = [...new Set(bands.map((b) => b.t).filter(Boolean))];
-  const ticks = [hi - 0.5, (hi + lo) / 2, lo + 0.5].map((v) => Math.round(v));
+  const ticks = [...new Set([hi - 0.5, (hi + lo) / 2, lo + 0.5].map((v) => Math.round(v)))];
   return (
     <>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }} role="img" aria-label="weigh-ins over the last 8 weeks">
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }} role="img" aria-label="weigh-ins and weekly averages over the last 8 weeks">
         {bands.filter((b) => b.t).map((b) => (
           <rect key={b.from} x={x(b.from) - dayW / 2} y={T} width={x(b.to) - x(b.from) + dayW} height={H - T - B} fill={PHASE_COLORS[b.t]} opacity="0.09" />
         ))}
-        {[...new Set(ticks)].map((v) => (
+        {ticks.map((v) => (
           <g key={v}>
             <line x1={L} x2={W - R} y1={y(v)} y2={y(v)} stroke={line} strokeDasharray="2 3" />
             <text x={0} y={y(v) + 3} fontSize="9" fill={dim}>{v}</text>
           </g>
         ))}
         {pts.map((p) => <circle key={p.date} cx={x(p.date)} cy={y(p.w)} r="2.2" fill={text} opacity="0.45" />)}
-        {avg.length > 1 && <polyline points={avg.map((p) => p.join(",")).join(" ")} fill="none" stroke={accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />}
+        <polyline points={avg.map((p) => p.join(",")).join(" ")} fill="none" stroke={accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
         {[start, addDaysISO(start, 28), today].map((d, i) => (
           <text key={d} x={x(d)} y={H - 4} fontSize="9" fill={dim} textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"}>{shortDate(d)}</text>
         ))}
       </svg>
-      <div style={{ fontSize: 11, color: dim, marginTop: 4 }}>
-        <span style={{ color: text, opacity: 0.6 }}>●</span> weigh-in · <span style={{ color: accent }}>━</span> weekly average
+      <div style={{ fontSize: 11, color: dim, marginTop: 4, lineHeight: 1.5 }}>
+        <span style={{ color: text, opacity: 0.6 }}>●</span> weigh-in · <span style={{ color: accent }}>━</span> weekly average (this week: so far)
         {types.map((t) => <span key={t}> · <span style={{ color: PHASE_COLORS[t] }}>■</span> {t === "deficit" ? "cut" : t === "surplus" ? "bulk" : "maintenance"}</span>)}
       </div>
     </>
   );
 }
 
-function WeighInEditor({ date, current, onSave, onRemove, onClose }) {
+// add or edit one date's weigh-in: blank for a missing day, prefilled when
+// editing. Closes only once the save (or remove) has gone through.
+function WeighInEditor({ date, today, current, onSave, onRemove, onClose, onDone }) {
   const [val, setVal] = useState(current != null ? fmtLb(current) : "");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(null); // "save" | "remove" while a write is in flight
   const [err, setErr] = useState("");
-  const run = async (fn) => { setBusy(true); const ok = await fn(); setBusy(false); if (ok) onClose(); };
-  const save = () => {
-    const n = parseFloat(val);
-    if (!val || isNaN(n) || n <= 0) return setErr("enter a weight first");
-    run(() => onSave(date, n));
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const isToday = date === today;
+  const run = async (kind, fn, done) => {
+    setBusy(kind); setErr("");
+    const r = await fn();
+    setBusy(null);
+    if (r?.ok) { onDone(done); onClose(); } else setErr(`Couldn't ${kind === "remove" ? "remove" : "save"} it. ${r?.error || ""} Nothing changed; try again.`.trim());
   };
-  const label = parseISO(date).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+  const save = () => {
+    if (busy) return;
+    const p = parseWeighIn(val);
+    if (p.error) return setErr(p.error);
+    run("save", () => onSave(date, p.weight), `Saved ${fmtLb(p.weight)} lb for ${isToday ? "today" : dayLabel(date)}.`);
+  };
   return (
     <div style={S.modalWrap} onClick={busy ? undefined : onClose}>
-      <div style={{ ...S.modal, maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
-        <div style={{ padding: 24, textAlign: "center" }}>
-          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, letterSpacing: 1, fontSize: 14, marginBottom: 4 }}>WEIGH-IN</div>
-          <p style={{ ...S.note, marginBottom: 16 }}>{label}</p>
-          <input autoFocus type="number" inputMode="decimal" placeholder="184.0" value={val}
-            onChange={(e) => { setVal(e.target.value); setErr(""); }}
-            onKeyDown={(e) => e.key === "Enter" && save()}
-            style={{ ...S.fInput, width: "100%", textAlign: "center", fontSize: 16, marginBottom: 8 }} />
-          {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginBottom: 8 }}>{err}</div>}
-          <button style={{ ...S.primaryBtn, width: "100%", marginBottom: 8 }} onClick={save} disabled={busy}>{busy ? "saving…" : "save"}</button>
+      <div style={{ ...S.modal, maxWidth: 340, marginTop: 40 }} onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`${current != null ? "Edit" : "Add"} weight for ${dayLabel(date)}`}>
+        <div style={{ padding: 22 }}>
+          <div style={S.setHead}>{current != null ? "EDIT WEIGHT" : "ADD WEIGHT"}</div>
+          <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 20, marginBottom: 14 }}>
+            {isToday ? `Today · ${dayLabel(date)}` : dayLabel(date, { weekday: "long", month: "short", day: "numeric" })}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <input autoFocus type="number" inputMode="decimal" step="0.1" placeholder="weight" value={val} disabled={!!busy}
+              aria-label="weight in pounds"
+              onChange={(e) => { setVal(e.target.value); setErr(""); }}
+              onKeyDown={(e) => e.key === "Enter" && save()}
+              style={{ ...S.fInput, flex: 1, fontSize: 18, textAlign: "center", padding: "12px 10px" }} />
+            <span style={{ color: dim, fontSize: 14 }}>lb</span>
+          </div>
+          {err && <div role="alert" style={{ color: "#ff5d7a", fontSize: 13, marginBottom: 8, lineHeight: 1.4 }}>{err}</div>}
+          <button style={{ ...S.primaryBtn, width: "100%", minHeight: 46, marginBottom: 8 }} onClick={save} disabled={!!busy}>
+            {busy === "save" ? "Saving…" : "Save"}
+          </button>
           {current != null && (
-            <button style={{ ...S.ghostBtn, width: "100%", marginBottom: 8, color: "#ff5d7a" }} disabled={busy}
-              onClick={() => run(() => onRemove(date))}>remove this weigh-in</button>
+            <button style={{ ...S.ghostBtn, width: "100%", minHeight: 44, marginBottom: 8, color: "#ff5d7a" }} disabled={!!busy}
+              onClick={() => (confirmRemove ? run("remove", () => onRemove(date), `Removed the weigh-in for ${isToday ? "today" : dayLabel(date)}.`) : setConfirmRemove(true))}>
+              {busy === "remove" ? "Removing…" : confirmRemove ? `Tap again to remove ${fmtLb(current)} lb` : "Remove this weigh-in"}
+            </button>
           )}
-          <button style={{ ...S.ghostBtn, width: "100%", background: "transparent", border: "none", color: dim }} onClick={onClose} disabled={busy}>cancel</button>
+          <button style={{ ...S.ghostBtn, width: "100%", minHeight: 44, background: "transparent", border: "none", color: dim }} onClick={onClose} disabled={!!busy}>Cancel</button>
         </div>
       </div>
     </div>
   );
 }
 
-function WeightLog({ bwLog, dietPhases, onBack, onSave, onRemove }) {
+// status: "loading" | "error" | "ready" (as for WeightButton). Until ready,
+// nothing is shown as "not logged": the log isn't known yet.
+function WeightLog({ bwLog, dietPhases, status = "ready", onRetry, onSave, onRemove }) {
   const today = todayISO();
   const [shown, setShown] = useState(WEIGHT_LOG_WEEKS);
-  const [editing, setEditing] = useState(null); // ISO date being edited
-  const weeks = useMemo(() => weightWeeks(bwLog, today), [bwLog, today]);
+  const [from, setFrom] = useState(null);       // a jumped-to date before the first weigh-in
+  const [editing, setEditing] = useState(null); // the ISO date being added or edited
+  const [notice, setNotice] = useState("");     // the last save, confirmed
+  const [trendOpen, setTrendOpen] = useState(false);
+  const [jumpErr, setJumpErr] = useState("");
+  const [flash, setFlash] = useState(null);     // the jumped-to row, highlighted
+  const jumpRef = useRef(null);
+  const weeks = useMemo(() => weightWeeks(bwLog, today, from), [bwLog, today, from]);
   const byDate = new Map((bwLog || []).map((r) => [r.date, Number(r.weight)]));
+  const todayW = byDate.has(today) ? byDate.get(today) : null;
+  const firstWeek = weeks.length ? weeks[weeks.length - 1].monday : null;
+
+  // Jump to date: shows that date's week and opens it, logged or not
+  const jumpTo = (iso) => {
+    setJumpErr("");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || "")) return;
+    if (iso > today) return setJumpErr("You can't log a weigh-in for a future date.");
+    if (!firstWeek || iso < firstWeek) setFrom(iso);
+    // weeks back from this one, Monday to Monday (Oct 14 from Nov 7 is 3 back)
+    const idx = weeksBack(iso, today);
+    setShown((n) => Math.max(n, idx + 1));
+    setFlash(iso);
+    setEditing(iso);
+  };
+  const openJump = () => {
+    const el = jumpRef.current;
+    if (!el) return;
+    try { if (typeof el.showPicker === "function") { el.showPicker(); return; } } catch { /* fall back to focus */ }
+    el.focus(); el.click();
+  };
+
+  const card = { ...S.phaseCard, padding: 16 };
   return (
     <div>
-      <header style={{ ...S.header, flexDirection: "row", alignItems: "center", gap: 12 }}>
-        <button style={S.backBtn} onClick={onBack}>‹ Back</button>
-        <span style={S.pageTitle}>WEIGHT</span>
-        <div style={{ flex: 1 }} />
-        <button style={{ ...S.backBtn, color: accent, fontWeight: 700, fontSize: 13 }} onClick={() => setEditing(today)}>+ log a weigh-in</button>
-      </header>
       <main style={S.main}>
-        {!weeks.length ? (
-          <div style={S.phaseCard}><p style={{ ...S.note, margin: 0 }}>No weigh-ins yet. Log your first one with "+ log a weigh-in". 4 or more a week keeps your trend ready.</p></div>
-        ) : (
+        {notice && <div role="status" style={S.savedNote}>✓ {notice}</div>}
+
+        {/* Today */}
+        <div style={{ ...card, marginBottom: 18 }}>
+          <div style={S.setHead}>TODAY · {dayLabel(today).toUpperCase()}</div>
+          {status === "loading" ? (
+            <p style={{ ...S.note, margin: "6px 0 0" }}>Checking today's weigh-in…</p>
+          ) : status === "error" ? (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 17, margin: "4px 0 6px" }}>Couldn't load your weigh-ins</div>
+              <p style={{ ...S.note, margin: "0 0 12px" }}>So it isn't known yet whether today is logged.</p>
+              <button style={{ ...S.ghostBtn, width: "100%", minHeight: 46 }} onClick={onRetry}>Retry</button>
+            </>
+          ) : todayW == null ? (
+            <>
+              <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 24, margin: "4px 0 14px" }}>No weigh-in yet</div>
+              <button style={{ ...S.primaryBtn, width: "100%", minHeight: 48, fontSize: 15 }} onClick={() => setEditing(today)}>Log today's weight</button>
+            </>
+          ) : (
+            <>
+              <div style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 34, marginTop: 2 }}>{fmtLb(todayW)} lb</div>
+              <div style={{ color: dim, fontSize: 13, marginBottom: 14 }}>Logged today</div>
+              <button style={{ ...S.ghostBtn, width: "100%", minHeight: 46 }} onClick={() => setEditing(today)}>Edit today's weight</button>
+            </>
+          )}
+        </div>
+
+        {status === "ready" && (
           <>
-            <div style={{ ...S.phaseCard, marginBottom: 14 }}>
-              <div style={S.setHead}>LAST 8 WEEKS</div>
-              <WeightChart bwLog={bwLog} dietPhases={dietPhases} weeks={weeks} today={today} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontFamily: "'Archivo',sans-serif", fontWeight: 800, fontSize: 20 }}>Daily log</span>
+              <span style={{ position: "relative" }}>
+                <button style={{ ...S.backBtn, color: accent, fontSize: 14, minHeight: 40 }} onClick={openJump}>Jump to date</button>
+                <input ref={jumpRef} type="date" max={today} aria-label="jump to date" tabIndex={-1}
+                  onChange={(e) => jumpTo(e.target.value)}
+                  style={{ position: "absolute", right: 0, bottom: 0, width: 1, height: 1, opacity: 0, border: 0, padding: 0 }} />
+              </span>
             </div>
-            <div style={S.phaseCard}>
-              <div style={S.setHead}>BY WEEK</div>
-              {weeks.slice(0, shown).map((w) => (
-                <div key={w.monday} style={{ borderTop: `1px solid ${line}`, padding: "10px 0" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, marginBottom: 6 }}>
-                    <span style={{ fontWeight: 700 }}>{shortDate(w.monday)} – {shortDate(addDaysISO(w.monday, 6))}</span>
-                    <span style={{ color: dim, whiteSpace: "nowrap" }}>
-                      {w.avg != null ? <>avg <b style={{ color: text }}>{fmtLb(w.avg)}</b>{w.change != null && <> · {w.change < 0 ? "−" : "+"}{fmtLb(Math.abs(w.change))} lb</>}</> : "no weigh-ins"}
+            {jumpErr && <div role="alert" style={{ color: "#ff5d7a", fontSize: 13, marginBottom: 10 }}>{jumpErr}</div>}
+
+            {!weeks.length && (
+              <div style={{ ...card, marginBottom: 12 }}><p style={{ ...S.note, margin: 0 }}>No weigh-ins yet. Your log fills in as you weigh in; 4 or more a week keeps your trend ready.</p></div>
+            )}
+            {weeks.slice(0, shown).map((w) => {
+              const rows = w.days.filter((d) => d.date !== today); // today is the card above
+              return (
+                <div key={w.monday} style={{ ...card, padding: "12px 16px", marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, paddingBottom: 8, borderBottom: `1px solid ${line}` }}>
+                    <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: 1 }}>{shortDate(w.monday).toUpperCase()} – {shortDate(w.sunday).toUpperCase()}</span>
+                    <span style={{ color: dim, fontSize: 12, textAlign: "right" }}>
+                      {w.count === 0 ? (w.partial ? "No weigh-ins so far" : "No weigh-ins")
+                        : `${w.count} weigh-in${w.count === 1 ? "" : "s"}${w.partial ? " so far" : ""} · ${fmtLb(w.avg)} lb avg`}
                     </span>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
-                    {w.days.map((d, i) => {
-                      const future = d.date > today;
-                      return (
-                        <button key={d.date} disabled={future} onClick={() => setEditing(d.date)}
-                          aria-label={`${d.date}${d.weight != null ? `, ${fmtLb(d.weight)} lb` : ", no weigh-in"}`}
-                          style={{ background: panel2, border: "none", borderRadius: 6, padding: "4px 0", textAlign: "center", fontFamily: "inherit", cursor: future ? "default" : "pointer",
-                            opacity: future ? 0.35 : 1, ...(d.date === today ? { boxShadow: `inset 0 0 0 1px ${accent}` } : {}) }}>
-                          <div style={{ fontSize: 9, color: dim }}>{"MTWTFSS"[i]}</div>
-                          <div style={{ fontSize: 11, fontWeight: 700, color: d.weight != null ? text : dim }}>{d.weight != null ? fmtLb(d.weight) : future ? " " : "—"}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
+                  {!rows.length && <p style={{ ...S.note, margin: "10px 0 2px" }}>Today is this week's first day.</p>}
+                  {rows.map((d) => (
+                    <div key={d.date} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", alignItems: "center", gap: 8, minHeight: 46,
+                      borderTop: d === rows[0] ? "none" : `1px solid ${line}`, ...(flash === d.date ? { background: "rgba(70,230,160,0.08)", margin: "0 -8px", padding: "0 8px", borderRadius: 6 } : {}) }}>
+                      <span style={{ fontSize: 14 }}>{dayLabel(d.date)}</span>
+                      {d.weight != null
+                        ? <span style={{ fontSize: 14, fontWeight: 600 }}>{fmtLb(d.weight)} lb</span>
+                        : <span style={{ fontSize: 13, color: dim, fontStyle: "italic" }}>Not logged</span>}
+                      <button style={{ ...S.backBtn, color: accent, fontSize: 14, minHeight: 44, minWidth: 52, textAlign: "right" }}
+                        aria-label={`${d.weight != null ? "Edit" : "Add"} weight for ${dayLabel(d.date)}`}
+                        onClick={() => setEditing(d.date)}>{d.weight != null ? "Edit" : "Add"}</button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-              {shown < weeks.length && (
-                <button style={{ ...S.backBtn, width: "100%", fontSize: 12, paddingTop: 10, borderTop: `1px solid ${line}` }} onClick={() => setShown((n) => n + WEIGHT_LOG_MORE)}>show earlier weeks ›</button>
+              );
+            })}
+
+            <div style={{ ...card, padding: "0 16px", marginBottom: 12 }}>
+              {shown < weeks.length ? (
+                <button style={S.weightRow} onClick={() => setShown((n) => n + WEIGHT_LOG_MORE)}>
+                  <span>▦ Earlier weeks</span><span style={{ color: dim }}>›</span>
+                </button>
+              ) : (
+                <div style={{ ...S.weightRow, color: dim, cursor: "default" }}>
+                  <span>{weeks.length ? `Showing everything back to ${shortDate(firstWeek)}` : "No earlier weeks"}</span>
+                </div>
+              )}
+              <button style={{ ...S.weightRow, borderTop: `1px solid ${line}` }} onClick={() => setTrendOpen((o) => !o)} aria-expanded={trendOpen}>
+                <span>↗ Weight trend</span><span style={{ color: dim }}>{trendOpen ? "▾" : "›"}</span>
+              </button>
+              {trendOpen && (
+                <div style={{ paddingBottom: 14 }}>
+                  <div style={{ ...S.setHead, marginTop: 2 }}>WEEKLY AVERAGES · LAST 8 WEEKS</div>
+                  <WeightChart bwLog={bwLog} dietPhases={dietPhases} weeks={weightWeeks(bwLog, today)} today={today} />
+                </div>
               )}
             </div>
-            <div style={{ fontSize: 12, color: dim, marginTop: 10 }}>Tap a day to add, change or remove that weigh-in.</div>
           </>
         )}
       </main>
       {editing && (
-        <WeighInEditor date={editing} current={byDate.has(editing) ? byDate.get(editing) : null}
-          onSave={onSave} onRemove={onRemove} onClose={() => setEditing(null)} />
+        <WeighInEditor date={editing} today={today} current={byDate.has(editing) ? byDate.get(editing) : null}
+          onSave={onSave} onRemove={onRemove} onClose={() => setEditing(null)} onDone={setNotice} />
       )}
     </div>
   );
@@ -8428,6 +8586,9 @@ const S = {
   nav: { display: "flex", gap: 6 },
   iconBtn: { background: "transparent", border: `1px solid ${line}`, color: text, borderRadius: 8, height: 34, minWidth: 34, padding: "0 9px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 15, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", position: "relative", boxSizing: "border-box", whiteSpace: "nowrap", marginLeft: 8 },
   iconDot: { position: "absolute", top: 5, right: 5, width: 7, height: 7, borderRadius: 4, background: accent },
+  iconWarn: { fontSize: 13, fontWeight: 800, color: "#ffb454" },
+  savedNote: { border: `1px solid ${accent}55`, background: "rgba(70,230,160,0.07)", color: text, borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 12 },
+  weightRow: { display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", minHeight: 52, background: "none", border: "none", color: text, fontSize: 15, fontFamily: "inherit", padding: 0, cursor: "pointer", textAlign: "left" },
   backBtn: { background: "none", border: "none", color: dim, fontSize: 14, padding: 0, cursor: "pointer", fontFamily: "inherit" },
   pageTitle: { fontSize: 12, letterSpacing: 2, color: dim, fontWeight: 700 },
   setSec: { marginBottom: 22 },
@@ -9082,5 +9243,5 @@ export {
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
-  weightWeeks, WeightLog, WeightButton, Settings,
+  weightWeeks, WeightLog, WeightButton, Settings, upsertWeighIn, withoutWeighIn, parseWeighIn, weighInOps, weeksBack, sbLogBodyweight, sbDeleteBodyweight,
 };
