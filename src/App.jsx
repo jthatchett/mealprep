@@ -1761,14 +1761,60 @@ const dayProtein = (rows) => (rows.some((r) => r.p == null) ? null : rows.reduce
 // the 7 days ending yesterday, days that count toward the estimate and
 // have a protein total. Target: each day's preset (the weekday's override,
 // else the diet phase's), as it was that day.
+// The target a date was judged against: that day's override (a refeed), else
+// its diet phase's preset, each as it was on that date.
+function targetOnDate({ presets, targetHistory, dietPhases, planStore }, d) {
+  const dated = presetsAsOf(presets, targetHistory, d);
+  const ph = phaseOnDate(dietPhases, d);
+  const day = planStore ? planFor(planStore, mondayOf(d))?.[weekdayKey(d)] : null;
+  const preset = (day?.targetId && dated.find((p) => p.id === day.targetId)) || (ph && dated.find((p) => p.id === ph.phase_id)) || null;
+  return preset ? preset.target : null;
+}
+
+/* ---------- eating well off target, with the scale agreeing ----------
+   Logged intake alone can't tell under-eating from under-logging, so the
+   warning needs the scale to agree (owner's choice, Nov 2026). Over the 7
+   days ending yesterday (fully logged days only, at least 4): averaging
+   INTAKE_WARN_KCAL or more under the day's target while the 2-week trend
+   loses faster than the goal by more than the card's on-pace band (cut:
+   0.2%/week, maintenance: outside ±0.25%/week), or the mirror on a bulk or
+   at maintenance (over target, gaining faster: a bulk's band is
+   0.25%/month). Any phase. Shown once a week, with the check-in. */
+const INTAKE_WARN_KCAL = 250;
+const INTAKE_WARN_MIN_DAYS = 4;
+function intakeVsTarget({ today, intakeByDate, statusByDate, presets, targetHistory, dietPhases, planStore }) {
+  const asOf = addDaysISO(today, -1);
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = addDaysISO(asOf, -i);
+    if (!(intakeByDate[d] > 0) || statusByDate?.[d] === false) continue;
+    const t = targetOnDate({ presets, targetHistory, dietPhases, planStore }, d);
+    if (t && Number(t.cal) > 0) days.push({ ate: intakeByDate[d], target: Number(t.cal) });
+  }
+  if (days.length < INTAKE_WARN_MIN_DAYS) return null;
+  const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  return { days: days.length, ate: avg(days.map((x) => x.ate)), target: avg(days.map((x) => x.target)) };
+}
+// type: the phase type; actualPct / goalPct: the 2-week pace and the goal,
+// in the card's units (%/week; a bulk's %/month). null when nothing to say.
+function intakeWarning({ type, intake, actualPct, goalPct }) {
+  if (!intake || actualPct == null) return null;
+  const diff = intake.ate - intake.target;
+  if (Math.abs(diff) < INTAKE_WARN_KCAL) return null;
+  const under = diff < 0;
+  let faster;
+  if (type === "maintenance") faster = under ? actualPct < -0.25 : actualPct > 0.25;
+  else if (type === "deficit") faster = under && actualPct < goalPct - 0.2;
+  else if (type === "surplus") faster = !under && actualPct > goalPct + 0.25;
+  if (!faster) return null;
+  return { under, kcal: Math.round(Math.abs(diff) / 10) * 10 };
+}
+
 function buildProteinStatus({ today, intakeByDate, statusByDate, proteinByDate, presets, targetHistory, dietPhases, planStore }) {
   const asOf = addDaysISO(today, -1);
   const targetOn = (d) => {
-    const dated = presetsAsOf(presets, targetHistory, d);
-    const ph = phaseOnDate(dietPhases, d);
-    const day = planStore ? planFor(planStore, mondayOf(d))?.[weekdayKey(d)] : null;
-    const preset = (day?.targetId && dated.find((p) => p.id === day.targetId)) || (ph && dated.find((p) => p.id === ph.phase_id)) || null;
-    return preset ? Number(preset.target.p) || null : null;
+    const t = targetOnDate({ presets, targetHistory, dietPhases, planStore }, d);
+    return t ? Number(t.p) || null : null;
   };
   const days = [];
   for (let i = 0; i < 7; i++) {
@@ -3884,6 +3930,10 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
           ? <CatchUpProposal c={coaching} onAccept={onAcceptCatchUp} onHoldCurrent={onHoldCurrent} />
           : <CheckInCard c={coaching} onToggleDay={onSetDayIncluded} onComplete={onCompleteCheckin} startShowDays={reviewDays} />
       )}
+      {selectedDate === coaching?.today && (coaching?.due || coaching?.thisWeek) && (
+        <IntakeWarning c={coaching} phase={phaseOnDate(dietPhases, coaching.today)} presets={phases} dietPhases={dietPhases} bwLog={bwLog}
+          planStore={planStore} targetHistory={targetHistory} onReplan={onReplan} />
+      )}
       {selectedDate === coaching?.today && coaching?.thisWeek?.chosen?.auto && (
         <AutoCheckinNotice c={coaching} phases={phases} onReason={onCheckinReason} />
       )}
@@ -4154,6 +4204,44 @@ function DayStatusRow({ included, onChange }) {
    vs the phase's target, and the suggested targets; 3) Apply, Adjust
    (edit first) or Keep current. Every decision is saved.
    ============================================================ */
+// Eating well off target with the scale agreeing: what it costs, once a week.
+// Behind plan, the ways back (BehindPlan); otherwise just Got it.
+function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, targetHistory, onReplan }) {
+  const today = c.today;
+  const key = `mealprep:intake-warning-seen:${c.weekStart}`;
+  const [seen, setSeen] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch { return false; } });
+  if (seen || !phase) return null;
+  const monthly = rateIsMonthly(phase.phase_type);
+  const pace = paceReading(dietPhases, bwLog, today);
+  if (!pace.ready) return null;
+  const toUnits = (wk) => wk * (monthly ? WEEKS_PER_MONTH : 1);
+  const goalPct = phase.phase_type === "maintenance" ? 0 : toUnits(phaseRatePct(phase));
+  const actualPct = toUnits(pace.pctPerWeek);
+  const intake = intakeVsTarget({ today, intakeByDate: c.intakeByDate, statusByDate: c.statusByDate, presets, targetHistory, dietPhases, planStore });
+  const w = intakeWarning({ type: phase.phase_type, intake, actualPct, goalPct });
+  if (!w) return null;
+  const per = monthly ? "month" : "week";
+  const lb = (pct) => Math.abs((pct / 100) * pace.avg).toFixed(1);
+  const maint = phase.phase_type === "maintenance";
+  const followed = (presets || []).find((p) => p.id === phase.phase_id) || null;
+  const plan = planStatus(phase, followed, bwLog, today);
+  const close = () => { setSeen(true); try { localStorage.setItem(key, "1"); } catch { /* private mode */ } };
+  return (
+    <div style={{ ...S.ciCard, borderColor: "#ffb454" }}>
+      <div style={{ ...S.ciKicker, color: "#ffb454" }}>{w.under ? "EATING UNDER TARGET" : "EATING OVER TARGET"}</div>
+      <div style={{ ...S.ciLine, marginTop: 6 }}>
+        You ate about {w.kcal} {w.under ? "under" : "over"} your {maint ? "maintenance" : "target"} this week, and you're {w.under ? "losing" : "gaining"} {lb(actualPct)} lb a {per}
+        {maint ? " while holding your weight" : ` against a ${lb(goalPct)} goal`}. {w.under ? "Losing faster costs muscle." : "Gaining faster than this mostly adds fat."}
+        {plan?.behind && w.under === (goalPct < 0) ? " If you're catching up, finishing the plan later keeps your pace." : ""}
+      </div>
+      {plan?.behind && followed && onReplan && w.under === (goalPct < 0) && (
+        <BehindPlan row={phase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} onReplan={async (k, a) => { await onReplan(k, a); close(); }} />
+      )}
+      <button style={{ ...S.ghostBtn, width: "100%", marginTop: 10 }} onClick={close}>Got it</button>
+    </div>
+  );
+}
+
 // The week a maintenance catch-up would start: what it is and what to
 // expect, before anything changes. OK applies it; or hold where you are.
 function CatchUpProposal({ c, onAccept, onHoldCurrent }) {
@@ -7673,8 +7761,9 @@ function TargetEditor({ preset, view, ctx, row, latestCheckin, week, focus, targ
   const lbPer = hasRate && rateWeekly != null && weightLb ? Math.abs((rateWeekly / 100) * weightLb * (monthly ? WEEKS_PER_MONTH : 1)) : null;
   const dayUses = kind === "day" && week ? DAYS.filter((d) => week[d]?.targetId === preset.id) : [];
 
-  // −/+ steps the rate: 0.05%/week on a cut (≈0.09 lb at 180 lb), 0.25%/month on a bulk
-  const step = monthly ? 0.25 : 0.05;
+  // −/+ step: 0.1%/week on a cut (≈0.18 lb at 180 lb), 0.25%/month on a bulk
+  // (≈0.45 lb); a 0.05% step barely moved the pounds shown (owner's choice, Nov 2026)
+  const step = monthly ? 0.25 : 0.1;
   const stepRate = (dir) => {
     const cur = isNaN(rateNum) ? Number(shownRate(startRate)) : Math.abs(rateNum);
     setRateText(Math.max(0, Math.round((cur + dir * step) / step) * step).toFixed(2));
@@ -8772,7 +8861,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,

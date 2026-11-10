@@ -48,7 +48,7 @@ One card per saved target, plus the phase in effect and the maintenance estimate
 **Rate → calories → macros.** Calories are calculated, never typed (except a one-day target's, and Maintenance's while it's the starting estimate; see below).
 
 - **The editor shows four things, in order:** the goal in pounds ("Lose 0.9 lb / week"), the calories it gives ("2,050 → 1,870"), the macros, and Save. Under the calories, one line: "Maintenance 2,500 kcal · this goal is 450 kcal/day under it." Name, use, history and remove are in the ⋯ menu. *(Owner's request, Nov 2026, after ranking what each line was doing)*
-- **The rate** is stored as % of bodyweight and shown in pounds at your weight. −/+ step it by 0.05%/week on a cut (about 0.09 lb at 180 lb) or 0.25%/month on a bulk, or type it (cuts lose, bulks gain). The limits in [section 3](#3-diet-phases) apply: a warning past them, no save past the hard limit. *(Step sizes are the app's choice)*
+- **The rate** is stored as % of bodyweight and shown in pounds at your weight. −/+ step it by 0.1%/week on a cut (about 0.2 lb at 180 lb) or 0.25%/month on a bulk (about 0.45 lb), or type it (cuts lose, bulks gain). The limits in [section 3](#3-diet-phases) apply: a warning past them, no save past the hard limit. *(Step sizes are the owner's choice, Nov 2026)*
 - **Calories from the rate:** the estimate plus what the pace needs (1% of bodyweight a week = bodyweight × 35 kcal a day), to the nearest 10. *Example:* 2,500 kcal maintenance, 180 lb, 0.5%/week → 2,500 − 450 = **2,050**.
 - **Macros balance inside those calories** (4 kcal/g protein and carbs, 9 kcal/g fat, whole grams):
   - protein or fat changed → carbs take the difference
@@ -193,6 +193,13 @@ The card keeps it short: which days count, the estimate's change this week (old 
 - **Suggestions only appear once the estimate rests on your own data,** never on the starting guess alone.
 
 *(Research-backed for the 1% ceiling; the ±250 cap is the app's choice)*
+
+### Eating well off target
+A food log alone can't tell eating less from logging less, so this warning needs the scale to agree. *(Owner's choice, Nov 2026)*
+- **When:** over the 7 days ending yesterday, on fully logged days (at least 4), you averaged **250+ kcal under** each day's target (a refeed day against its own), **and** the 2-week trend shows you losing faster than your goal by more than the card's on-pace band: 0.2%/week on a cut (a 0.5%/week cut: 0.7%/week or faster, about 1.3 lb at 180 lb). The mirror counts too: 250+ over on a bulk while gaining faster than 0.25%/month past its goal; and at maintenance, either way, outside the steady ±0.25%/week.
+- *Examples, a 0.5%/week cut at 2,050:* 1,750 logged and losing 1.4 lb/wk → warning. 1,750 logged but losing 0.9 → none (likely a logging gap). 2,050 logged and losing 1.4 → none (maintenance is higher than estimated; the check-in raises calories). 1,900 logged → none (inside normal logging error).
+- **What it says:** "You ate about 300 under your target this week, and you're losing 1.4 lb a week against a 0.9 goal. Losing faster costs muscle." (a bulk: "…gaining 0.8 lb a week against a 0.4 goal. Gaining faster than this mostly adds fat."). **Behind plan** (and off in the direction of the goal), it adds "If you're catching up, finishing the plan later keeps your pace." and the three ways back on plan; otherwise just **Got it**. Shown on Plan with that week's check-in, at most once a week.
+- *(250 kcal and the 4-day minimum, the same as RepReport's protein summary, are the app's choice; the scale bands are the card's own)*
 
 ### Maintenance holds your starting weight
 Maintenance aims to keep you at the weight you began it at, not just to stop the scale moving. *(Owner's choice, Nov 2026)*
