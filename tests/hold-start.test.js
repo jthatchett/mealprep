@@ -18,13 +18,28 @@ const OWNER = w([['2026-10-06', 160.4], ['2026-10-10', 161.8], ['2026-10-13', 16
 
 describe('the weight maintenance holds', () => {
   it('with weigh-ins around the start, the week up to it, as before', () => {
-    const log = w([['2026-09-05', 170], ['2026-09-09', 172], ['2026-10-01', 171], ['2026-10-25', 171]]);
+    const log = w([['2026-09-05', 170], ['2026-09-07', 171], ['2026-09-09', 172], ['2026-10-01', 171], ['2026-10-25', 171]]);
     expect(holdStartWeight(log, '2026-09-09', '2026-11-10')).toMatchObject({ start: 171, startKind: 'start', startFrom: '2026-09-09' });
   });
   it('no weigh-ins around the start: the first 7 days with 3+ weigh-ins (Oct 6–12 has only 2)', () => {
     const h = holdStartWeight(OWNER, '2026-09-09', '2026-11-10');
     expect(h).toMatchObject({ startKind: 'first-week', startFrom: '2026-10-10', startTo: '2026-10-16' });
     expect(h.start.toFixed(1)).toBe('162.2');
+  });
+  it('fewer than 3 the week before: topped up with the first weigh-ins after the start, up to 3 (a salty morning is diluted)', () => {
+    // one weigh-in before the start, 164.0 after a salty dinner; real ~162.5
+    const log = w([['2026-09-09', 164.0], ['2026-09-10', 162.6], ['2026-09-11', 162.4], ['2026-09-12', 160.0]]);
+    const h = holdStartWeight(log, '2026-09-09', '2026-09-20');
+    expect(h).toMatchObject({ startKind: 'start-week', startFrom: '2026-09-09', startTo: '2026-09-11' }); // stops at 3: the 4th isn't used
+    expect(h.start.toFixed(1)).toBe('163.0');
+    // a cut topped up this way keeps its plan line from its start date
+    const cut = { ...maint('2026-09-09'), phase_type: 'deficit', target_rate_pct: -0.5 };
+    expect(phaseWeights(cut, log, '2026-09-23').weeks.toFixed(1)).toBe('2.0');
+  });
+  it('only 1–2 weigh-ins so far in the start week: settling, no hold yet', () => {
+    const log = w([['2026-09-09', 164.0], ['2026-09-10', 162.6]]);
+    expect(holdStartWeight(log, '2026-09-09', '2026-09-10')).toMatchObject({ start: null, startKind: 'settling', count: 2, needBy: '2026-09-15' });
+    expect(maintenanceHold(maint('2026-09-09'), [maint('2026-09-09')], log, '2026-09-10', [])).toMatchObject({ ratePct: 0 });
   });
   it('the owner: holding 162.2, 0.8 lb over (0.5%): inside the normal range, no catch-up', () => {
     const h = maintenanceHold(maint('2026-09-09'), [maint('2026-09-09')], OWNER, '2026-11-10', []);
@@ -50,7 +65,7 @@ describe('the weight maintenance holds', () => {
     expect(holdStartWeight(log.slice(0, 5), '2026-10-01', '2027-03-01')).toMatchObject({ start: null, startKind: 'after-gap' });
   });
   it('a 27-day gap is not stale', () => {
-    const log = w([['2026-10-01', 162], ['2026-10-28', 165], ['2026-10-29', 165], ['2026-10-30', 165]]);
+    const log = w([['2026-09-29', 162], ['2026-09-30', 162], ['2026-10-01', 162], ['2026-10-28', 165], ['2026-10-29', 165], ['2026-10-30', 165]]);
     expect(holdStartWeight(log, '2026-10-01', '2026-10-30')).toMatchObject({ start: 162, startKind: 'start' });
   });
   it('the catch-up names where the weight comes from', () => {
@@ -69,14 +84,14 @@ describe('the weight maintenance holds', () => {
   });
   it("a cut ignores the 4-week gap rule (it's planned from its start)", () => {
     const cut = { ...maint('2026-10-01'), phase_type: 'deficit', target_rate_pct: -0.5 };
-    const log = w([['2026-10-01', 162], ['2026-11-15', 160], ['2026-11-16', 160], ['2026-11-17', 160]]);
+    const log = w([['2026-09-29', 162], ['2026-09-30', 162], ['2026-10-01', 162], ['2026-11-15', 160], ['2026-11-16', 160], ['2026-11-17', 160]]);
     expect(phaseWeights(cut, log, '2026-11-17')).toMatchObject({ start: 162, startKind: 'start' });
   });
 });
 
 describe('the phase card', () => {
   afterEach(() => vi.useRealTimers());
-  const text = (el) => renderToStaticMarkup(el).replace(/<!-- -->/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const text = (el) => renderToStaticMarkup(el).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
   const card = (log) => text(React.createElement(PhaseCard, { dietPhases: [maint('2026-09-09')], bwLog: log, presets: presets(), week: null, estimate: null, onOpenMonth: () => {}, onReplan: async () => {}, hasRepReport: false }));
   it('shows the first full week it holds, and says where it comes from', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12));
@@ -94,6 +109,12 @@ describe('the phase card', () => {
   });
   it('before a full week, it says what it is waiting for', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 9, 11, 12));
-    expect(card(OWNER.slice(0, 2))).toContain('No weigh-ins around Sep 9: maintenance will hold your first full week of weigh-ins (3 in 7 days).');
+    expect(card(OWNER.slice(0, 2))).toContain("Fewer than 3 weigh-ins around Sep 9: maintenance will hold your first full week of weigh-ins. That's 3 mornings within 7 days. First thing in the morning, after the bathroom, before eating or drinking.");
+  });
+  it('inside the start week, it says how many more weigh-ins it needs, and by when', () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 8, 10, 12));
+    const t = card(w([['2026-09-09', 164.0], ['2026-09-10', 162.6]]));
+    expect(t).toContain('Holding 163.3 lb settling · 2 of 3');
+    expect(t).toContain('The weight to hold is the average of 3 weigh-ins around Sep 9. You have 2: weigh in on 1 more morning by Sep 15. First thing in the morning');
   });
 });

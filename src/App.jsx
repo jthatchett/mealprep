@@ -1054,6 +1054,8 @@ function monthlyWeightTrend(log, today) {
 // A cut or bulk with no weigh-ins around its start does the same (no gap
 // rule): its plan line runs from the middle of that week.
 const HOLD_FULL_WEEK_MIN = 3;
+// what makes a weigh-in comparable from one morning to the next
+const WEIGH_HOW = "First thing in the morning, after the bathroom, before eating or drinking.";
 const HOLD_GAP_DAYS = 28;
 function holdStartWeight(log, anchorDate, today, { gapReset = true } = {}) {
   const pts = (log || []).filter((r) => Number(r.weight) > 0 && r.date <= today).sort((a, b) => (a.date < b.date ? -1 : 1));
@@ -1071,8 +1073,16 @@ function holdStartWeight(log, anchorDate, today, { gapReset = true } = {}) {
   let back = null;
   for (let i = 1; i < since.length; i++) if (daysBetween(since[i - 1].date, since[i].date) >= HOLD_GAP_DAYS) back = since[i].date;
   if (back && gapReset) return fullWeek(back, "after-gap");
-  const start = mean(inRange(addDaysISO(anchorDate, -6), anchorDate)) ?? mean(inRange(anchorDate, addDaysISO(anchorDate, 6)));
-  if (start != null) return { start, startFrom: anchorDate, startKind: "start" };
+  // the week up to the start, with 3+ weigh-ins; short of 3, topped up with
+  // the first weigh-ins after the start (at most 6 days after), so one salty
+  // morning can't set it alone, and a cut's first-week water barely enters
+  const end = addDaysISO(anchorDate, 6);
+  const pre = pts.filter((r) => r.date >= addDaysISO(anchorDate, -6) && r.date <= anchorDate);
+  if (pre.length >= HOLD_FULL_WEEK_MIN) return { start: mean(pre.map((r) => Number(r.weight))), startFrom: anchorDate, startKind: "start" };
+  const used = [...pre, ...pts.filter((r) => r.date > anchorDate && r.date <= end)].slice(0, HOLD_FULL_WEEK_MIN);
+  if (used.length >= HOLD_FULL_WEEK_MIN) return { start: mean(used.map((r) => Number(r.weight))), startFrom: used[0].date, startTo: used[used.length - 1].date, startKind: "start-week" };
+  // still inside the start week: settling, with what it has so far
+  if (today <= end) return { start: null, startKind: "settling", count: used.length, soFar: mean(used.map((r) => Number(r.weight))), needBy: end };
   return fullWeek(anchorDate, "first-week");
 }
 
@@ -1084,10 +1094,10 @@ function phaseWeights(row, log, today, anchorDate = row?.start_date) {
   const start = held.start;
   const before = pts.filter((r) => r.date <= today);
   const now = avgIn(addDaysISO(today, -6), today) ?? (before.length ? Number(before[before.length - 1].weight) : null);
-  if (start == null || now == null) return { start, now, change: null, startKind: held.startKind };
+  if (start == null || now == null) return { start, now, change: null, ...held };
   // the plan line runs from the anchor (the phase's start, or where it was
   // re-planned), or from the middle of the first full week of weigh-ins
-  const planFrom = held.startKind === "start" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
+  const planFrom = held.startKind === "start" || held.startKind === "start-week" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
   const weeks = Math.max(0, daysBetween(planFrom, today) / 7);
   const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
   const at = (w) => start * Math.pow(1 + rate / 100, w);
@@ -1179,7 +1189,7 @@ function maintenanceHold(row, rows, log, today, checkins, holdFrom = null) {
   const gapPct = (w.change / w.start) * 100;
   const weekStart = mondayOf(today);
   // a catch-up counts from the week the held weight comes from
-  const from = w.startKind === "start" ? anchorDate : mondayOf(w.startFrom);
+  const from = w.startKind === "start" || w.startKind === "start-week" ? anchorDate : mondayOf(w.startFrom);
   const ran = [];
   for (const c of [...(checkins || [])].filter((c) => c.week_start < weekStart && c.week_start >= from).sort((a, b) => (a.week_start < b.week_start ? 1 : -1))) {
     if (!Number(c.target_rate_pct)) break;
@@ -1247,9 +1257,11 @@ function weekRange(from, to) {
   return a.split(" ")[0] === b.split(" ")[0] ? `${a}–${b.split(" ")[1]}` : `${a}–${b}`;
 }
 function holdSource(w, anchorDate) {
-  if (!w?.startKind || w.startKind === "start" || !w.startFrom) return { when: anchorDate ? shortDate(anchorDate) : "", note: null };
+  const on = anchorDate ? shortDate(anchorDate) : "";
+  if (!w?.startKind || w.startKind === "start" || !w.startFrom) return { when: on, on, note: null };
+  if (w.startKind === "start-week") return { when: w.startFrom === w.startTo ? shortDate(w.startFrom) : weekRange(w.startFrom, w.startTo), on, note: null };
   const when = weekRange(w.startFrom, w.startTo);
-  return { when, note: w.startKind === "after-gap" ? `your first full week back after 4+ weeks without weigh-ins (${when})` : `your first full week of weigh-ins (${when})` };
+  return { when, on, note: w.startKind === "after-gap" ? `your first full week back after 4+ weeks without weigh-ins (${when})` : `your first full week of weigh-ins (${when})` };
 }
 function catchUpCopy(hold, cal = null) {
   const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1);
@@ -1258,7 +1270,7 @@ function catchUpCopy(hold, cal = null) {
   const src = holdSource(hold, hold.anchorDate);
   return {
     title: `You're ${lb} lb ${under ? "under" : "over"} your maintenance weight`,
-    context: `${src.note ? `Maintenance holds ${src.note}: ${hold.anchor.toFixed(1)} lb.` : `You started maintenance at ${hold.anchor.toFixed(1)} lb${src.when ? ` on ${src.when}` : ""}.`} You're at ${hold.now.toFixed(1)} now.`,
+    context: `${src.note ? `Maintenance holds ${src.note}: ${hold.anchor.toFixed(1)} lb.` : `You started maintenance at ${hold.anchor.toFixed(1)} lb${src.on ? ` on ${src.on}` : ""}.`} You're at ${hold.now.toFixed(1)} now.`,
     body: `To get back: about ${cal != null ? `${(Math.round(cal / 10) * 10).toLocaleString("en-US")} calories a day (${kcal} ${under ? "over" : "under"} maintenance` : `${kcal} calories a day ${under ? "over" : "under"} maintenance (`}, ≈${lbWeek} lb a week).`,
   };
 }
@@ -5352,6 +5364,11 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
         <label style={{ fontSize: 12, color: dim, width: 64 }}>starts</label>
         <input type="date" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} style={{ ...S.fInput, flex: 1 }} />
       </div>
+      {preset && (
+        <div style={{ ...S.calcHint, marginTop: -2, marginBottom: 10 }}>
+          {preset.phase_type === "maintenance" ? "The weight it holds" : "Your start weight"} is the average of 3+ weigh-ins around the start. {WEIGH_HOW}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
         <label style={{ fontSize: 12, color: dim, width: 64 }}>weeks</label>
         <input
@@ -7724,7 +7741,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {wts && wts.now != null && (
                 <div style={S.ptWeights}>
                   {[
-                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", wts.start != null ? held.when : shortDate(anchorDate)],
+                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : wts.soFar != null ? `${wts.soFar.toFixed(1)}` : "—", wts.start != null ? held.when : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate)],
                     ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
                     maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
                   ].filter(Boolean).map(([lab, n, sub]) => (
@@ -7739,9 +7756,12 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {wts?.now != null && (held.note || wts.start == null) && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
                   {wts.start == null
-                    ? wts.startKind === "after-gap"
-                      ? "Back after 4+ weeks without weigh-ins: maintenance will hold your first full week back (3 weigh-ins in 7 days)."
-                      : `No weigh-ins around ${shortDate(anchorDate)}: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week of weigh-ins (3 in 7 days).`
+                    ? `${wts.startKind === "settling"
+                      ? `${maint ? "The weight to hold" : "Your start"} is the average of 3 weigh-ins around ${shortDate(anchorDate)}. ${wts.count ? `You have ${wts.count}: weigh in on ${3 - wts.count} more morning${3 - wts.count > 1 ? "s" : ""}` : "Weigh in on 3 mornings"} by ${shortDate(wts.needBy)}.`
+                      : wts.startKind === "after-gap"
+                        ? `Back after 4+ weeks without weigh-ins: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week back.`
+                        : `Fewer than 3 weigh-ins around ${shortDate(anchorDate)}: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week of weigh-ins.`
+                      } ${wts.startKind === "settling" ? "" : "That's 3 mornings within 7 days. "}${WEIGH_HOW}`
                     : `${maint ? "Holding" : "Starting from"} ${held.note}.`}
                 </div>
               )}
