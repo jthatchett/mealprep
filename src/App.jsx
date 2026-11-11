@@ -1003,7 +1003,7 @@ function weighInFit(log, from, to) {
   const mx = pts.reduce((a, [x]) => a + x, 0) / n, my = pts.reduce((a, [, y]) => a + y, 0) / n;
   const sxx = pts.reduce((a, [x]) => a + (x - mx) ** 2, 0);
   const sxy = pts.reduce((a, [x, y]) => a + (x - mx) * (y - my), 0);
-  return { slope: sxx ? sxy / sxx : 0, mean: my };
+  return { slope: sxx ? sxy / sxx : 0, mean: my, mx };
 }
 function weightTrend(log, today) {
   const week = (from, to) =>
@@ -1086,24 +1086,65 @@ function holdStartWeight(log, anchorDate, today, { gapReset = true } = {}) {
   return fullWeek(anchorDate, "first-week");
 }
 
+// A cut's first week drops water (a bulk's adds some) that stays off (on)
+// for the whole phase, so a start from the week before leaves the plan line
+// 1–2 lb off and hides a stall. Once weeks 2–3 are in, each with 4+ weigh-ins,
+// the start settles: the line through them, extended back to the week before.
+// Example: 163.0 the week before, 0.8 lb of water in days 1–5, then 0.8 lb a
+// week: settles at 162.2 on day 22. Until then the week before stands in,
+// marked provisional; if weeks 2–3 are short, the next pair of weeks (to week
+// 5) can settle it. Phases under 3 weeks, re-plans, and starts taken from a
+// later first full week (already past the water) don't settle.
+// (Owner's choice, Nov 2026)
+const SETTLE_AFTER_DAYS = 21;
+function settledStart(row, pts, today) {
+  const start = row.start_date, end = row.end_date || row.planned_end_date;
+  for (let k = 0; k <= 2; k++) {
+    const from = addDaysISO(start, 7 + 7 * k), to = addDaysISO(from, 13);
+    if (to >= today || (end && to > end)) break;
+    const n1 = pts.filter((r) => r.date >= from && r.date < addDaysISO(from, 7)).length;
+    const n2 = pts.filter((r) => r.date >= addDaysISO(from, 7) && r.date <= to).length;
+    if (n1 >= TREND_MIN_WEIGHINS && n2 >= TREND_MIN_WEIGHINS) {
+      const fit = weighInFit(pts, from, to);
+      // read at the middle of the week before (day −3), where a week's average
+      // up to the start sits: "now" is a 7-day average too, so the lags cancel
+      return { start: fit.mean + fit.slope * (daysBetween(from, addDaysISO(start, -3)) - fit.mx), settledOn: addDaysISO(to, 1) };
+    }
+  }
+  return null;
+}
+
 function phaseWeights(row, log, today, anchorDate = row?.start_date) {
   if (!row) return null;
   const pts = (log || []).filter((r) => Number(r.weight) > 0).sort((a, b) => (a.date < b.date ? -1 : 1));
   const avgIn = (from, to) => { const w = pts.filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : null; };
   const held = holdStartWeight(pts, anchorDate, today, { gapReset: row.phase_type === "maintenance" });
-  const start = held.start;
+  // cuts and bulks from their own start (not a re-plan) settle after the first week's water
+  const end = row.end_date || row.planned_end_date;
+  // only a start weighed around the start date has the water in it (the
+  // first full week of weigh-ins, found later, is already past it)
+  const canSettle = (row.phase_type === "deficit" || row.phase_type === "surplus") && anchorDate === row.start_date
+    && ["start", "start-week", "settling"].includes(held.startKind)
+    && (!end || end >= addDaysISO(row.start_date, SETTLE_AFTER_DAYS - 1));
+  const settled = canSettle ? settledStart(row, pts, today) : null;
+  const settle = !canSettle ? {}
+    : settled ? { settledOn: settled.settledOn, provisionalStart: held.start }
+    : today <= addDaysISO(row.start_date, SETTLE_AFTER_DAYS + 13) && !(end && today > end)
+      ? { provisional: true, settlesOn: addDaysISO(row.start_date, SETTLE_AFTER_DAYS) } : {};
+  const start = settled ? settled.start : held.start;
+  const { start: _heldStart, ...heldInfo } = held;
   const before = pts.filter((r) => r.date <= today);
   const now = avgIn(addDaysISO(today, -6), today) ?? (before.length ? Number(before[before.length - 1].weight) : null);
-  if (start == null || now == null) return { start, now, change: null, ...held };
+  if (start == null || now == null) return { start, now, change: null, ...heldInfo, ...settle };
   // the plan line runs from the anchor (the phase's start, or where it was
   // re-planned), or from the middle of the first full week of weigh-ins
-  const planFrom = held.startKind === "start" || held.startKind === "start-week" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
+  const planFrom = settled || held.startKind === "start" || held.startKind === "start-week" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
   const weeks = Math.max(0, daysBetween(planFrom, today) / 7);
   const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
   const at = (w) => start * Math.pow(1 + rate / 100, w);
   const endWeeks = row.planned_end_date ? (daysBetween(planFrom, row.planned_end_date) + 1) / 7 : null;
   return {
-    start, now, change: now - start, weeks, ...held,
+    start, now, change: now - start, weeks, ...heldInfo, ...settle, ...(settled && { startKind: "settled" }),
     planNow: rate ? at(weeks) : null,                       // where the goal pace puts you today
     goalEnd: rate && endWeeks ? at(endWeeks) : null,        // and at the planned end
   };
@@ -1258,10 +1299,25 @@ function weekRange(from, to) {
 }
 function holdSource(w, anchorDate) {
   const on = anchorDate ? shortDate(anchorDate) : "";
-  if (!w?.startKind || w.startKind === "start" || !w.startFrom) return { when: on, on, note: null };
+  if (!w?.startKind || w.startKind === "start" || w.startKind === "settled" || !w.startFrom) return { when: on, on, note: null };
   if (w.startKind === "start-week") return { when: w.startFrom === w.startTo ? shortDate(w.startFrom) : weekRange(w.startFrom, w.startTo), on, note: null };
   const when = weekRange(w.startFrom, w.startTo);
   return { when, on, note: w.startKind === "after-gap" ? `your first full week back after 4+ weeks without weigh-ins (${when})` : `your first full week of weigh-ins (${when})` };
+}
+// What the card says while a cut's or bulk's start settles, and for two
+// weeks after it does.
+function settleNote(w, row, today) {
+  const cut = row.phase_type === "deficit", kind = cut ? "cut" : "bulk";
+  if (w.provisional) {
+    return today < w.settlesOn
+      ? `A ${kind}'s first week ${cut ? "drops" : "adds"} some water, so your start is refined once that settles (${shortDate(w.settlesOn)}).`
+      : `Your start is refined once you have 2 weeks in a row with ${TREND_MIN_WEIGHINS}+ weigh-ins each. Weigh in most mornings.`;
+  }
+  if (!w.settledOn || daysBetween(w.settledOn, today) >= 14) return null;
+  const was = w.provisionalStart;
+  return was != null && Math.abs(was - w.start) >= 0.05
+    ? `Your start moved from ${was.toFixed(1)} to ${w.start.toFixed(1)} once the first week's water settled, so the plan leaves it out.`
+    : `Your start settled at ${w.start.toFixed(1)}, from your weigh-ins after the first week.`;
 }
 function catchUpCopy(hold, cal = null) {
   const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1);
@@ -7741,7 +7797,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {wts && wts.now != null && (
                 <div style={S.ptWeights}>
                   {[
-                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : wts.soFar != null ? `${wts.soFar.toFixed(1)}` : "—", wts.start != null ? held.when : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate)],
+                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : wts.soFar != null ? `${wts.soFar.toFixed(1)}` : "—", wts.start != null ? `${held.when}${wts.provisional ? " · provisional" : ""}` : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate)],
                     ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
                     maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
                   ].filter(Boolean).map(([lab, n, sub]) => (
@@ -7764,6 +7820,9 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                       } ${wts.startKind === "settling" ? "" : "That's 3 mornings within 7 days. "}${WEIGH_HOW}`
                     : `${maint ? "Holding" : "Starting from"} ${held.note}.`}
                 </div>
+              )}
+              {!maint && wts?.now != null && wts.start != null && settleNote(wts, dietPhase, today) && (
+                <div style={{ fontSize: 12, marginTop: 6, color: dim }}>{settleNote(wts, dietPhase, today)}</div>
               )}
               {wts?.change != null && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
@@ -9355,7 +9414,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, settleNote, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,

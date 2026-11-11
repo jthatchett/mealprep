@@ -211,6 +211,15 @@ A phase's starting weight (a cut's or bulk's Start, maintenance's Holding) is an
 - **Starting a phase:** the form says it up front: "Your start weight is the average of 3+ weigh-ins around the start. First thing in the morning, after the bathroom, before eating or drinking." (maintenance: "The weight it holds is…")
 - *(3 is the owner's choice; the morning routine is standard weigh-in practice)*
 
+### A cut's or bulk's start settles after the first week
+A cut's first week drops water (less food, carbs and salt; a bulk's adds some), and it stays off (on) for the whole phase. A start taken from the week before leaves the plan line that much off: you look ahead of plan, and a stall shows as "behind" only once that cushion is used up. *(Owner's choice, Nov 2026)*
+- **Weeks 1–3:** the week before stands in, marked provisional: "Start 163.0 lb · Dec 1 · provisional", "A cut's first week drops some water, so your start is refined once that settles (Dec 22)."
+- **Day 22:** once weeks 2–3 each have 4+ weigh-ins (the pace's own rule), the start becomes the line through them, extended back to where a week's average up to the start sits (day −3; "Now" is a 7-day average too, so their lags cancel). The plan line keeps its start date. The card says, for two weeks: "Your start moved from 163.0 to 162.5 once the first week's water settled, so the plan leaves it out."
+- **Weeks 2–3 short of 4 weigh-ins each:** the next pair of weeks can settle it (through week 5); the card says "Your start is refined once you have 2 weeks in a row with 4+ weigh-ins each. Weigh in most mornings." Past week 5, or once the phase has ended, it stays at the week before.
+- **Not settled:** phases under 3 weeks (short mini-cuts), re-plans (they start from weigh-ins already past the water), and starts taken from a later first full week of weigh-ins (already past it).
+- *Example (simulated with the app's functions):* 163.0 the week before, 0.8 lb of water lost in days 1–5, then 0.8 lb a week of fat: provisional, the card reads about 0.4 lb ahead; on Dec 22 the start settles at ~162.6 and it reads on plan. A stall from day 28 shows as behind about 4 days sooner; with a 1.5 lb first-week drop, about 10 days sooner.
+- *Precision:* extending a 2-week line back about 10 days carries roughly ±0.3 lb of weigh-in noise.
+
 ### Maintenance holds your starting weight
 Maintenance aims to keep you at the weight you began it at, not just to stop the scale moving. *(Owner's choice, Nov 2026)*
 - **The weight it holds:** a week's average of weigh-ins (3 or more, see [What sets a starting weight](#what-sets-a-starting-weight)) up to the maintenance's start, or, after a cut or bulk, up to its day 19 (the day before its pace counts), once the water from the change has settled. The phase card shows it as "Holding 180.0 lb".
