@@ -76,6 +76,7 @@ function tokenExpiringSoon(access_token, bufferSeconds = 300) {
 const TERMS_VERSION = "2026-10-09";
 const PRIVACY_URL = "https://repreport.app/privacy.html";
 const TERMS_URL = "https://repreport.app/terms.html";
+const REPREPORT_URL = "https://repreport.app";
 
 function hasConsent(user) {
   const meta = user?.user_metadata;
@@ -3697,13 +3698,6 @@ export default function App() {
     }
     saveOb({ ...obRef.current, dismissed: { ...(obRef.current?.dismissed || {}), whatsNext: planDone.key } });
   };
-  // an open-ended maintenance or bulk running 8+ weeks with nothing planned after
-  const nudge = (() => {
-    if (!obReady || showWhatsNext || ob?.dismissed?.nudge || !dietPhase || dietPhase.phase_type === "deficit" || dietPhase.planned_end_date) return false;
-    if (dietPhases.some((r) => r.start_date > todayIso)) return false;
-    return daysBetween(dietPhase.start_date, todayIso) >= 56;
-  })();
-  const dismissNudge = () => saveOb({ ...obRef.current, dismissed: { ...(obRef.current?.dismissed || {}), nudge: true } });
   const checkinTipDue = obReady && !!coaching?.due && !ob.tips?.checkin;
   const maintBanner = obReady && !!coaching?.due && coaching.firstData && !!coaching.suggestion && !!ob.tips?.checkin && !ob.banners?.maintenance;
   const paceBanner = obReady && pace.ready && !ob.banners?.pace && !maintBanner;
@@ -3911,8 +3905,6 @@ export default function App() {
             onSlowCut={slowCut}
             onKeepStrength={(changePct) => rememberStrengthChoice("keep", changePct)}
             topCards={topCards}
-            nudge={nudge}
-            onDismissNudge={dismissNudge}
             copyTipAllowed={obReady && !ob.tips?.copyMeal && !laterTip}
             onCopyTipDone={() => markOb(["tips", "copyMeal"])}
           />
@@ -3948,7 +3940,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, onAcceptCatchUp, onHoldCurrent, onReplan = null, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, onAcceptCatchUp, onHoldCurrent, onReplan = null, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, copyTipAllowed = false, onCopyTipDone }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -4094,7 +4086,7 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
       <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} hold={coaching?.hold} onReplan={onReplan} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
         strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
-        trainingGoal={training?.active ? training.goal || null : null} nudge={nudge} onDismissNudge={onDismissNudge} />
+        trainingGoal={training?.active ? training.goal || null : null} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -4923,7 +4915,7 @@ function paceStartsOn(rows, phase, monthly) {
   return addDaysISO(start, monthly ? 27 : 19);
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, hold = null, onReplan = null, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null, nudge = false, onDismissNudge }) {
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, hold = null, onReplan = null, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -4964,6 +4956,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   const paceWaiting = !!paceFrom && today < paceFrom;
   const actual = paceWaiting ? null : trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
   const actualAge = trend.ready ? 0 : last?.age ?? null;
+  const breakNote = dietBreakNote({ phase, today, deload, trainingGoal });
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   const followedPreset = (presets || []).find((p) => p.id === phase.phase_id) || null;
@@ -4971,32 +4964,39 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   const vsMaint = estimate?.estimated && cals ? ((cals.avg - estimate.kcal) / estimate.kcal) * 100 : null;
 
   return (
+    <>
     <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
       <div style={S.pcKicker}>CURRENT PHASE</div>
       <PhaseOverview phase={phase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followedPreset} weightLb={weightLb} hold={hold}
         cal={cals ? cals.avg : null}
         calNote={vsMaint == null ? null : calVsMaintenance(cals.avg, estimate.kcal)}
         onReplan={onReplan}
-        headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>} />
+        headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>}
+        onPlanNext={onOpenMonth} />
+      {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
+      {!hasRepReport && phase.phase_type === "deficit" && (
+        <div style={S.stBox}>
+          <div style={S.stHead}>Lifting during this cut?</div>
+          <div style={S.viNote}>RepReport plans your sets around it and shows whether your lifts are holding up, the clearest sign you're keeping muscle. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email.</div>
+        </div>
+      )}
+    </div>
+    {/* Everything RepReport tells Meal Prep, in its own card (owner's call, Nov 2026) */}
+    {(hasRepReport || goal || sv || breakNote) && (
+    <div style={S.rrCard}>
+      <div style={S.rrHead}>
+        <span style={S.rrKicker}>FROM REPREPORT</span>
+        <a href={REPREPORT_URL} target="_blank" rel="noopener noreferrer" style={S.rrLink}>open ›</a>
+      </div>
       {goal && (
-        <div style={{ marginTop: 8 }}>
-          <div style={{ ...S.viNote, color: text, marginTop: 0 }}>{goal.summary} <span style={{ color: dim }}>(your RepReport block)</span></div>
+        <div>
+          <div style={S.rrLine}>{goal.summary}</div>
           {goal.conflicts.map((c) => (
             <div key={c.id} style={{ ...S.viNote, color: "#ffb454" }}>▲ {c.text}</div>
           ))}
         </div>
       )}
-      {(() => {
-        const breakNote = dietBreakNote({ phase, today, deload, trainingGoal });
-        return breakNote && <div style={{ ...S.viNote, color: dim }}>{breakNote}</div>;
-      })()}
-
-      {nudge && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 13 }}>
-          <button style={{ ...S.pcLink, flex: 1, textAlign: "left", padding: 0 }} onClick={onOpenMonth}>Planning a bulk or cut next? Set it up on the calendar ›</button>
-          <button style={{ background: "none", border: "none", color: dim, cursor: "pointer", fontSize: 14, padding: 0 }} onClick={onDismissNudge} aria-label="dismiss">✕</button>
-        </div>
-      )}
+      {breakNote && <div style={{ ...S.viNote, color: dim }}>{breakNote}</div>}
 
       {/* Training volume only means something with RepReport (owner's call, Nov 2026). */}
       {hasRepReport && (<>
@@ -5022,10 +5022,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
         </div>
       )}
       </>)}
-      {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
       {sv && (
         <div style={S.stBox}>
-          <div style={S.stHead}>Strength (from RepReport)</div>
+          <div style={S.stHead}>Strength</div>
           <div style={S.viNote}>{sv.line}</div>
           {sv.message && (
             <div style={{ ...S.viNote, color: sv.level === "suggest" ? "#ffb454" : sv.level === "headsUp" ? text : dim }}>{sv.message}</div>
@@ -5049,16 +5048,12 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
           )}
         </div>
       )}
-      {!hasRepReport && phase.phase_type === "deficit" && (
-        <div style={S.stBox}>
-          <div style={S.stHead}>Lifting during this cut?</div>
-          <div style={S.viNote}>RepReport plans your sets around it and shows whether your lifts are holding up, the clearest sign you're keeping muscle. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email.</div>
-        </div>
-      )}
       {hasRepReport && trainingActive === false && (phase.phase_type === "deficit"
         ? <div style={{ ...S.viNote, color: text }}>No active RepReport block. Start one so your sets follow this cut and RepReport can check that your lifts hold up.</div>
         : <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>)}
     </div>
+    )}
+    </>
   );
 }
 
@@ -7716,7 +7711,9 @@ const PHASE_HEADING_PX = 17;
 // where you are in it, how fast your weight is actually moving against the
 // goal in pounds, the weight you started from (or are holding) and where the
 // plan puts you, then calories. onReplan: offer the ways back when behind.
-function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null }) {
+function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null, onPlanNext = null }) {
+  const nextPhase = (dietPhases || []).filter((r) => r.id !== dietPhase.id && r.start_date > dietPhase.start_date)
+    .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0] || null;
   const prog = phaseProgress(dietPhase, today);
   const heading = `${dietPhase.phase_name.toUpperCase()} · WEEK ${prog.week}${prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}`;
   const pace = paceReading(dietPhases, bwLog, today);
@@ -7765,7 +7762,12 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               <div style={S.pcWeek}>
                 {shortDate(dietPhase.start_date)} – {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : "open-ended"}
                 {prog.overrun ? " · past planned end" : ""}
+                {nextPhase ? ` · then ${nextPhase.phase_name}` : ""}
               </div>
+              {/* nothing planned after this phase: one line, always (owner's call, Nov 2026) */}
+              {onPlanNext && !nextPhase && (
+                <button style={S.pcNext} onClick={onPlanNext}><span>Next: nothing planned</span><span>plan ›</span></button>
+              )}
 
               <div style={S.ptPaceBox}>
                 {actualPct != null ? (
@@ -8723,6 +8725,7 @@ const line = "#2a3133";
 const text = "#e8efe9";
 const dim = "#7d8a85";
 const accent = "#46e6a0";
+const RR_AMBER = "#fbbf24"; // RepReport's accent
 
 const S = {
   app: {
@@ -8813,6 +8816,19 @@ const S = {
     padding: 14, marginBottom: 14, color: text, fontFamily: "inherit",
   },
   pcEmpty: { color: dim, fontSize: 13, cursor: "pointer" },
+  pcNext: {
+    display: "flex", justifyContent: "space-between", gap: 10, width: "100%", background: "transparent", border: "none",
+    color: dim, fontSize: 12, fontFamily: "inherit", padding: 0, marginTop: 6, cursor: "pointer", textAlign: "left",
+  },
+  // RepReport's card under the phase card: its amber, its mono label
+  rrCard: {
+    display: "block", width: "100%", boxSizing: "border-box", background: panel, border: `1px solid ${line}`,
+    borderLeft: `4px solid ${RR_AMBER}`, borderRadius: 12, padding: 14, marginBottom: 14, color: text,
+  },
+  rrHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  rrKicker: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, fontSize: 10, letterSpacing: 2, color: RR_AMBER },
+  rrLink: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11, color: dim, textDecoration: "none" },
+  rrLine: { fontSize: 13, lineHeight: 1.45, color: text },
   pcTop: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 },
   pcName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 16, letterSpacing: 0.5 },
   pcWeek: { color: dim, fontSize: 12, marginTop: 2 },
