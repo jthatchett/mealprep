@@ -38,7 +38,7 @@ describe('a cut: start, now, where the plan puts you, the goal at the end', () =
     expect(w.now - w.planNow).toBeGreaterThan(0); // heavier than plan on a cut: behind
   });
   it('no weigh-ins: nothing to show', () => {
-    expect(phaseWeights(row, [], TODAY)).toEqual({ start: null, now: null, change: null });
+    expect(phaseWeights(row, [], TODAY)).toMatchObject({ start: null, now: null, change: null });
   });
 });
 

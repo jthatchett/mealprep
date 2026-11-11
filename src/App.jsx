@@ -1051,9 +1051,11 @@ function monthlyWeightTrend(log, today) {
 //   first full week back ("after-gap"). Until that week fills: no hold.
 // Example: maintenance from Sep 9, first weigh-ins Oct 6 and 10, then daily:
 // Oct 10–16 (5 weigh-ins) is the first full week; it holds their average.
+// A cut or bulk with no weigh-ins around its start does the same (no gap
+// rule): its plan line runs from the middle of that week.
 const HOLD_FULL_WEEK_MIN = 3;
 const HOLD_GAP_DAYS = 28;
-function holdStartWeight(log, anchorDate, today) {
+function holdStartWeight(log, anchorDate, today, { gapReset = true } = {}) {
   const pts = (log || []).filter((r) => Number(r.weight) > 0 && r.date <= today).sort((a, b) => (a.date < b.date ? -1 : 1));
   const inRange = (from, to) => pts.filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight));
   const mean = (w) => (w.length ? w.reduce((a, b) => a + b, 0) / w.length : null);
@@ -1068,7 +1070,7 @@ function holdStartWeight(log, anchorDate, today) {
   const since = pts.filter((r) => r.date >= addDaysISO(anchorDate, -6));
   let back = null;
   for (let i = 1; i < since.length; i++) if (daysBetween(since[i - 1].date, since[i].date) >= HOLD_GAP_DAYS) back = since[i].date;
-  if (back) return fullWeek(back, "after-gap");
+  if (back && gapReset) return fullWeek(back, "after-gap");
   const start = mean(inRange(addDaysISO(anchorDate, -6), anchorDate)) ?? mean(inRange(anchorDate, addDaysISO(anchorDate, 6)));
   if (start != null) return { start, startFrom: anchorDate, startKind: "start" };
   return fullWeek(anchorDate, "first-week");
@@ -1078,16 +1080,18 @@ function phaseWeights(row, log, today, anchorDate = row?.start_date) {
   if (!row) return null;
   const pts = (log || []).filter((r) => Number(r.weight) > 0).sort((a, b) => (a.date < b.date ? -1 : 1));
   const avgIn = (from, to) => { const w = pts.filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : null; };
-  const held = row.phase_type === "maintenance" ? holdStartWeight(pts, anchorDate, today) : null;
-  const start = held ? held.start : avgIn(addDaysISO(anchorDate, -6), anchorDate) ?? avgIn(anchorDate, addDaysISO(anchorDate, 6));
+  const held = holdStartWeight(pts, anchorDate, today, { gapReset: row.phase_type === "maintenance" });
+  const start = held.start;
   const before = pts.filter((r) => r.date <= today);
   const now = avgIn(addDaysISO(today, -6), today) ?? (before.length ? Number(before[before.length - 1].weight) : null);
-  if (start == null || now == null) return { start, now, change: null, ...(held && { startKind: held.startKind }) };
-  // the plan line runs from the anchor (the phase's start, or where it was re-planned)
-  const weeks = Math.max(0, daysBetween(anchorDate, today) / 7);
+  if (start == null || now == null) return { start, now, change: null, startKind: held.startKind };
+  // the plan line runs from the anchor (the phase's start, or where it was
+  // re-planned), or from the middle of the first full week of weigh-ins
+  const planFrom = held.startKind === "start" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
+  const weeks = Math.max(0, daysBetween(planFrom, today) / 7);
   const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
   const at = (w) => start * Math.pow(1 + rate / 100, w);
-  const endWeeks = row.planned_end_date ? (daysBetween(anchorDate, row.planned_end_date) + 1) / 7 : null;
+  const endWeeks = row.planned_end_date ? (daysBetween(planFrom, row.planned_end_date) + 1) / 7 : null;
   return {
     start, now, change: now - start, weeks, ...held,
     planNow: rate ? at(weeks) : null,                       // where the goal pace puts you today
@@ -7673,7 +7677,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
   const anchorDate = dietPhase.phase_type === "maintenance" ? hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : planAnchorDate(dietPhase, followed);
   const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
-  const held = maint ? holdSource(wts, anchorDate) : null;
+  const held = holdSource(wts, anchorDate);
   return (
     <>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
@@ -7720,7 +7724,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {wts && wts.now != null && (
                 <div style={S.ptWeights}>
                   {[
-                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", held && wts.start != null ? held.when : shortDate(anchorDate)],
+                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", wts.start != null ? held.when : shortDate(anchorDate)],
                     ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
                     maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
                   ].filter(Boolean).map(([lab, n, sub]) => (
@@ -7732,13 +7736,13 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                   ))}
                 </div>
               )}
-              {maint && wts?.now != null && (held?.note || wts.start == null) && (
+              {wts?.now != null && (held.note || wts.start == null) && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
                   {wts.start == null
                     ? wts.startKind === "after-gap"
                       ? "Back after 4+ weeks without weigh-ins: maintenance will hold your first full week back (3 weigh-ins in 7 days)."
-                      : `No weigh-ins around ${shortDate(anchorDate)}: maintenance will hold your first full week of weigh-ins (3 in 7 days).`
-                    : `Holding ${held.note}.`}
+                      : `No weigh-ins around ${shortDate(anchorDate)}: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week of weigh-ins (3 in 7 days).`
+                    : `${maint ? "Holding" : "Starting from"} ${held.note}.`}
                 </div>
               )}
               {wts?.change != null && (

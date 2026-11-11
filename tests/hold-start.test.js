@@ -59,9 +59,18 @@ describe('the weight maintenance holds', () => {
     expect(hold.ratePct).toBeGreaterThan(0);
     expect(catchUpCopy(hold).context).toBe("Maintenance holds your first full week of weigh-ins (Oct 10–16): 170.0 lb. You're at 166.0 now.");
   });
-  it('cuts and bulks keep their own start', () => {
-    const cut = { ...maint('2026-09-09'), phase_type: 'deficit', target_rate_pct: -0.5 };
-    expect(phaseWeights(cut, OWNER, '2026-11-10').start).toBe(null);
+  it('a cut with no weigh-ins around its start: the first full week, and the plan line runs from its middle', () => {
+    const cut = { ...maint('2026-09-09'), phase_type: 'deficit', phase_name: 'Cut', target_rate_pct: -0.5, planned_end_date: '2026-12-31' };
+    const p = phaseWeights(cut, OWNER, '2026-11-10');
+    expect(p).toMatchObject({ startKind: 'first-week', startFrom: '2026-10-10', startTo: '2026-10-16' });
+    expect(p.start.toFixed(1)).toBe('162.2');
+    expect(p.weeks.toFixed(2)).toBe('4.00');                       // Oct 13 -> Nov 10
+    expect(p.planNow.toFixed(1)).toBe((162.24 * Math.pow(0.995, 4)).toFixed(1));
+  });
+  it("a cut ignores the 4-week gap rule (it's planned from its start)", () => {
+    const cut = { ...maint('2026-10-01'), phase_type: 'deficit', target_rate_pct: -0.5 };
+    const log = w([['2026-10-01', 162], ['2026-11-15', 160], ['2026-11-16', 160], ['2026-11-17', 160]]);
+    expect(phaseWeights(cut, log, '2026-11-17')).toMatchObject({ start: 162, startKind: 'start' });
   });
 });
 
@@ -75,6 +84,13 @@ describe('the phase card', () => {
     expect(t).toContain('Holding 162.2 lb Oct 10–16');
     expect(t).toContain('Holding your first full week of weigh-ins (Oct 10–16).');
     expect(t).toContain('Within your normal day-to-day range.');
+  });
+  it('a cut says where its start comes from', () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12));
+    const cut = { ...maint('2026-09-09'), phase_type: 'deficit', phase_name: 'Cut', target_rate_pct: -0.5, planned_end_date: '2026-12-31' };
+    const t = text(React.createElement(PhaseCard, { dietPhases: [cut], bwLog: OWNER, presets: presets(), week: null, estimate: null, onOpenMonth: () => {}, onReplan: async () => {}, hasRepReport: false }));
+    expect(t).toContain('Start 162.2 lb Oct 10–16');
+    expect(t).toContain('Starting from your first full week of weigh-ins (Oct 10–16).');
   });
   it('before a full week, it says what it is waiting for', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 9, 11, 12));
