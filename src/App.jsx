@@ -4790,8 +4790,9 @@ function goalCheck(goal, phase) {
     : g === "powerbuilding" ? `${strong} while ${build}`
     : build.charAt(0).toUpperCase() + build.slice(1);
   let where = "";
-  if (phase?.type === "deficit") where = ` on a ${phase.kind === "minicut" ? "mini-cut" : "cut"}${phase.targetPct != null ? ` (${goalPct(phase.targetPct)}/week)` : ""}`;
-  else if (phase?.type === "surplus") where = ` on a bulk${phase.targetPct != null ? ` (${goalPct(phase.targetPct * WEEKS_PER_MONTH)}/month)` : ""}`;
+  // no pace here: both apps show it beside your actual pace (owner's call, Nov 2026)
+  if (phase?.type === "deficit") where = ` on a ${phase.kind === "minicut" ? "mini-cut" : "cut"}`;
+  else if (phase?.type === "surplus") where = " on a bulk";
   else if (phase?.type === "maintenance") where = " at maintenance";
   const recomp = phase?.type === "maintenance" && g !== "strength" && growing;
   const summary = `${what}${where}${recomp ? ": expect slow, steady gains" : ""}.`;
