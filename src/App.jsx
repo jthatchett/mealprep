@@ -1043,21 +1043,57 @@ function monthlyWeightTrend(log, today) {
 // after it), "now" the last 7 days (else the latest weigh-in). The 2-week
 // pace can't see a slow drift (−0.2%/week reads "Holding steady" at
 // maintenance for months); the change since the start can.
+// The weight a maintenance holds (owner's choice, Nov 2026):
+// - the week around its start, as for any phase ("start");
+// - no weigh-ins then (you started weighing in later): your first full week
+//   of weigh-ins after it, the first 7 days with 3+ ("first-week");
+// - 4+ weeks without weigh-ins after it: the old number is stale, so your
+//   first full week back ("after-gap"). Until that week fills: no hold.
+// Example: maintenance from Sep 9, first weigh-ins Oct 6 and 10, then daily:
+// Oct 10–16 (5 weigh-ins) is the first full week; it holds their average.
+// A cut or bulk with no weigh-ins around its start does the same (no gap
+// rule): its plan line runs from the middle of that week.
+const HOLD_FULL_WEEK_MIN = 3;
+const HOLD_GAP_DAYS = 28;
+function holdStartWeight(log, anchorDate, today, { gapReset = true } = {}) {
+  const pts = (log || []).filter((r) => Number(r.weight) > 0 && r.date <= today).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const inRange = (from, to) => pts.filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight));
+  const mean = (w) => (w.length ? w.reduce((a, b) => a + b, 0) / w.length : null);
+  const fullWeek = (from, kind) => {
+    for (const p of pts.filter((r) => r.date >= from)) {
+      const to = addDaysISO(p.date, 6), w = inRange(p.date, to);
+      if (w.length >= HOLD_FULL_WEEK_MIN) return { start: mean(w), startFrom: p.date, startTo: to < today ? to : today, startKind: kind };
+    }
+    return { start: null, startKind: kind };
+  };
+  // the latest 4+ week gap between weigh-ins since the hold's week began
+  const since = pts.filter((r) => r.date >= addDaysISO(anchorDate, -6));
+  let back = null;
+  for (let i = 1; i < since.length; i++) if (daysBetween(since[i - 1].date, since[i].date) >= HOLD_GAP_DAYS) back = since[i].date;
+  if (back && gapReset) return fullWeek(back, "after-gap");
+  const start = mean(inRange(addDaysISO(anchorDate, -6), anchorDate)) ?? mean(inRange(anchorDate, addDaysISO(anchorDate, 6)));
+  if (start != null) return { start, startFrom: anchorDate, startKind: "start" };
+  return fullWeek(anchorDate, "first-week");
+}
+
 function phaseWeights(row, log, today, anchorDate = row?.start_date) {
   if (!row) return null;
   const pts = (log || []).filter((r) => Number(r.weight) > 0).sort((a, b) => (a.date < b.date ? -1 : 1));
   const avgIn = (from, to) => { const w = pts.filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : null; };
-  const start = avgIn(addDaysISO(anchorDate, -6), anchorDate) ?? avgIn(anchorDate, addDaysISO(anchorDate, 6));
+  const held = holdStartWeight(pts, anchorDate, today, { gapReset: row.phase_type === "maintenance" });
+  const start = held.start;
   const before = pts.filter((r) => r.date <= today);
   const now = avgIn(addDaysISO(today, -6), today) ?? (before.length ? Number(before[before.length - 1].weight) : null);
-  if (start == null || now == null) return { start, now, change: null };
-  // the plan line runs from the anchor (the phase's start, or where it was re-planned)
-  const weeks = Math.max(0, daysBetween(anchorDate, today) / 7);
+  if (start == null || now == null) return { start, now, change: null, startKind: held.startKind };
+  // the plan line runs from the anchor (the phase's start, or where it was
+  // re-planned), or from the middle of the first full week of weigh-ins
+  const planFrom = held.startKind === "start" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
+  const weeks = Math.max(0, daysBetween(planFrom, today) / 7);
   const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
   const at = (w) => start * Math.pow(1 + rate / 100, w);
-  const endWeeks = row.planned_end_date ? (daysBetween(anchorDate, row.planned_end_date) + 1) / 7 : null;
+  const endWeeks = row.planned_end_date ? (daysBetween(planFrom, row.planned_end_date) + 1) / 7 : null;
   return {
-    start, now, change: now - start, weeks,
+    start, now, change: now - start, weeks, ...held,
     planNow: rate ? at(weeks) : null,                       // where the goal pace puts you today
     goalEnd: rate && endWeeks ? at(endWeeks) : null,        // and at the planned end
   };
@@ -1142,12 +1178,14 @@ function maintenanceHold(row, rows, log, today, checkins, holdFrom = null) {
   if (!w || w.change == null) return { anchorDate, ratePct: 0 };
   const gapPct = (w.change / w.start) * 100;
   const weekStart = mondayOf(today);
+  // a catch-up counts from the week the held weight comes from
+  const from = w.startKind === "start" ? anchorDate : mondayOf(w.startFrom);
   const ran = [];
-  for (const c of [...(checkins || [])].filter((c) => c.week_start < weekStart && c.week_start >= anchorDate).sort((a, b) => (a.week_start < b.week_start ? 1 : -1))) {
+  for (const c of [...(checkins || [])].filter((c) => c.week_start < weekStart && c.week_start >= from).sort((a, b) => (a.week_start < b.week_start ? 1 : -1))) {
     if (!Number(c.target_rate_pct)) break;
     if (c.action !== "keep") ran.push(c);
   }
-  const base = { anchorDate, anchor: w.start, now: w.now, gapLb: w.change, gapPct, weeksRun: ran.length };
+  const base = { anchorDate, anchor: w.start, startKind: w.startKind, startFrom: w.startFrom, startTo: w.startTo, now: w.now, gapLb: w.change, gapPct, weeksRun: ran.length };
   if (!ran.length && Math.abs(gapPct) <= HOLD_TRIGGER_PCT) return { ...base, ratePct: 0 };
   if (ran.length && (Math.abs(gapPct) <= HOLD_DONE_PCT || ran.length >= HOLD_MAX_WEEKS)) return { ...base, ratePct: 0, done: true };
   return { ...base, ratePct: roundRate(-Math.sign(gapPct) * Math.min(Math.abs(gapPct) / HOLD_WEEKS, HOLD_MAX_RATE_PCT)) };
@@ -1202,13 +1240,25 @@ function resolveCheckinReason(reason, { ck, row, weightLb, today, half = false }
 }
 // The week a catch-up starts it's explained once, with the choice to hold
 // where they are instead (owner's design, Nov 2026).
+// Where the held weight comes from, for the card and the catch-up:
+// "Sep 9", or a week of weigh-ins, "Oct 10–16" (or "Oct 28–Nov 3").
+function weekRange(from, to) {
+  const a = shortDate(from), b = shortDate(to);
+  return a.split(" ")[0] === b.split(" ")[0] ? `${a}–${b.split(" ")[1]}` : `${a}–${b}`;
+}
+function holdSource(w, anchorDate) {
+  if (!w?.startKind || w.startKind === "start" || !w.startFrom) return { when: anchorDate ? shortDate(anchorDate) : "", note: null };
+  const when = weekRange(w.startFrom, w.startTo);
+  return { when, note: w.startKind === "after-gap" ? `your first full week back after 4+ weeks without weigh-ins (${when})` : `your first full week of weigh-ins (${when})` };
+}
 function catchUpCopy(hold, cal = null) {
   const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1);
   const kcal = Math.round(Math.abs(paceKcal(hold.ratePct, hold.now)) / 10) * 10;
   const lbWeek = Math.abs((hold.ratePct / 100) * hold.now).toFixed(1);
+  const src = holdSource(hold, hold.anchorDate);
   return {
     title: `You're ${lb} lb ${under ? "under" : "over"} your maintenance weight`,
-    context: `You started maintenance at ${hold.anchor.toFixed(1)} lb${hold.anchorDate ? ` on ${shortDate(hold.anchorDate)}` : ""}. You're at ${hold.now.toFixed(1)} now.`,
+    context: `${src.note ? `Maintenance holds ${src.note}: ${hold.anchor.toFixed(1)} lb.` : `You started maintenance at ${hold.anchor.toFixed(1)} lb${src.when ? ` on ${src.when}` : ""}.`} You're at ${hold.now.toFixed(1)} now.`,
     body: `To get back: about ${cal != null ? `${(Math.round(cal / 10) * 10).toLocaleString("en-US")} calories a day (${kcal} ${under ? "over" : "under"} maintenance` : `${kcal} calories a day ${under ? "over" : "under"} maintenance (`}, ≈${lbWeek} lb a week).`,
   };
 }
@@ -7627,6 +7677,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
   const anchorDate = dietPhase.phase_type === "maintenance" ? hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : planAnchorDate(dietPhase, followed);
   const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
+  const held = holdSource(wts, anchorDate);
   return (
     <>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
@@ -7673,7 +7724,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {wts && wts.now != null && (
                 <div style={S.ptWeights}>
                   {[
-                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", shortDate(anchorDate)],
+                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", wts.start != null ? held.when : shortDate(anchorDate)],
                     ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
                     maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
                   ].filter(Boolean).map(([lab, n, sub]) => (
@@ -7685,6 +7736,15 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                   ))}
                 </div>
               )}
+              {wts?.now != null && (held.note || wts.start == null) && (
+                <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
+                  {wts.start == null
+                    ? wts.startKind === "after-gap"
+                      ? "Back after 4+ weeks without weigh-ins: maintenance will hold your first full week back (3 weigh-ins in 7 days)."
+                      : `No weigh-ins around ${shortDate(anchorDate)}: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week of weigh-ins (3 in 7 days).`
+                    : `${maint ? "Holding" : "Starting from"} ${held.note}.`}
+                </div>
+              )}
               {wts?.change != null && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
                   {maint
@@ -7692,7 +7752,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                       ? `${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} ${wts.change < 0 ? "under" : "over"}: calories are ${Math.abs(Math.round(paceKcal(hold.ratePct, weightLb)))} kcal/day ${hold.ratePct > 0 ? "above" : "below"} maintenance to get you back, less each week as you close in.`
                       : Math.abs((wts.change / wts.start) * 100) <= HOLD_TRIGGER_PCT
                         ? "Within your normal day-to-day range."
-                        : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${shortDate(anchorDate)}. Your next check-in brings you back.`
+                        : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${held.when}. Your next check-in brings you back.`
                     : wts.planNow != null
                       ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
                       : ""}
@@ -9275,7 +9335,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
