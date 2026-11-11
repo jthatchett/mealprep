@@ -28,10 +28,11 @@ describe('the RepReport card', () => {
     now();
     expect(card({ hasRepReport: false })).not.toContain('FROM REPREPORT');
   });
-  it('nothing planned after the phase: "Next: nothing planned", no dismissable reminder', () => {
+  it('nothing planned after the phase: "Next: nothing planned", one "plan ›", no dismissable reminder', () => {
     now();
     const t = card({ hasRepReport: false });
-    expect(t).toContain('Next: nothing planned plan ›');
+    expect(t).toContain('Next: nothing planned');
+    expect(t.match(/plan ›/g)).toHaveLength(1);   // one way to the calendar, in the corner
     expect(t).not.toContain('Planning a bulk or cut next?');
   });
   it('something planned: the dates say what follows, and no "Next" line', () => {

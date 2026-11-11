@@ -4972,7 +4972,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
         calNote={vsMaint == null ? null : calVsMaintenance(cals.avg, estimate.kcal)}
         onReplan={onReplan}
         headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>}
-        onPlanNext={onOpenMonth} />
+        showNext />
       {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
       {!hasRepReport && phase.phase_type === "deficit" && (
         <div style={S.stBox}>
@@ -7711,7 +7711,7 @@ const PHASE_HEADING_PX = 17;
 // where you are in it, how fast your weight is actually moving against the
 // goal in pounds, the weight you started from (or are holding) and where the
 // plan puts you, then calories. onReplan: offer the ways back when behind.
-function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null, onPlanNext = null }) {
+function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null, showNext = false }) {
   const nextPhase = (dietPhases || []).filter((r) => r.id !== dietPhase.id && r.start_date > dietPhase.start_date)
     .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0] || null;
   const prog = phaseProgress(dietPhase, today);
@@ -7764,9 +7764,9 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                 {prog.overrun ? " · past planned end" : ""}
                 {nextPhase ? ` · then ${nextPhase.phase_name}` : ""}
               </div>
-              {/* nothing planned after this phase: one line, always (owner's call, Nov 2026) */}
-              {onPlanNext && !nextPhase && (
-                <button style={S.pcNext} onClick={onPlanNext}><span>Next: nothing planned</span><span>plan ›</span></button>
+              {/* nothing planned after this phase: one line, always; "plan ›" above opens the calendar (owner's call, Nov 2026) */}
+              {showNext && !nextPhase && (
+                <div style={S.pcNext}>Next: nothing planned</div>
               )}
 
               <div style={S.ptPaceBox}>
@@ -8816,10 +8816,7 @@ const S = {
     padding: 14, marginBottom: 14, color: text, fontFamily: "inherit",
   },
   pcEmpty: { color: dim, fontSize: 13, cursor: "pointer" },
-  pcNext: {
-    display: "flex", justifyContent: "space-between", gap: 10, width: "100%", background: "transparent", border: "none",
-    color: dim, fontSize: 12, fontFamily: "inherit", padding: 0, marginTop: 6, cursor: "pointer", textAlign: "left",
-  },
+  pcNext: { color: dim, fontSize: 12, marginTop: 6 },
   // RepReport's card under the phase card: its amber, its mono label
   rrCard: {
     display: "block", width: "100%", boxSizing: "border-box", background: panel, border: `1px solid ${line}`,
