@@ -76,6 +76,7 @@ function tokenExpiringSoon(access_token, bufferSeconds = 300) {
 const TERMS_VERSION = "2026-10-09";
 const PRIVACY_URL = "https://repreport.app/privacy.html";
 const TERMS_URL = "https://repreport.app/terms.html";
+const REPREPORT_URL = "https://repreport.app";
 
 function hasConsent(user) {
   const meta = user?.user_metadata;
@@ -1003,7 +1004,7 @@ function weighInFit(log, from, to) {
   const mx = pts.reduce((a, [x]) => a + x, 0) / n, my = pts.reduce((a, [, y]) => a + y, 0) / n;
   const sxx = pts.reduce((a, [x]) => a + (x - mx) ** 2, 0);
   const sxy = pts.reduce((a, [x, y]) => a + (x - mx) * (y - my), 0);
-  return { slope: sxx ? sxy / sxx : 0, mean: my };
+  return { slope: sxx ? sxy / sxx : 0, mean: my, mx };
 }
 function weightTrend(log, today) {
   const week = (from, to) =>
@@ -1054,6 +1055,8 @@ function monthlyWeightTrend(log, today) {
 // A cut or bulk with no weigh-ins around its start does the same (no gap
 // rule): its plan line runs from the middle of that week.
 const HOLD_FULL_WEEK_MIN = 3;
+// what makes a weigh-in comparable from one morning to the next
+const WEIGH_HOW = "First thing in the morning, after the bathroom, before eating or drinking.";
 const HOLD_GAP_DAYS = 28;
 function holdStartWeight(log, anchorDate, today, { gapReset = true } = {}) {
   const pts = (log || []).filter((r) => Number(r.weight) > 0 && r.date <= today).sort((a, b) => (a.date < b.date ? -1 : 1));
@@ -1071,9 +1074,45 @@ function holdStartWeight(log, anchorDate, today, { gapReset = true } = {}) {
   let back = null;
   for (let i = 1; i < since.length; i++) if (daysBetween(since[i - 1].date, since[i].date) >= HOLD_GAP_DAYS) back = since[i].date;
   if (back && gapReset) return fullWeek(back, "after-gap");
-  const start = mean(inRange(addDaysISO(anchorDate, -6), anchorDate)) ?? mean(inRange(anchorDate, addDaysISO(anchorDate, 6)));
-  if (start != null) return { start, startFrom: anchorDate, startKind: "start" };
+  // the week up to the start, with 3+ weigh-ins; short of 3, topped up with
+  // the first weigh-ins after the start (at most 6 days after), so one salty
+  // morning can't set it alone, and a cut's first-week water barely enters
+  const end = addDaysISO(anchorDate, 6);
+  const pre = pts.filter((r) => r.date >= addDaysISO(anchorDate, -6) && r.date <= anchorDate);
+  if (pre.length >= HOLD_FULL_WEEK_MIN) return { start: mean(pre.map((r) => Number(r.weight))), startFrom: anchorDate, startKind: "start" };
+  const used = [...pre, ...pts.filter((r) => r.date > anchorDate && r.date <= end)].slice(0, HOLD_FULL_WEEK_MIN);
+  if (used.length >= HOLD_FULL_WEEK_MIN) return { start: mean(used.map((r) => Number(r.weight))), startFrom: used[0].date, startTo: used[used.length - 1].date, startKind: "start-week" };
+  // still inside the start week: settling, with what it has so far
+  if (today <= end) return { start: null, startKind: "settling", count: used.length, soFar: mean(used.map((r) => Number(r.weight))), needBy: end };
   return fullWeek(anchorDate, "first-week");
+}
+
+// A cut's first week drops water (a bulk's adds some) that stays off (on)
+// for the whole phase, so a start from the week before leaves the plan line
+// 1–2 lb off and hides a stall. Once weeks 2–3 are in, each with 4+ weigh-ins,
+// the start settles: the line through them, extended back to the week before.
+// Example: 163.0 the week before, 0.8 lb of water in days 1–5, then 0.8 lb a
+// week: settles at 162.2 on day 22. Until then the week before stands in,
+// marked provisional; if weeks 2–3 are short, the next pair of weeks (to week
+// 5) can settle it. Phases under 3 weeks, re-plans, and starts taken from a
+// later first full week (already past the water) don't settle.
+// (Owner's choice, Nov 2026)
+const SETTLE_AFTER_DAYS = 21;
+function settledStart(row, pts, today) {
+  const start = row.start_date, end = row.end_date || row.planned_end_date;
+  for (let k = 0; k <= 2; k++) {
+    const from = addDaysISO(start, 7 + 7 * k), to = addDaysISO(from, 13);
+    if (to >= today || (end && to > end)) break;
+    const n1 = pts.filter((r) => r.date >= from && r.date < addDaysISO(from, 7)).length;
+    const n2 = pts.filter((r) => r.date >= addDaysISO(from, 7) && r.date <= to).length;
+    if (n1 >= TREND_MIN_WEIGHINS && n2 >= TREND_MIN_WEIGHINS) {
+      const fit = weighInFit(pts, from, to);
+      // read at the middle of the week before (day −3), where a week's average
+      // up to the start sits: "now" is a 7-day average too, so the lags cancel
+      return { start: fit.mean + fit.slope * (daysBetween(from, addDaysISO(start, -3)) - fit.mx), settledOn: addDaysISO(to, 1) };
+    }
+  }
+  return null;
 }
 
 function phaseWeights(row, log, today, anchorDate = row?.start_date) {
@@ -1081,19 +1120,32 @@ function phaseWeights(row, log, today, anchorDate = row?.start_date) {
   const pts = (log || []).filter((r) => Number(r.weight) > 0).sort((a, b) => (a.date < b.date ? -1 : 1));
   const avgIn = (from, to) => { const w = pts.filter((r) => r.date >= from && r.date <= to).map((r) => Number(r.weight)); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : null; };
   const held = holdStartWeight(pts, anchorDate, today, { gapReset: row.phase_type === "maintenance" });
-  const start = held.start;
+  // cuts and bulks from their own start (not a re-plan) settle after the first week's water
+  const end = row.end_date || row.planned_end_date;
+  // only a start weighed around the start date has the water in it (the
+  // first full week of weigh-ins, found later, is already past it)
+  const canSettle = (row.phase_type === "deficit" || row.phase_type === "surplus") && anchorDate === row.start_date
+    && ["start", "start-week", "settling"].includes(held.startKind)
+    && (!end || end >= addDaysISO(row.start_date, SETTLE_AFTER_DAYS - 1));
+  const settled = canSettle ? settledStart(row, pts, today) : null;
+  const settle = !canSettle ? {}
+    : settled ? { settledOn: settled.settledOn, provisionalStart: held.start }
+    : today <= addDaysISO(row.start_date, SETTLE_AFTER_DAYS + 13) && !(end && today > end)
+      ? { provisional: true, settlesOn: addDaysISO(row.start_date, SETTLE_AFTER_DAYS) } : {};
+  const start = settled ? settled.start : held.start;
+  const { start: _heldStart, ...heldInfo } = held;
   const before = pts.filter((r) => r.date <= today);
   const now = avgIn(addDaysISO(today, -6), today) ?? (before.length ? Number(before[before.length - 1].weight) : null);
-  if (start == null || now == null) return { start, now, change: null, startKind: held.startKind };
+  if (start == null || now == null) return { start, now, change: null, ...heldInfo, ...settle };
   // the plan line runs from the anchor (the phase's start, or where it was
   // re-planned), or from the middle of the first full week of weigh-ins
-  const planFrom = held.startKind === "start" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
+  const planFrom = settled || held.startKind === "start" || held.startKind === "start-week" ? anchorDate : addDaysISO(held.startFrom, Math.round(daysBetween(held.startFrom, held.startTo) / 2));
   const weeks = Math.max(0, daysBetween(planFrom, today) / 7);
   const rate = row.phase_type === "maintenance" ? 0 : phaseRatePct(row);
   const at = (w) => start * Math.pow(1 + rate / 100, w);
   const endWeeks = row.planned_end_date ? (daysBetween(planFrom, row.planned_end_date) + 1) / 7 : null;
   return {
-    start, now, change: now - start, weeks, ...held,
+    start, now, change: now - start, weeks, ...heldInfo, ...settle, ...(settled && { startKind: "settled" }),
     planNow: rate ? at(weeks) : null,                       // where the goal pace puts you today
     goalEnd: rate && endWeeks ? at(endWeeks) : null,        // and at the planned end
   };
@@ -1179,7 +1231,7 @@ function maintenanceHold(row, rows, log, today, checkins, holdFrom = null) {
   const gapPct = (w.change / w.start) * 100;
   const weekStart = mondayOf(today);
   // a catch-up counts from the week the held weight comes from
-  const from = w.startKind === "start" ? anchorDate : mondayOf(w.startFrom);
+  const from = w.startKind === "start" || w.startKind === "start-week" ? anchorDate : mondayOf(w.startFrom);
   const ran = [];
   for (const c of [...(checkins || [])].filter((c) => c.week_start < weekStart && c.week_start >= from).sort((a, b) => (a.week_start < b.week_start ? 1 : -1))) {
     if (!Number(c.target_rate_pct)) break;
@@ -1247,9 +1299,26 @@ function weekRange(from, to) {
   return a.split(" ")[0] === b.split(" ")[0] ? `${a}–${b.split(" ")[1]}` : `${a}–${b}`;
 }
 function holdSource(w, anchorDate) {
-  if (!w?.startKind || w.startKind === "start" || !w.startFrom) return { when: anchorDate ? shortDate(anchorDate) : "", note: null };
+  const on = anchorDate ? shortDate(anchorDate) : "";
+  if (!w?.startKind || w.startKind === "start" || w.startKind === "settled" || !w.startFrom) return { when: on, on, note: null };
+  if (w.startKind === "start-week") return { when: w.startFrom === w.startTo ? shortDate(w.startFrom) : weekRange(w.startFrom, w.startTo), on, note: null };
   const when = weekRange(w.startFrom, w.startTo);
-  return { when, note: w.startKind === "after-gap" ? `your first full week back after 4+ weeks without weigh-ins (${when})` : `your first full week of weigh-ins (${when})` };
+  return { when, on, note: w.startKind === "after-gap" ? `your first full week back after 4+ weeks without weigh-ins (${when})` : `your first full week of weigh-ins (${when})` };
+}
+// What the card says while a cut's or bulk's start settles, and for two
+// weeks after it does.
+function settleNote(w, row, today) {
+  const cut = row.phase_type === "deficit", kind = cut ? "cut" : "bulk";
+  if (w.provisional) {
+    return today < w.settlesOn
+      ? `A ${kind}'s first week ${cut ? "drops" : "adds"} some water, so your start is refined once that settles (${shortDate(w.settlesOn)}).`
+      : `Your start is refined once you have 2 weeks in a row with ${TREND_MIN_WEIGHINS}+ weigh-ins each. Weigh in most mornings.`;
+  }
+  if (!w.settledOn || daysBetween(w.settledOn, today) >= 14) return null;
+  const was = w.provisionalStart;
+  return was != null && Math.abs(was - w.start) >= 0.05
+    ? `Your start moved from ${was.toFixed(1)} to ${w.start.toFixed(1)} once the first week's water settled, so the plan leaves it out.`
+    : `Your start settled at ${w.start.toFixed(1)}, from your weigh-ins after the first week.`;
 }
 function catchUpCopy(hold, cal = null) {
   const under = hold.gapLb < 0, lb = Math.abs(hold.gapLb).toFixed(1);
@@ -1258,7 +1327,7 @@ function catchUpCopy(hold, cal = null) {
   const src = holdSource(hold, hold.anchorDate);
   return {
     title: `You're ${lb} lb ${under ? "under" : "over"} your maintenance weight`,
-    context: `${src.note ? `Maintenance holds ${src.note}: ${hold.anchor.toFixed(1)} lb.` : `You started maintenance at ${hold.anchor.toFixed(1)} lb${src.when ? ` on ${src.when}` : ""}.`} You're at ${hold.now.toFixed(1)} now.`,
+    context: `${src.note ? `Maintenance holds ${src.note}: ${hold.anchor.toFixed(1)} lb.` : `You started maintenance at ${hold.anchor.toFixed(1)} lb${src.on ? ` on ${src.on}` : ""}.`} You're at ${hold.now.toFixed(1)} now.`,
     body: `To get back: about ${cal != null ? `${(Math.round(cal / 10) * 10).toLocaleString("en-US")} calories a day (${kcal} ${under ? "over" : "under"} maintenance` : `${kcal} calories a day ${under ? "over" : "under"} maintenance (`}, ≈${lbWeek} lb a week).`,
   };
 }
@@ -3629,13 +3698,6 @@ export default function App() {
     }
     saveOb({ ...obRef.current, dismissed: { ...(obRef.current?.dismissed || {}), whatsNext: planDone.key } });
   };
-  // an open-ended maintenance or bulk running 8+ weeks with nothing planned after
-  const nudge = (() => {
-    if (!obReady || showWhatsNext || ob?.dismissed?.nudge || !dietPhase || dietPhase.phase_type === "deficit" || dietPhase.planned_end_date) return false;
-    if (dietPhases.some((r) => r.start_date > todayIso)) return false;
-    return daysBetween(dietPhase.start_date, todayIso) >= 56;
-  })();
-  const dismissNudge = () => saveOb({ ...obRef.current, dismissed: { ...(obRef.current?.dismissed || {}), nudge: true } });
   const checkinTipDue = obReady && !!coaching?.due && !ob.tips?.checkin;
   const maintBanner = obReady && !!coaching?.due && coaching.firstData && !!coaching.suggestion && !!ob.tips?.checkin && !ob.banners?.maintenance;
   const paceBanner = obReady && pace.ready && !ob.banners?.pace && !maintBanner;
@@ -3843,8 +3905,6 @@ export default function App() {
             onSlowCut={slowCut}
             onKeepStrength={(changePct) => rememberStrengthChoice("keep", changePct)}
             topCards={topCards}
-            nudge={nudge}
-            onDismissNudge={dismissNudge}
             copyTipAllowed={obReady && !ob.tips?.copyMeal && !laterTip}
             onCopyTipDone={() => markOb(["tips", "copyMeal"])}
           />
@@ -3880,7 +3940,7 @@ export default function App() {
 /* ============================================================
    PLAN
    ============================================================ */
-function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, onAcceptCatchUp, onHoldCurrent, onReplan = null, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, nudge = false, onDismissNudge, copyTipAllowed = false, onCopyTipDone }) {
+function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, foods, setFoods, phases, activeDay, setActiveDay, selectedDate, setSelectedDate, dietPhases, training, bwLog, targetHistory, loggable, intakeRows, intakeError, onRetryIntake, intakeOps, coaching, coachError, onSetDayIncluded, onCompleteCheckin, onCheckinReason, onAcceptCatchUp, onHoldCurrent, onReplan = null, reviewDays = false, onOpenMonth, showCalcPrompt, onOpenCalc, onCalcLater, strengthChoice, onSlowCut, onKeepStrength, topCards = null, copyTipAllowed = false, onCopyTipDone }) {
   const day = week[activeDay];
   // The day's macro targets: the preset of the diet phase in effect on the
   // selected date, unless this weekday has its own override (e.g. Refeed).
@@ -4026,7 +4086,7 @@ function Plan({ week, setWeek, planStore, planMonday, todayWeek, planFoodsKept, 
       {coachError && <div style={S.verifyBanner}>⚠ couldn't load check-in data — {coachError}</div>}
       <PhaseCard dietPhases={dietPhases} bwLog={bwLog} onOpenMonth={onOpenMonth} presets={phases} week={todayWeek} estimate={coaching?.card} hold={coaching?.hold} onReplan={onReplan} trainingActive={training?.active} hasRepReport={!!training} deload={!!(training?.active && training.deload)}
         strength={training?.strength || null} strengthChoice={strengthChoice} weightLb={coaching?.weightLb ?? null} canSlow={!!coaching?.followed} onSlowCut={onSlowCut} onKeepStrength={onKeepStrength}
-        trainingGoal={training?.active ? training.goal || null : null} nudge={nudge} onDismissNudge={onDismissNudge} />
+        trainingGoal={training?.active ? training.goal || null : null} />
 
       <DateStrip
         selectedDate={selectedDate}
@@ -4730,8 +4790,9 @@ function goalCheck(goal, phase) {
     : g === "powerbuilding" ? `${strong} while ${build}`
     : build.charAt(0).toUpperCase() + build.slice(1);
   let where = "";
-  if (phase?.type === "deficit") where = ` on a ${phase.kind === "minicut" ? "mini-cut" : "cut"}${phase.targetPct != null ? ` (${goalPct(phase.targetPct)}/week)` : ""}`;
-  else if (phase?.type === "surplus") where = ` on a bulk${phase.targetPct != null ? ` (${goalPct(phase.targetPct * WEEKS_PER_MONTH)}/month)` : ""}`;
+  // no pace here: both apps show it beside your actual pace (owner's call, Nov 2026)
+  if (phase?.type === "deficit") where = ` on a ${phase.kind === "minicut" ? "mini-cut" : "cut"}`;
+  else if (phase?.type === "surplus") where = " on a bulk";
   else if (phase?.type === "maintenance") where = " at maintenance";
   const recomp = phase?.type === "maintenance" && g !== "strength" && growing;
   const summary = `${what}${where}${recomp ? ": expect slow, steady gains" : ""}.`;
@@ -4855,7 +4916,7 @@ function paceStartsOn(rows, phase, monthly) {
   return addDaysISO(start, monthly ? 27 : 19);
 }
 
-function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, hold = null, onReplan = null, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null, nudge = false, onDismissNudge }) {
+function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, hold = null, onReplan = null, trainingActive, hasRepReport = true, deload, strength, strengthChoice, weightLb, canSlow, onSlowCut, onKeepStrength, trainingGoal = null }) {
   const [strengthBusy, setStrengthBusy] = useState(false);
   const today = todayISO();
   const phase = phaseOnDate(dietPhases, today);
@@ -4896,6 +4957,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   const paceWaiting = !!paceFrom && today < paceFrom;
   const actual = paceWaiting ? null : trend.ready ? (monthly ? trend.pctPerMonth : trend.pctPerWeek) : last?.rate != null ? last.rate * 100 : null;
   const actualAge = trend.ready ? 0 : last?.age ?? null;
+  const breakNote = dietBreakNote({ phase, today, deload, trainingGoal });
   const sv = strengthView({ strength, phase, cutStart: ctx?.chainStart, choice: strengthChoice, today, ratePct, weightLb, actualPct: actual, canSlow });
 
   const followedPreset = (presets || []).find((p) => p.id === phase.phase_id) || null;
@@ -4903,32 +4965,39 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   const vsMaint = estimate?.estimated && cals ? ((cals.avg - estimate.kcal) / estimate.kcal) * 100 : null;
 
   return (
+    <>
     <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
       <div style={S.pcKicker}>CURRENT PHASE</div>
       <PhaseOverview phase={phase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followedPreset} weightLb={weightLb} hold={hold}
         cal={cals ? cals.avg : null}
         calNote={vsMaint == null ? null : calVsMaintenance(cals.avg, estimate.kcal)}
         onReplan={onReplan}
-        headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>} />
+        headerRight={<button style={S.pcLink} onClick={onOpenMonth}>{prog.overrun ? "past planned end" : "plan"} ›</button>}
+        showNext />
+      {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
+      {!hasRepReport && phase.phase_type === "deficit" && (
+        <div style={S.stBox}>
+          <div style={S.stHead}>Lifting during this cut?</div>
+          <div style={S.viNote}>RepReport plans your sets around it and shows whether your lifts are holding up, the clearest sign you're keeping muscle. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email.</div>
+        </div>
+      )}
+    </div>
+    {/* Everything RepReport tells Meal Prep, in its own card (owner's call, Nov 2026) */}
+    {(hasRepReport || goal || sv || breakNote) && (
+    <div style={S.rrCard}>
+      <div style={S.rrHead}>
+        <span style={S.rrKicker}>FROM REPREPORT</span>
+        <a href={REPREPORT_URL} target="_blank" rel="noopener noreferrer" style={S.rrLink}>open ›</a>
+      </div>
       {goal && (
-        <div style={{ marginTop: 8 }}>
-          <div style={{ ...S.viNote, color: text, marginTop: 0 }}>{goal.summary} <span style={{ color: dim }}>(your RepReport block)</span></div>
+        <div>
+          <div style={S.rrLine}>{goal.summary}</div>
           {goal.conflicts.map((c) => (
             <div key={c.id} style={{ ...S.viNote, color: "#ffb454" }}>▲ {c.text}</div>
           ))}
         </div>
       )}
-      {(() => {
-        const breakNote = dietBreakNote({ phase, today, deload, trainingGoal });
-        return breakNote && <div style={{ ...S.viNote, color: dim }}>{breakNote}</div>;
-      })()}
-
-      {nudge && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 13 }}>
-          <button style={{ ...S.pcLink, flex: 1, textAlign: "left", padding: 0 }} onClick={onOpenMonth}>Planning a bulk or cut next? Set it up on the calendar ›</button>
-          <button style={{ background: "none", border: "none", color: dim, cursor: "pointer", fontSize: 14, padding: 0 }} onClick={onDismissNudge} aria-label="dismiss">✕</button>
-        </div>
-      )}
+      {breakNote && <div style={{ ...S.viNote, color: dim }}>{breakNote}</div>}
 
       {/* Training volume only means something with RepReport (owner's call, Nov 2026). */}
       {hasRepReport && (<>
@@ -4954,10 +5023,9 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
         </div>
       )}
       </>)}
-      {note && <div style={{ ...S.viNote, color: PHASE_COLORS[phase.phase_type] }}>{note}</div>}
       {sv && (
         <div style={S.stBox}>
-          <div style={S.stHead}>Strength (from RepReport)</div>
+          <div style={S.stHead}>Strength</div>
           <div style={S.viNote}>{sv.line}</div>
           {sv.message && (
             <div style={{ ...S.viNote, color: sv.level === "suggest" ? "#ffb454" : sv.level === "headsUp" ? text : dim }}>{sv.message}</div>
@@ -4981,16 +5049,12 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
           )}
         </div>
       )}
-      {!hasRepReport && phase.phase_type === "deficit" && (
-        <div style={S.stBox}>
-          <div style={S.stHead}>Lifting during this cut?</div>
-          <div style={S.viNote}>RepReport plans your sets around it and shows whether your lifts are holding up, the clearest sign you're keeping muscle. Sign in at <b style={{ color: accent }}>repreport.app</b> with this same email.</div>
-        </div>
-      )}
       {hasRepReport && trainingActive === false && (phase.phase_type === "deficit"
         ? <div style={{ ...S.viNote, color: text }}>No active RepReport block. Start one so your sets follow this cut and RepReport can check that your lifts hold up.</div>
         : <div style={S.viNote}>No active RepReport block — this applies when you start one.</div>)}
     </div>
+    )}
+    </>
   );
 }
 
@@ -5352,6 +5416,11 @@ function PhaseDayEditor({ day, dietPhases, presets, onEdit, trainingGoal = null,
         <label style={{ fontSize: 12, color: dim, width: 64 }}>starts</label>
         <input type="date" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} style={{ ...S.fInput, flex: 1 }} />
       </div>
+      {preset && (
+        <div style={{ ...S.calcHint, marginTop: -2, marginBottom: 10 }}>
+          {preset.phase_type === "maintenance" ? "The weight it holds" : "Your start weight"} is the average of 3+ weigh-ins around the start. {WEIGH_HOW}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
         <label style={{ fontSize: 12, color: dim, width: 64 }}>weeks</label>
         <input
@@ -7643,7 +7712,9 @@ const PHASE_HEADING_PX = 17;
 // where you are in it, how fast your weight is actually moving against the
 // goal in pounds, the weight you started from (or are holding) and where the
 // plan puts you, then calories. onReplan: offer the ways back when behind.
-function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null }) {
+function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, weightLb, hold = null, cal = null, calNote = null, onReplan = null, headerRight = null, showNext = false }) {
+  const nextPhase = (dietPhases || []).filter((r) => r.id !== dietPhase.id && r.start_date > dietPhase.start_date)
+    .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))[0] || null;
   const prog = phaseProgress(dietPhase, today);
   const heading = `${dietPhase.phase_name.toUpperCase()} · WEEK ${prog.week}${prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}`;
   const pace = paceReading(dietPhases, bwLog, today);
@@ -7692,7 +7763,12 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               <div style={S.pcWeek}>
                 {shortDate(dietPhase.start_date)} – {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : "open-ended"}
                 {prog.overrun ? " · past planned end" : ""}
+                {nextPhase ? ` · then ${nextPhase.phase_name}` : ""}
               </div>
+              {/* nothing planned after this phase: one line, always; "plan ›" above opens the calendar (owner's call, Nov 2026) */}
+              {showNext && !nextPhase && (
+                <div style={S.pcNext}>Next: nothing planned</div>
+              )}
 
               <div style={S.ptPaceBox}>
                 {actualPct != null ? (
@@ -7724,7 +7800,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {wts && wts.now != null && (
                 <div style={S.ptWeights}>
                   {[
-                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : "—", wts.start != null ? held.when : shortDate(anchorDate)],
+                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : wts.soFar != null ? `${wts.soFar.toFixed(1)}` : "—", wts.start != null ? `${held.when}${wts.provisional ? " · provisional" : ""}` : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate)],
                     ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
                     maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
                   ].filter(Boolean).map(([lab, n, sub]) => (
@@ -7739,11 +7815,17 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {wts?.now != null && (held.note || wts.start == null) && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
                   {wts.start == null
-                    ? wts.startKind === "after-gap"
-                      ? "Back after 4+ weeks without weigh-ins: maintenance will hold your first full week back (3 weigh-ins in 7 days)."
-                      : `No weigh-ins around ${shortDate(anchorDate)}: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week of weigh-ins (3 in 7 days).`
+                    ? `${wts.startKind === "settling"
+                      ? `${maint ? "The weight to hold" : "Your start"} is the average of 3 weigh-ins around ${shortDate(anchorDate)}. ${wts.count ? `You have ${wts.count}: weigh in on ${3 - wts.count} more morning${3 - wts.count > 1 ? "s" : ""}` : "Weigh in on 3 mornings"} by ${shortDate(wts.needBy)}.`
+                      : wts.startKind === "after-gap"
+                        ? `Back after 4+ weeks without weigh-ins: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week back.`
+                        : `Fewer than 3 weigh-ins around ${shortDate(anchorDate)}: ${maint ? "maintenance will hold" : "the plan will start from"} your first full week of weigh-ins.`
+                      } ${wts.startKind === "settling" ? "" : "That's 3 mornings within 7 days. "}${WEIGH_HOW}`
                     : `${maint ? "Holding" : "Starting from"} ${held.note}.`}
                 </div>
+              )}
+              {!maint && wts?.now != null && wts.start != null && settleNote(wts, dietPhase, today) && (
+                <div style={{ fontSize: 12, marginTop: 6, color: dim }}>{settleNote(wts, dietPhase, today)}</div>
               )}
               {wts?.change != null && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
@@ -8644,6 +8726,7 @@ const line = "#2a3133";
 const text = "#e8efe9";
 const dim = "#7d8a85";
 const accent = "#46e6a0";
+const RR_AMBER = "#fbbf24"; // RepReport's accent
 
 const S = {
   app: {
@@ -8734,6 +8817,16 @@ const S = {
     padding: 14, marginBottom: 14, color: text, fontFamily: "inherit",
   },
   pcEmpty: { color: dim, fontSize: 13, cursor: "pointer" },
+  pcNext: { color: dim, fontSize: 12, marginTop: 6 },
+  // RepReport's card under the phase card: its amber, its mono label
+  rrCard: {
+    display: "block", width: "100%", boxSizing: "border-box", background: panel, border: `1px solid ${line}`,
+    borderLeft: `4px solid ${RR_AMBER}`, borderRadius: 12, padding: 14, marginBottom: 14, color: text,
+  },
+  rrHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  rrKicker: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, fontSize: 10, letterSpacing: 2, color: RR_AMBER },
+  rrLink: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11, color: dim, textDecoration: "none" },
+  rrLine: { fontSize: 13, lineHeight: 1.45, color: text },
   pcTop: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 },
   pcName: { fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 16, letterSpacing: 0.5 },
   pcWeek: { color: dim, fontSize: 12, marginTop: 2 },
@@ -9335,7 +9428,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, settleNote, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
