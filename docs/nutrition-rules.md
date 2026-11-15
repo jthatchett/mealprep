@@ -6,6 +6,17 @@ Source of truth: `src/App.jsx`. When a rule here and the code disagree, the code
 
 ---
 
+## What the app is built to do
+
+Four ideas sit behind the rules below. They are the owner's, set through decisions made Oct–Nov 2026. A new rule or screen should fit them, and one that doesn't needs the owner's say-so first.
+
+1. **It reacts to what you actually did, not to a schedule or a deadline.** *Example:* your pace and maintenance come from your own weigh-ins and log, not from a calendar or the calculator's guess, as soon as there is enough data.
+2. **It works things out itself instead of asking you.** *Example:* with no weigh-ins around a phase's start, the app picks up your first full week of weigh-ins; lifting days are read from RepReport when a block is running.
+3. **It suggests; it never blocks you or overwrites what you entered.** *Example:* any phase can be edited or started at any time; a rate past the research range gets a warning, and a check-in offers Use, Edit or Keep.
+4. **Only the information doing the most work stays on screen.** *Example:* the phase card shows pounds per week and calories against maintenance; the 2-week and 3-week figures behind them stay off the card.
+
+---
+
 ## How sure we are about each rule
 
 Every rule below carries one of three tags.
