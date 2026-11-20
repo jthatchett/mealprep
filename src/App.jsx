@@ -4468,11 +4468,30 @@ function AutoCheckinNotice({ c, phases = [], onReason }) {
   const reasons = checkinReasons(ck, hold);
   // stayed under two weeks running: make it the plan
   const lastWeek = (c.last?.chosen?.reason || "").startsWith("cant-eat");
+  // the change as the first thing you see: old (struck), new (big), and a
+  // chip with the difference, green up / amber down (owner's pick, Nov 2026)
+  const diff = Math.round(now) - Math.round(was);
+  const shiftCol = diff < 0 ? "#ffb454" : accent;
   const lead = (
-    <div style={{ ...S.ciLine, fontSize: 15, fontWeight: 700, marginTop: 6 }}>
-      {was === now ? `Calories stay at ${fmt(now)}` : `Calories ${fmt(was)} → ${fmt(now)}`}
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        {diff !== 0 && (
+          <>
+            <span style={{ ...S.iwBig, fontSize: 20, color: dim, textDecoration: "line-through", textDecorationColor: line }}>{fmt(was)}</span>
+            <span style={{ color: dim, fontSize: 18 }}>→</span>
+          </>
+        )}
+        <span style={{ ...S.iwBig, fontSize: 32, color: diff === 0 ? text : shiftCol }}>{fmt(now)}</span>
+        <span style={{ color: dim, fontSize: 13 }}>kcal{diff === 0 ? " · no change" : ""}</span>
+      </div>
+      {diff !== 0 && (
+        <span style={{ ...S.iwChip, display: "inline-block", marginTop: 4, color: shiftCol, background: diff < 0 ? "rgba(255,180,84,0.12)" : "rgba(70,230,160,0.12)" }}>
+          {diff < 0 ? "▼ −" : "▲ +"}{fmt(Math.abs(diff))} a day
+        </span>
+      )}
     </div>
   );
+  const holdsAt = hold?.anchor ?? c.weightLb;
   return (
     <div style={S.ciCard}>
       <div style={S.ciKicker}>WEEKLY CHECK-IN</div>
@@ -4495,7 +4514,8 @@ function AutoCheckinNotice({ c, phases = [], onReason }) {
             {/* the first estimate from their data replaces the calculator's: say so once */}
             {c.firstData && c.prior != null && Math.round(est - c.prior) !== 0
               ? `Your real maintenance is ${fmt(est)} calories. That's ${fmt(Math.abs(est - c.prior))} ${est > c.prior ? "more" : "less"} than the starting estimate. Each weekly check-in fine-tunes it from your latest logging and weigh-ins.`
-              : `Your maintenance from the last 3 weeks of logging and weigh-ins is ${fmt(est)} kcal.`}
+              : holdsAt ? <><b style={{ color: text, fontWeight: 600 }}>{fmt(now)} kcal</b> holds you at <b style={{ color: text, fontWeight: 600 }}>{Number(holdsAt).toFixed(1)} {WEIGHT_UNIT}</b>.</>
+              : `${fmt(now)} kcal is your maintenance.`}
           </div>
           {open === "reasons" && (
             <div style={{ marginTop: 10 }}>
@@ -7749,6 +7769,13 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   const anchorDate = dietPhase.phase_type === "maintenance" ? hold?.anchorDate || maintenanceAnchorDate(dietPhases, dietPhase) : planAnchorDate(dietPhase, followed);
   const wts = phaseWeights(dietPhase, bwLog, today, anchorDate);
   const held = holdSource(wts, anchorDate);
+  // maintenance: no weekly rate. Near zero, a 2-week rate is mostly water (it
+  // read -0.9 then +1.1 lb/week three days apart while the weekly averages
+  // moved 0.4 lb). The headline says whether you're where you should be, on
+  // the same 1% line that starts a catch-up (owner's choice, Nov 2026).
+  const maintDrift = maint && wts?.change != null
+    ? (hold?.ratePct || Math.abs((wts.change / wts.start) * 100) > HOLD_TRIGGER_PCT ? (wts.change > 0 ? "up" : "down") : "steady")
+    : null;
   return (
     <>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
@@ -7771,7 +7798,22 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               )}
 
               <div style={S.ptPaceBox}>
-                {actualPct != null ? (
+                {maint ? (
+                  <>
+                    <div style={S.pcKicker}>{maintDrift ? "YOUR WEIGHT" : "GOAL"}</div>
+                    {maintDrift ? (
+                      <div style={S.ptPaceBig}>
+                        <span style={{ color: maintDrift === "steady" ? accent : "#ffb454" }}>{maintDrift === "steady" ? "●" : "▲"}</span>{" "}
+                        {maintDrift === "steady" ? "Holding steady" : `Drifting ${maintDrift}`}
+                      </div>
+                    ) : (
+                      <>
+                        <div style={S.ptPaceBig}>Hold your weight</div>
+                        {wts?.now == null && <div style={{ ...S.pcStatSub, color: dim, fontWeight: 400 }}>Weigh in to see how you're holding. {WEIGH_HOW}</div>}
+                      </>
+                    )}
+                  </>
+                ) : actualPct != null ? (
                   <>
                     <div style={S.pcKicker}>YOUR WEIGHT, LAST {monthly ? "4" : "2"} WEEKS</div>
                     <div style={S.ptPaceBig}>

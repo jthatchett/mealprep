@@ -71,12 +71,26 @@ describe('a maintenance check-in done for you', () => {
   });
   it('says what changed and why, with OK and "Something off?"', () => {
     expect(text(React.createElement(AutoCheckinNotice, { c: c(), onReason: () => {} })))
-      .toBe('WEEKLY CHECK-IN Calories 2,500 → 2,681 Your maintenance from the last 3 weeks of logging and weigh-ins is 2,681 kcal. OK Something off?');
+      .toBe('WEEKLY CHECK-IN 2,500 → 2,681 kcal ▲ +181 a day 2,681 kcal holds you at 176.5 lb . OK Something off?');
+  });
+  it('names the weight held, not just the current one, and shows a drop in amber', () => {
+    const down = c({ anchor: 177.2, ratePct: 0 });
+    down.thisWeek = { ...down.thisWeek, estimate: 2380, chosen: { ...down.thisWeek.chosen, cal: 2380 } };
+    const html = renderToStaticMarkup(React.createElement(AutoCheckinNotice, { c: down, onReason: () => {} }));
+    expect(text(React.createElement(AutoCheckinNotice, { c: down, onReason: () => {} })))
+      .toBe('WEEKLY CHECK-IN 2,500 → 2,380 kcal ▼ −120 a day 2,380 kcal holds you at 177.2 lb . OK Something off?');
+    expect(html).toContain('#ffb454');
+  });
+  it('no change: just the number', () => {
+    const same = c();
+    same.thisWeek = { ...same.thisWeek, estimate: 2500, chosen: { ...same.thisWeek.chosen, cal: 2500 } };
+    expect(text(React.createElement(AutoCheckinNotice, { c: same, onReason: () => {} })))
+      .toBe('WEEKLY CHECK-IN 2,500 kcal · no change 2,500 kcal holds you at 176.5 lb . OK Something off?');
   });
   it("the first one from their data says it replaced the starting estimate, and what that means from now on", () => {
     const first = { ...c(), firstData: true, prior: 2500, hold: { ratePct: 0 } };
     expect(text(React.createElement(AutoCheckinNotice, { c: first, onReason: () => {} })))
-      .toBe("WEEKLY CHECK-IN Calories 2,500 → 2,681 Your real maintenance is 2,681 calories. That's 181 more than the starting estimate. Each weekly check-in fine-tunes it from your latest logging and weigh-ins. OK Something off?");
+      .toBe("WEEKLY CHECK-IN 2,500 → 2,681 kcal ▲ +181 a day Your real maintenance is 2,681 calories. That's 181 more than the starting estimate. Each weekly check-in fine-tunes it from your latest logging and weigh-ins. OK Something off?");
   });
   it('later weeks lead with what is left', () => {
     const t = text(React.createElement(AutoCheckinNotice, { c: c({ ratePct: 0.49, anchor: 180, gapLb: -3.5 }), onReason: () => {} }));

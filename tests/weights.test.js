@@ -56,13 +56,15 @@ describe('the maintenance card: noise vs drift', async () => {
         week: null, estimate: null, onOpenMonth: () => {}, hasRepReport: false, weightLb: 180 }));
     } finally { vi.useRealTimers(); }
   };
-  it('a small loss inside the steady range reads as holding steady, once', () => {
+  it('a small loss inside the 1% range reads as holding steady, once, with no weekly rate', () => {
     const t = card(-0.1);
-    expect(t).toContain('Holding steady ● On target · goal: hold your weight');
-    expect(t).not.toMatch(/Losing 0\.\d lb/);
+    expect(t).toContain('YOUR WEIGHT ● Holding steady Holding');
+    expect(t).not.toMatch(/lb \/ week/);
     expect(t.match(/Holding steady/g)).toHaveLength(1);
   });
-  it('a real drift still shows, in pounds', () => {
-    expect(card(-0.4)).toMatch(/Losing 0\.7 lb \/ week ▲ Drifting down/);
+  it('past the 1% line it says which way, and the pounds sit in the Holding / Now row', () => {
+    const t = card(-0.4);
+    expect(t).toContain('YOUR WEIGHT ▲ Drifting down Holding');
+    expect(t).not.toMatch(/lb \/ week/);
   });
 });
