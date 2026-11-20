@@ -32,10 +32,17 @@ describe('the mirror on a bulk, and maintenance either way', () => {
     expect(intakeWarning({ type: 'surplus', intake: { days: 7, ate: 3010, target: 2710 }, actualPct: 1.9, goalPct: 1 })).toEqual({ under: false, kcal: 300 });
     expect(intakeWarning({ type: 'surplus', intake: { days: 7, ate: 3010, target: 2710 }, actualPct: 1.2, goalPct: 1 })).toBe(null);
   });
-  it('maintenance: under and losing past the steady band, or over and gaining', () => {
-    expect(intakeWarning({ type: 'maintenance', intake: { days: 7, ate: 2200, target: 2500 }, actualPct: -0.35, goalPct: 0 })).toEqual({ under: true, kcal: 300 });
-    expect(intakeWarning({ type: 'maintenance', intake: { days: 7, ate: 2800, target: 2500 }, actualPct: 0.35, goalPct: 0 })).toEqual({ under: false, kcal: 300 });
-    expect(intakeWarning({ type: 'maintenance', intake: { days: 7, ate: 2200, target: 2500 }, actualPct: -0.2, goalPct: 0 })).toBe(null);
+  it('maintenance: under and more than 1% below the weight it holds, or over and more than 1% above, whatever the 2-week rate says', () => {
+    const m = (ate, hold, actualPct = 0) => intakeWarning({ type: 'maintenance', intake: { days: 7, ate, target: 2500 }, actualPct, goalPct: 0, hold });
+    expect(m(2200, { gapPct: -1.2, gapLb: -2.0, ratePct: 0 })).toEqual({ under: true, kcal: 300 });
+    expect(m(2800, { gapPct: 1.2, gapLb: 2.0, ratePct: 0 })).toEqual({ under: false, kcal: 300 });
+    // the Nov 2026 case: +1.1 lb/week on the 2-week line, 0.6 lb over the hold: no warning
+    expect(m(2800, { gapPct: 0.37, gapLb: 0.6, ratePct: 0 }, 0.67)).toBe(null);
+    // a catch-up still running counts as drifting even once inside 1%
+    expect(m(2200, { gapPct: -0.6, gapLb: -1.0, ratePct: 0.2 })).toEqual({ under: true, kcal: 300 });
+    // under-eating while above the hold isn't the scale agreeing
+    expect(m(2200, { gapPct: 1.2, gapLb: 2.0, ratePct: 0 })).toBe(null);
+    expect(m(2200, null, -0.5)).toBe(null);
   });
 });
 
@@ -71,6 +78,22 @@ describe('what they see', () => {
       planStore: null, targetHistory: [], onReplan: async () => {},
     })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     expect(html).toMatch(/^▲ EATING UNDER TARGET LAST 7 DAYS YOU ATE 1,750 kcal \/ day −300 vs 2,050 target LOSING 1\.\d lb \/ week 0\.\d faster than your 0\.\d goal Losing faster than your goal costs muscle\. Got it$/);
+  });
+});
+
+describe('what they see at maintenance', () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12)); });
+  afterEach(() => vi.useRealTimers());
+  it('how far from the weight it holds, not a weekly rate', () => {
+    const iso = (n) => { const d = new Date(2026, 10, 10); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+    const row = { id: 'm', phase_id: 'phase-maintenance', phase_type: 'maintenance', phase_name: 'Maintenance', start_date: iso(-70), end_date: null, planned_end_date: null, target_rate_pct: 0 };
+    const intakeByDate = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [iso(-1 - i), 1500]));
+    const html = renderToStaticMarkup(React.createElement(IntakeWarning, {
+      c: { today: iso(0), weekStart: iso(-1), intakeByDate, statusByDate: {}, hold: { anchor: 162.2, gapLb: -2.0, gapPct: -1.23, ratePct: 0 } },
+      phase: row, presets: presets(), dietPhases: [row], bwLog: [], planStore: null, targetHistory: [], onReplan: async () => {},
+    })).replace(/<!-- -->/g, '').replace(/&#x27;/g, "'").replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    expect(html).toMatch(/BELOW 162\.2 2\.0 lb Drifting down goal: hold steady/);
+    expect(html).not.toMatch(/lb \/ week/);
   });
 });
 

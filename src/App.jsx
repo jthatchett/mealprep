@@ -1924,13 +1924,20 @@ function intakeVsTarget({ today, intakeByDate, statusByDate, presets, targetHist
 }
 // type: the phase type; actualPct / goalPct: the 2-week pace and the goal,
 // in the card's units (%/week; a bulk's %/month). null when nothing to say.
-function intakeWarning({ type, intake, actualPct, goalPct }) {
-  if (!intake || actualPct == null) return null;
+// Maintenance judges the scale by distance from the weight it holds, on the
+// same 1% line as the phase card (hold: maintenanceHold), not the 2-week
+// rate, so the two can't disagree (owner's choice, Nov 2026).
+function maintDrifting(hold) {
+  if (!hold || hold.gapPct == null) return false;
+  return !!hold.ratePct || Math.abs(hold.gapPct) > HOLD_TRIGGER_PCT;
+}
+function intakeWarning({ type, intake, actualPct, goalPct, hold = null }) {
+  if (!intake || (type !== "maintenance" && actualPct == null)) return null;
   const diff = intake.ate - intake.target;
   if (Math.abs(diff) < INTAKE_WARN_KCAL) return null;
   const under = diff < 0;
   let faster;
-  if (type === "maintenance") faster = under ? actualPct < -0.25 : actualPct > 0.25;
+  if (type === "maintenance") faster = maintDrifting(hold) && (under ? hold.gapPct < 0 : hold.gapPct > 0);
   else if (type === "deficit") faster = under && actualPct < goalPct - 0.2;
   else if (type === "surplus") faster = !under && actualPct > goalPct + 0.25;
   if (!faster) return null;
@@ -4358,17 +4365,17 @@ function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, target
   const [seen, setSeen] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch { return false; } });
   if (seen || !phase) return null;
   const monthly = rateIsMonthly(phase.phase_type);
+  const maint = phase.phase_type === "maintenance";
   const pace = paceReading(dietPhases, bwLog, today);
-  if (!pace.ready) return null;
+  if (!pace.ready && !maint) return null;
   const toUnits = (wk) => wk * (monthly ? WEEKS_PER_MONTH : 1);
-  const goalPct = phase.phase_type === "maintenance" ? 0 : toUnits(phaseRatePct(phase));
-  const actualPct = toUnits(pace.pctPerWeek);
+  const goalPct = maint ? 0 : toUnits(phaseRatePct(phase));
+  const actualPct = pace.ready ? toUnits(pace.pctPerWeek) : null;
   const intake = intakeVsTarget({ today, intakeByDate: c.intakeByDate, statusByDate: c.statusByDate, presets, targetHistory, dietPhases, planStore });
-  const w = intakeWarning({ type: phase.phase_type, intake, actualPct, goalPct });
+  const w = intakeWarning({ type: phase.phase_type, intake, actualPct, goalPct, hold: c.hold });
   if (!w) return null;
   const per = monthly ? "month" : "week";
   const lb = (pct) => Math.abs((pct / 100) * pace.avg).toFixed(1);
-  const maint = phase.phase_type === "maintenance";
   const followed = (presets || []).find((p) => p.id === phase.phase_id) || null;
   const plan = planStatus(phase, followed, bwLog, today);
   const close = () => { setSeen(true); try { localStorage.setItem(key, "1"); } catch { /* private mode */ } };
@@ -4394,9 +4401,10 @@ function IntakeWarning({ c, phase, presets, dietPhases, bwLog, planStore, target
       <div style={S.iwTiles}>
         {tile("YOU ATE", fmtK(intake.ate), "kcal / day", `${w.under ? "−" : "+"}${w.kcal}`, `vs ${fmtK(intake.target)} ${maint ? "maintenance" : "target"}`)}
         {/* said in words: a "+0.5" beside a loss read as gaining */}
-        {tile(w.under ? "LOSING" : "GAINING", lb(actualPct), `lb / ${per}`,
-          maint ? (w.under ? "Drifting down" : "Drifting up") : `${lbDiff.toFixed(1)} faster`,
-          maint ? "goal: hold steady" : `than your ${lb(goalPct)} goal`)}
+        {maint
+          ? tile(`${w.under ? "BELOW" : "ABOVE"} ${c.hold.anchor.toFixed(1)}`, Math.abs(c.hold.gapLb).toFixed(1), WEIGHT_UNIT,
+            w.under ? "Drifting down" : "Drifting up", "goal: hold steady")
+          : tile(w.under ? "LOSING" : "GAINING", lb(actualPct), `lb / ${per}`, `${lbDiff.toFixed(1)} faster`, `than your ${lb(goalPct)} goal`)}
       </div>
       <div style={{ fontSize: 14, fontWeight: 700, marginTop: 12 }}>
         {w.under ? "Losing faster than your goal costs muscle." : "Gaining faster than your goal mostly adds fat."}
