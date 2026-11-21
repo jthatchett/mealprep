@@ -2669,7 +2669,7 @@ export default function App() {
   const saveChainRef = useRef(Promise.resolve());
   const [dietPhases, setDietPhases] = useState([]);  // every diet_phases row (history + planned)
   const dietPhase = phaseOnDate(dietPhases, todayISO()); // the phase in effect today
-  const [bwLog, setBwLog] = useState([]);             // last 14 days of weigh-ins, oldest first
+  const [bwLog, setBwLog] = useState([]);             // every weigh-in, oldest first
   const [training, setTraining] = useState(null);     // RepReport block status (sbLoadTrainingStatus); null = unknown/none
   const [strengthAnswer, setStrengthAnswer] = useState(null); // this session's answer to the strength suggestion (see strengthChoice)
   const [intake, setIntake] = useState({});           // food log rows by date (loaded on demand)
@@ -3318,14 +3318,18 @@ export default function App() {
      protein total, so it's left out. RepReport shows it, and adds it to its
      lifts-down note when under 80% of target; it never changes training. */
   const proteinStatus = useMemo(() => {
-    if (!coaching || !store || rangeProtein == null) return null;
-    const proteinByDate = { ...rangeProtein };
+    if (!coaching || !store) return null;
+    const proteinByDate = { ...(rangeProtein || {}) };
     for (const [d, rows] of Object.entries(intake)) proteinByDate[d] = dayProtein(rows);
-    return buildProteinStatus({
-      today: coaching.today, intakeByDate: coaching.intakeByDate, statusByDate: coaching.statusByDate, proteinByDate,
-      presets: store.phases || [], targetHistory, dietPhases, planStore: store.week,
-    });
-  }, [coaching, store, rangeProtein, intake, targetHistory, dietPhases]);
+    return {
+      ...buildProteinStatus({
+        today: coaching.today, intakeByDate: coaching.intakeByDate, statusByDate: coaching.statusByDate, proteinByDate,
+        presets: store.phases || [], targetHistory, dietPhases, planStore: store.week,
+      }),
+      // the phase card's weight verdict, for RepReport's "From Meal Prep" box
+      weight: weightStatus({ dietPhases, bwLog, today: coaching.today, followed: coaching.followed, hold: coaching.hold }),
+    };
+  }, [coaching, store, rangeProtein, intake, targetHistory, dietPhases, bwLog]);
   const savedStatusRef = useRef(null);
   useEffect(() => {
     if (!session || !proteinStatus) return;
@@ -7289,6 +7293,64 @@ function SetupWhatsNext({ phaseType, onContinue }) {
 /* ---------- onboarding: later moments ---------- */
 // The pace the phase card shows today, or { ready: false }. Same trend and
 // waiting rule as the card (paceStartsOn).
+// Until there's a pace: when it will show, or the weigh-ins still needed.
+// null once the pace is ready. The phase card and RepReport (weightStatus)
+// say the same words.
+function paceWaitingText(rows, phase, bwLog, today, pace = paceReading(rows, bwLog, today)) {
+  const isMonthly = rateIsMonthly(phase.phase_type);
+  const paceFrom = paceStartsOn(rows, phase, isMonthly);
+  if (paceFrom && today < paceFrom) return `Your actual pace shows from ${shortDate(paceFrom)} (the first weeks after a change are mostly water).`;
+  if (pace.ready) return null;
+  const t = isMonthly ? monthlyWeightTrend(bwLog, today) : weightTrend(bwLog, today);
+  const now = Math.min(t.recentCount ?? 0, TREND_MIN_WEIGHINS);
+  const before = Math.min((isMonthly ? t.oldCount : t.priorCount) ?? 0, TREND_MIN_WEIGHINS);
+  const more = TREND_MIN_WEIGHINS - now;
+  return before >= TREND_MIN_WEIGHINS && more > 0
+    ? `Weigh in ${more} more time${more === 1 ? "" : "s"} this week to see your pace.`
+    : `Your pace shows once you have ${isMonthly ? "4+ weigh-ins this week and 4 weeks ago" : "2 weeks with 4+ weigh-ins each"} (${now}/${TREND_MIN_WEIGHINS} this week).`;
+}
+
+// The weight verdict RepReport shows, word for word, in its "From Meal Prep"
+// box: the phase card's own (owner's call, Nov 2026). level: ok / warn /
+// waiting; label: the verdict; rate: what the scale is doing; goal: the goal.
+// Maintenance judges distance from the weight it holds (the 1% line), with
+// no weekly rate, as the card does.
+// Example, maintenance holding 162.2, now 162.7: { level: "ok", label:
+// "Holding steady", rate: "0.5 lb over 162.2", goal: "hold your weight" }.
+function weightStatus({ dietPhases, bwLog, today, followed = null, hold = null }) {
+  const phase = phaseOnDate(dietPhases, today);
+  if (!phase) return null;
+  const base = { asOf: today, phase: phase.phase_type };
+  if (phase.phase_type === "maintenance") {
+    const goal = "hold your weight";
+    const anchorDate = hold?.anchorDate || maintenanceAnchorDate(dietPhases, phase);
+    const w = phaseWeights(phase, bwLog, today, anchorDate);
+    if (w?.change == null) return { ...base, level: "waiting", label: "Hold your weight", goal, waitingText: "Weigh in to see how you're holding." };
+    const drift = hold?.ratePct || Math.abs((w.change / w.start) * 100) > HOLD_TRIGGER_PCT ? (w.change > 0 ? "up" : "down") : "steady";
+    const off = Math.abs(w.change);
+    return {
+      ...base, level: drift === "steady" ? "ok" : "warn", label: drift === "steady" ? "Holding steady" : `Drifting ${drift}`, goal,
+      rate: off < 0.05 ? `right at ${w.start.toFixed(1)}` : `${off.toFixed(1)} ${WEIGHT_UNIT} ${w.change > 0 ? "over" : "under"} ${w.start.toFixed(1)}`,
+    };
+  }
+  const monthly = rateIsMonthly(phase.phase_type);
+  const per = monthly ? "month" : "wk";
+  const toUnits = (wk) => wk * (monthly ? WEEKS_PER_MONTH : 1);
+  const goalPct = toUnits(phaseRatePct(phase));
+  const pace = paceReading(dietPhases, bwLog, today);
+  const weight = pace.ready ? pace.avg : (bwLog || []).filter((r) => r.date <= today && Number(r.weight) > 0).map((r) => Number(r.weight)).pop() ?? null;
+  const lb = (pct) => (weight ? Math.abs((pct / 100) * weight) : null);
+  const goal = lb(goalPct) != null ? `${lb(goalPct).toFixed(1)} ${WEIGHT_UNIT}/${per} (${Math.abs(goalPct).toFixed(2)}%)` : `${Math.abs(goalPct).toFixed(2)}%/${per}`;
+  const waitingText = paceWaitingText(dietPhases, phase, bwLog, today, pace);
+  if (!pace.ready || waitingText) return { ...base, level: "waiting", label: `${goalPct < 0 ? "Lose" : "Gain"} ${goal}`, goal, waitingText };
+  const actualPct = toUnits(pace.pctPerWeek);
+  const verdict = behindVerdict(paceVerdict(phase.phase_type, actualPct, goalPct), planStatus(phase, followed, bwLog, today));
+  return {
+    ...base, level: verdict?.ok ? "ok" : "warn", label: verdict?.text || "", goal,
+    rate: Math.abs(actualPct) < 0.005 || lb(actualPct) < 0.05 ? "holding steady" : `${actualPct < 0 ? "losing" : "gaining"} ${lb(actualPct).toFixed(1)} ${WEIGHT_UNIT}/${per}`,
+  };
+}
+
 function paceReading(rows, bwLog, today) {
   const phase = phaseOnDate(rows, today);
   if (!phase) return { ready: false };
@@ -7746,21 +7808,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   const prog = phaseProgress(dietPhase, today);
   const heading = `${dietPhase.phase_name.toUpperCase()} · WEEK ${prog.week}${prog.plannedWeeks ? ` / ${prog.plannedWeeks}` : ""}`;
   const pace = paceReading(dietPhases, bwLog, today);
-  const paceFrom = paceStartsOn(dietPhases, dietPhase, rateIsMonthly(dietPhase.phase_type));
-  // until there's a pace: when it will show, or the weigh-ins still needed
-  let weighPrompt = null;
-  if (paceFrom && today < paceFrom) {
-    weighPrompt = `Your actual pace shows from ${shortDate(paceFrom)} (the first weeks after a change are mostly water).`;
-  } else if (!pace.ready) {
-    const isMonthly = rateIsMonthly(dietPhase.phase_type);
-    const t = isMonthly ? monthlyWeightTrend(bwLog, today) : weightTrend(bwLog, today);
-    const now = Math.min(t.recentCount ?? 0, TREND_MIN_WEIGHINS);
-    const before = Math.min((isMonthly ? t.oldCount : t.priorCount) ?? 0, TREND_MIN_WEIGHINS);
-    const more = TREND_MIN_WEIGHINS - now;
-    weighPrompt = before >= TREND_MIN_WEIGHINS && more > 0
-      ? `Weigh in ${more} more time${more === 1 ? "" : "s"} this week to see your pace.`
-      : `Your pace shows once you have ${isMonthly ? "4+ weigh-ins this week and 4 weeks ago" : "2 weeks with 4+ weigh-ins each"} (${now}/${TREND_MIN_WEIGHINS} this week).`;
-  }
+  const weighPrompt = paceWaitingText(dietPhases, dietPhase, bwLog, today, pace);
   const color = PHASE_COLORS[dietPhase.phase_type];
   const monthly = rateIsMonthly(dietPhase.phase_type);
   const per = monthly ? "month" : "week";
@@ -9478,7 +9526,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, settleNote, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, weightStatus, paceWaitingText, settleNote, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
