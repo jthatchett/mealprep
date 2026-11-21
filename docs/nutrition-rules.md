@@ -283,6 +283,12 @@ RepReport saves a small status with your training data:
 
 A day counts if it counts toward the maintenance estimate ([section 5](#5-maintenance-estimate-and-the-weekly-check-in)) and every food has its protein; a calories-only quick add leaves that day out. RepReport shows it in its diet box and on its "Sets −1" note when protein averaged under 80% of target; it needs 4 logged days and never changes training. Saving it doesn't touch your plan or foods, so it can't cause a "changed on another device" conflict. *(Owner's choice, Oct 2026)*
 
+**It also sends the phase card's weight verdict** (`weight`), so RepReport's "From Meal Prep" box says exactly what the phase card says *(owner's call, Nov 2026)*:
+- `level` (`ok`, `warn` or `waiting`), `label` (the verdict), `rate` (what the scale is doing), `goal`, `waitingText` (while waiting), `phase` and `asOf`.
+- *Maintenance* (no weekly rate, the 1% line): holding 162.2, at 163.0 → "Holding steady" · "0.8 lb over 162.2" · goal "hold your weight". Past 1% → "Drifting down" · "2.6 lb under 162.2".
+- *A cut:* "On pace" · "losing 0.8 lb/wk" · goal "0.8 lb/wk (0.50%)". Too few weigh-ins → waiting, with the card's own line ("Weigh in 2 more times this week to see your pace.").
+- It's sent even on days with no food logged, and it's added alongside the protein fields, so the summary's `version` stays 1.
+
 **A block counts as active** while it has sessions left. A finished block that hasn't been archived or replaced yet doesn't count.
 
 | In Meal Prep | Block active | No active block |
@@ -355,6 +361,7 @@ These live in both apps. A change to one must be made in the other:
 - the 18+ and terms consent, and account export and deletion
 - the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match, including the example's `beforeSets`/`afterSets`
 - the protein summary: Meal Prep computes it (`buildProteinStatus`) and saves it to `app_data.status` (`sbSaveStatus`); RepReport only displays it (`proteinSummary`); the field names in between must match
+- the weight verdict: Meal Prep computes it (`weightStatus`, the phase card's words, with `paceWaitingText`) and saves it in the same `app_data.status` as `weight`; RepReport only displays it; the field names in between must match
 - the goal check (`goalCheck`, `goalPhaseOf`, `goalPlanCheck`), wording included: RepReport writes the goal (`buildGoalStatus`), both apps run the same check on it
 - each phase's `target_rate_pct` (%/week): Meal Prep writes it (calendar, Phases tab, Slow button), RepReport reads it for a cut's planned pace and the goal line. A preset's default rate (`rate_pct`) lives only in Meal Prep's saved data, which RepReport never reads. Tests on both sides pin the effect of an edit (Meal Prep `tests/`, RepReport `tests/mealprep-rate-edit.test.js`).
 
