@@ -28,8 +28,8 @@ const text = (html) => html.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').repl
 describe('Phases tab', () => {
   it('the phase in effect: applied calories, its own rate, and why it differs from the calculation', () => {
     const t = text(render());
-    expect(t).toMatch(/CUT · WEEK 6 \/ 12 ACTIVE Oct 1 – Dec 23 · then Bulk GOAL/);
-    expect(t).not.toContain('CURRENT PHASE'); // no "weeks left"
+    expect(t).toMatch(/CUT · WEEK 6 \/ 12 ACTIVE Oct 1 – Dec 23 · then Bulk GOAL/); // no "weeks left"
+    expect(t).not.toContain('CURRENT PHASE');
     // no weigh-ins: the goal in pounds, and when the actual pace will show
     expect(t).toMatch(/GOAL Lose 0\.9 lb \/ week 0\.50% of bodyweight a week Your pace shows once you have 2 weeks with 4\+ weigh-ins each \(0\/4 this week\)\./);
     expect(t).toMatch(/2,250 kcal \/ day · 250 under your 2,500 maintenance Eating/); // same line as the Plan card
