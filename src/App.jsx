@@ -5024,7 +5024,7 @@ function PhaseCard({ dietPhases, bwLog, onOpenMonth, presets, week, estimate, ho
   return (
     <>
     <div style={{ ...S.pcCard, borderLeft: `4px solid ${color}` }}>
-      <div style={S.pcKicker}>CURRENT PHASE</div>
+      {/* no "CURRENT PHASE" label: the colored phase line already says it (owner, Nov 2026) */}
       <PhaseOverview phase={phase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followedPreset} weightLb={weightLb} hold={hold}
         cal={cals ? cals.avg : null}
         calNote={vsMaint == null ? null : calVsMaintenance(cals.avg, estimate.kcal)}
@@ -7735,14 +7735,16 @@ function Phases({ phases, setPhases, dietPhase, dietPhases, bwLog, targetHistory
       {/* the phase in effect: where you are in it, then how fast your weight is
           actually moving against the goal, in pounds (what people check first) */}
       <div style={{ ...S.ptCurrent, borderLeft: `4px solid ${dietPhase ? PHASE_COLORS[dietPhase.phase_type] : line}` }}>
-        <div style={S.pcTop}>
-          <div style={S.pcKicker}>CURRENT PHASE</div>
-          {dietPhase && <span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
-        </div>
+        {!dietPhase && (
+          <div style={S.pcTop}>
+            <div style={S.pcKicker}>CURRENT PHASE</div>
+          </div>
+        )}
         {dietPhase ? (() => {
           return (
             <>
               <PhaseOverview phase={dietPhase} dietPhases={dietPhases} bwLog={bwLog} today={today} followed={followed}
+                headerRight={<span style={{ ...S.ptBadge, color: accent, background: "rgba(70,230,160,0.12)" }}>ACTIVE</span>}
                 weightLb={weightLb} hold={coaching?.hold} cal={followed ? followed.target.cal : null}
                 calNote={followed && basis ? calVsMaintenance(followed.target.cal, basis.kcal) : null} />
               {activeView?.showGap && (
