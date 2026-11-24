@@ -266,6 +266,8 @@ For any calorie target:
 
 ## 7. How Meal Prep uses RepReport
 
+**Neither app leads.** The two apps are equals in everything they share: one goal in the same words in both, each showing its own half of the verdict first (RepReport its lifts, Meal Prep your weight), each half set where it's done (the block in RepReport, the phase in Meal Prep), and either app complete on its own. *(Owner's call, Nov 2026; plan in RepReport's `docs/proposals/shared-goal.md`)*
+
 RepReport saves a small status with your training data:
 - whether a block is **active**
 - its days per week
