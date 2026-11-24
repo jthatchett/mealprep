@@ -95,6 +95,7 @@ A first estimate of maintenance from a short profile. The weekly check-in correc
 - **Daily movement** outside the gym: × 1.3 (mostly sitting), 1.45 (some walking), 1.6 (on your feet), 1.75 (physical work). *(Coaching practice: standard activity factors, not measurements)*
 - **Lifting**, added on top: about 4 kcal per kg of bodyweight per session (an hour at ~5 METs), averaged over the week. *(Research-backed rate; the session length is the app's choice)*
   - With an active RepReport block, lifting days are filled in from it. Without one, you enter them (see [section 7](#7-how-meal-prep-uses-repreport)).
+- **How long you've been lifting** (optional: under a year, 1–3 years, 3+ years) is asked last. It doesn't change the estimate. It's saved on your account for RepReport, whose block setup builds every muscle evenly for someone under a year, and it's filled in "from RepReport" when you answered there first. RepReport's block setup also fills in its days a week from your lifting days here. *(Owner's call, Nov 2026)*
 
 From that maintenance, each target is built:
 - **Calories:** maintenance plus the phase's default rate (below).
@@ -361,6 +362,7 @@ These live in both apps. A change to one must be made in the other:
 - the weight-trend rule ([section 4](#4-weigh-ins-and-your-weight-trend))
 - the diet-phase effect on volume ceilings: the −20% cut and +10% bulk shares, the mini-cut cut, and how blocks chain
 - the 18+ and terms consent, and account export and deletion
+- facts shared on the account (`user_metadata`): `lifting_experience` (with `lifting_experience_app`, `lifting_experience_at`), written by either app's setup, and `profile.lift_days`, which RepReport reads as a prefill; the keys and values must match
 - the strength-during-a-cut reading: RepReport computes it (`computeCutStrength`) and Meal Prep only displays and acts on it (`strengthView`); the field names in between must match, including the example's `beforeSets`/`afterSets`
 - the protein summary: Meal Prep computes it (`buildProteinStatus`) and saves it to `app_data.status` (`sbSaveStatus`); RepReport only displays it (`proteinSummary`); the field names in between must match
 - the weight verdict: Meal Prep computes it (`weightStatus`, the phase card's words, with `paceWaitingText`) and saves it in the same `app_data.status` as `weight`; RepReport only displays it; the field names in between must match

@@ -111,6 +111,29 @@ async function sbUpdateUserMeta(session, fields, failMsg = "couldn't save") {
   return { ...sess, user: data };
 }
 
+// Facts shared with RepReport on the account (user_metadata), asked once in
+// whichever app's setup comes first (owner, Nov 2026; RepReport's
+// docs/proposals/setup-goal.md): lifting_experience ("under1" | "1to3" |
+// "3plus") with lifting_experience_app and _at. RepReport also reads
+// profile.lift_days as a prefill. Mirrors RepReport's src/supabase.js;
+// change both sides together. Read fresh: the other app may have written it.
+async function sbLoadUserMeta(session) {
+  const get = (s) => fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${s.access_token}` } });
+  let res = await get(session);
+  if (res.status === 401 || res.status === 403) {
+    const refreshed = await sbRefreshToken(session.refresh_token);
+    res = await get({ access_token: refreshed.access_token });
+  }
+  if (!res.ok) return null;
+  const user = await res.json();
+  return user?.user_metadata || null;
+}
+const LIFTING_EXPERIENCE = [
+  { key: "under1", label: "Under a year" },
+  { key: "1to3", label: "1–3 years" },
+  { key: "3plus", label: "3+ years" },
+];
+
 // Account export / deletion, shared with RepReport: the `account` Edge
 // Function resolves the user from their own token and only acts on them.
 // "export" returns everything in both apps; "delete" (confirm: "DELETE")
@@ -2618,13 +2641,14 @@ export default function App() {
     if (status) setTraining(status);
     setCalc({ training: status });
   };
-  const applyCalc = async (targets, profile) => {
+  const applyCalc = async (targets, profile, experience = null) => {
     setPhases((prev) => prev.map((p) => (targets[p.id] ? { ...p, target: targets[p.id], example: false } : p)));
     setCalc(null);
     setSavedProfile(profile);
     // kept on the account for next time; not via setSession, which would re-run the data loads
     try {
-      const next = await sbUpdateUserMeta(session, { profile });
+      const next = await sbUpdateUserMeta(session, { profile,
+        ...(experience ? { lifting_experience: experience, lifting_experience_app: "mealprep", lifting_experience_at: isoOf(new Date()) } : {}) });
       localStorage.setItem(SESSION_KEY, JSON.stringify({ access_token: next.access_token, refresh_token: next.refresh_token, user: next.user }));
     } catch { /* the targets are saved either way */ }
   };
@@ -3151,8 +3175,8 @@ export default function App() {
   useEffect(() => { if (ob && ob.tour && !ob.setup && !setup) setSetup({ step: "phase" }); }, [ob, setup]);
   const finishTour = () => { saveOb({ ...obRef.current, tour: true }); if (!obRef.current.setup) setSetup({ step: "phase" }); };
   // setup step 3 saves the targets, then starts the phase they picked from today
-  const applySetup = async (targets, profile) => {
-    await applyCalc(targets, profile);
+  const applySetup = async (targets, profile, experience = null) => {
+    await applyCalc(targets, profile, experience);
     try {
       const preset = presetForType(phases, setup.type);
       if (preset) { await sbSwitchDietPhase(session, preset, dietPhases, phases); await reloadDietPhases(); }
@@ -3763,7 +3787,7 @@ export default function App() {
       {ob && !ob.tour && <MealPrepTour training={training} onDone={finishTour} />}
       {ob && ob.tour && setup?.step === "phase" && <SetupPhaseChoice onContinue={(type) => setSetup({ step: "calc", type })} />}
       {ob && setup?.step === "calc" && (
-        <TargetsCalculator presets={phases} bwLog={bwLog} profile={savedProfile || session?.user?.user_metadata?.profile}
+        <TargetsCalculator presets={phases} bwLog={bwLog} profile={savedProfile || session?.user?.user_metadata?.profile} loadShared={() => sbLoadUserMeta(session)}
           training={training} setupType={setup.type} onApply={applySetup} onClose={() => {}} />
       )}
       {ob && setup?.step === "next" && <SetupWhatsNext phaseType={setup.type} onContinue={() => setSetup({ ...setup, step: "weigh" })} />}
@@ -3778,6 +3802,7 @@ export default function App() {
           presets={phases}
           bwLog={bwLog}
           profile={savedProfile || session?.user?.user_metadata?.profile}
+          loadShared={() => sbLoadUserMeta(session)}
           training={calc.training}
           onApply={applyCalc}
           onClose={() => setCalc(null)}
@@ -6835,7 +6860,7 @@ function TargetChanges({ rows }) {
 // setupType: during onboarding setup, the phase they picked ("maintenance",
 // "surplus" or "deficit"): no close button, and the results lead with that
 // phase's targets (owner's design, Nov 2026).
-function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose, setupType = null }) {
+function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose, setupType = null, loadShared = null }) {
   // Prefilled only from a block that's running: with none, lifting days are
   // left for you to enter rather than assumed from the last block.
   const liftDaysFromRR = training?.active ? training.daysPerWeek : null;
@@ -6847,6 +6872,23 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
     lift: pr.lift_days ?? liftDaysFromRR ?? "",
   });
   const [step, setStep] = useState("form");
+  // How long you've lifted: shared with RepReport, optional here.
+  const [exp, setExp] = useState(null);
+  const [expFrom, setExpFrom] = useState(null);
+  const expLoaded = useRef(null);
+  useEffect(() => {
+    let live = true;
+    Promise.resolve(loadShared ? loadShared() : null).then((meta) => {
+      if (!live || !meta) return;
+      expLoaded.current = meta.lifting_experience || null;
+      if (LIFTING_EXPERIENCE.some((o) => o.key === meta.lifting_experience)) {
+        setExp((prev) => prev ?? meta.lifting_experience);
+        if (meta.lifting_experience_app === "repreport") setExpFrom("RepReport");
+      }
+    }).catch(() => {});
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [chosen, setChosen] = useState(() => new Set(presets.filter((p) => isPhaseType(p.phase_type) || p.phase_type === "day").map((p) => p.id)));
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -6870,7 +6912,8 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
     setBusy(true);
     await onApply(
       Object.fromEntries([...chosen].filter((id) => proposed[id]).map((id) => [id, proposed[id]])),
-      { sex: f.sex, age: num(f.age), height_in: heightIn, weight_lb: num(f.weight), body_fat_pct: num(f.bf) || null, movement: f.movement, lift_days: num(f.lift) }
+      { sex: f.sex, age: num(f.age), height_in: heightIn, weight_lb: num(f.weight), body_fat_pct: num(f.bf) || null, movement: f.movement, lift_days: num(f.lift) },
+      exp && exp !== expLoaded.current ? exp : null
     );
     setBusy(false);
   };
@@ -6928,6 +6971,13 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
                 {training.lastDaysPerWeek ? ` (your last block was ${training.lastDaysPerWeek} days/week)` : ""}.
               </div>
             )}
+            <label style={S.fLabel}>How long have you been lifting consistently? (optional)</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              {LIFTING_EXPERIENCE.map((x) => (
+                <button key={x.key} style={{ ...opt(exp === x.key), padding: "8px 0" }} onClick={() => { setExp(x.key); setExpFrom(null); }}>{x.label}</button>
+              ))}
+            </div>
+            {expFrom && <div style={S.calcHint}>from {expFrom}</div>}
             {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 8 }}>{err}</div>}
             <button style={{ ...S.primaryBtn, width: "100%", marginTop: 14 }} onClick={next}>See my targets</button>
           </div>
@@ -9530,5 +9580,5 @@ export {
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
-  weightWeeks, WeightLog, WeightButton, Settings, upsertWeighIn, withoutWeighIn, parseWeighIn, weighInOps, weeksBack, sbLogBodyweight, sbDeleteBodyweight,
+  weightWeeks, WeightLog, WeightButton, Settings, TargetsCalculator, upsertWeighIn, withoutWeighIn, parseWeighIn, weighInOps, weeksBack, sbLogBodyweight, sbDeleteBodyweight,
 };
