@@ -7964,7 +7964,8 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {/* the evidence, one line under the verdict: now, from the start, to the goal */}
               {wts && wts.now != null && (() => {
                 const startWord = maint || anchorDate === dietPhase.start_date ? "start" : "re-planned start";
-                const when = wts.start != null ? `${held.when}${wts.provisional ? " · provisional" : ""}`
+                // the date once: the note under this line already names the week it holds
+                const when = wts.start != null ? (held.note ? (wts.provisional ? "provisional" : null) : `${held.when}${wts.provisional ? " · provisional" : ""}`)
                   : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate);
                 const diff = wts.start != null ? wts.now - wts.start : null;
                 const b = (t) => <b style={{ color: text, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{t}</b>;
@@ -7972,7 +7973,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                   <div style={S.pcEvidence}>
                     {b(`${wts.now.toFixed(1)} ${WEIGHT_UNIT}`)} now
                     {wts.start != null
-                      ? <> · {b(`${diff > 0.05 ? "+" : diff < -0.05 ? "−" : "±"}${Math.abs(diff).toFixed(1)}`)} from your {b(wts.start.toFixed(1))} {startWord} ({when})</>
+                      ? <> · {b(`${diff > 0.05 ? "+" : diff < -0.05 ? "−" : "±"}${Math.abs(diff).toFixed(1)}`)} from your {b(wts.start.toFixed(1))} {startWord}{when ? ` (${when})` : ""}</>
                       : <> · {startWord} {wts.startKind === "settling" ? `settling (${wts.count} of 3)` : `from your first full week of weigh-ins`}</>}
                     {!maint && <> · goal {wts.goalEnd != null ? b(wts.goalEnd.toFixed(1)) : "—"} {dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"}</>}
                   </div>
