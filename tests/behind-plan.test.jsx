@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { planStatus, behindOptions, behindVerdict, Phases, PhaseCard } from '../src/App.jsx';
+import { planStatus, behindOptions, behindText, weightStatus, Phases, PhaseCard } from '../src/App.jsx';
 import { presets } from './fixtures.js';
 
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -23,10 +23,9 @@ describe('behind plan', () => {
     expect(s.behindLb.toFixed(1)).toBe('1.8');
     expect(s.behind).toBe(true);
   });
-  it('the label keeps the 2-week verdict and adds the plan', () => {
-    const s = planStatus(cut, null, bw, TODAY);
-    expect(behindVerdict({ ok: true, text: 'On pace' }, s)).toEqual({ ok: false, text: 'On pace now · 1.8 lb behind plan' });
-    expect(behindVerdict({ ok: false, text: 'Losing slower than target' }, s).text).toBe('Losing slower than target · 1.8 lb behind plan');
+  it('the gap to the plan is its own line, apart from the 2-week pace', () => {
+    expect(behindText(planStatus(cut, null, bw, TODAY))).toBe('1.8 lb behind plan');
+    expect(behindText(planStatus(cut, null, log(42, -0.8), TODAY))).toBe(null);
   });
   it('within a week of the pace, or ahead, nothing changes', () => {
     expect(planStatus(cut, null, log(42, -0.42), TODAY).behind).toBe(false);
@@ -84,5 +83,26 @@ describe('where it shows', () => {
     }));
     expect(t).toMatch(/1\.8 lb behind plan/);
     expect(t).not.toContain('Get back on plan');
+  });
+});
+
+describe('pace and plan are told apart (owner, Nov 2026)', () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 8, 12)); });
+  afterEach(() => vi.useRealTimers());
+  const text = (el) => renderToStaticMarkup(el).replace(/<!-- -->/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  it('behind plan: the gap sits under the track beside its fix, never inside the pace verdict', () => {
+    const t = text(React.createElement(PhaseCard, { dietPhases: [cut], bwLog: bw, presets: presets(), week: null, estimate: null, onOpenMonth: () => {}, onReplan: async () => {}, hasRepReport: false }));
+    expect(t).not.toMatch(/On pace now/);
+    expect(t).toMatch(/now goal [A-Z][a-z]{2} \d+ ▲ 1\.8 lb behind plan · Get back on plan ›/);
+    expect(t).not.toMatch(/On plan you'd be/);
+  });
+});
+
+describe('what RepReport is sent', () => {
+  it('the pace verdict as the label, the gap to the plan as its own field', () => {
+    const s = weightStatus({ dietPhases: [cut], bwLog: bw, today: TODAY });
+    expect(s.label).not.toMatch(/behind/);
+    expect(s.behind).toBe('1.8 lb behind plan');
+    expect(weightStatus({ dietPhases: [cut], bwLog: log(42, -0.8), today: TODAY }).behind).toBeUndefined();
   });
 });

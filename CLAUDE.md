@@ -7,8 +7,10 @@ Nutrition app (React + Vite, single `src/App.jsx`, Supabase via plain `fetch`). 
 - RepReport's `docs/progression-rules.md`: the training side, including how diet phases shift training volume.
 
 ## Cross-app contract
+- **Neither app leads (owner's call, Nov 2026).** In every sync feature and shared screen, the two apps are equals: one goal in the same words in both, each app showing its own half of the verdict first and the other's second, each half set in the app where it's done, and either app complete on its own. See RepReport's `docs/proposals/shared-goal.md`.
 - Meal Prep reads RepReport's `training_data` row only through `data.status` (`active`, `daysPerWeek`, `lastDaysPerWeek`, `deload`, `strength`, `goal`), via `sbLoadTrainingStatus`; the phase card's `strengthView` turns `strength` into what you see, and `goalCheck` turns `goal` into the goal line. RepReport writes it in `buildTrainingStatus`. Change both sides together.
 - Meal Prep writes `app_data.status` for RepReport only (protein summary: `version`, `asOf`, `daysLogged`, `proteinAvg`, `proteinTarget`, from `buildProteinStatus`; and `weight`, the phase card's weight verdict, from `weightStatus`), saved by `sbSaveStatus` (that column only, never in `sbSaveAppData`); RepReport reads it in `sbLoadNutritionStatus`. Change both sides together.
+- **Facts about you are shared on the account** (Supabase `user_metadata`, like the 18+ consent), asked once in whichever app's setup comes first: `lifting_experience` (`under1` / `1to3` / `3plus`, with `lifting_experience_app` and `lifting_experience_at`), written by the calculator (`applyCalc`) and RepReport's block setup, read fresh with `sbLoadUserMeta`; RepReport also reads `profile.lift_days` as its days-a-week prefill. Change both sides together.
 - Logic duplicated in both apps must stay in step (listed in `docs/nutrition-rules.md`, "Logic shared with RepReport"): diet-phase resolution, the weight-trend rule, the diet-phase effect on volume ceilings, the goal check (`goalCheck`, `goalPlanCheck`), consent and account handling.
 
 ## Working conventions

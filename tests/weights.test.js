@@ -58,13 +58,13 @@ describe('the maintenance card: noise vs drift', async () => {
   };
   it('a small loss inside the 1% range reads as holding steady, once, with no weekly rate', () => {
     const t = card(-0.1);
-    expect(t).toContain('YOUR WEIGHT ● Holding steady Holding');
+    expect(t).toContain('● Weight holding steady 178.3 lb now · −1.6 from your 179.9 start (Sep 6)');
     expect(t).not.toMatch(/lb \/ week/);
-    expect(t.match(/Holding steady/g)).toHaveLength(1);
+    expect(t.match(/holding steady/gi)).toHaveLength(1);
   });
-  it('past the 1% line it says which way, and the pounds sit in the Holding / Now row', () => {
+  it('past the 1% line it says which way, and the pounds sit in the line under it', () => {
     const t = card(-0.4);
-    expect(t).toContain('YOUR WEIGHT ▲ Drifting down Holding');
+    expect(t).toContain('▲ Weight drifting down 173.2 lb now · −6.4 from your 179.6 start (Sep 6)');
     expect(t).not.toMatch(/lb \/ week/);
   });
 });
