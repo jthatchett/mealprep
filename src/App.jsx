@@ -4952,11 +4952,11 @@ function paceVerdict(type, actual, targetPct) {
   return { ok: false, text: actual <= 0 ? "Not gaining yet" : diff < 0 ? "Gaining slower than target" : "Gaining faster than target" };
 }
 
-// The 2-week verdict, with the plan as a whole: "On pace now · 1.8 lb behind plan"
-function behindVerdict(v, plan) {
-  if (!v || !plan?.behind) return v;
-  const lb = `${plan.behindLb.toFixed(1)} lb behind plan`;
-  return { ok: false, text: v.ok ? `On pace now · ${lb}` : `${v.text} · ${lb}` };
+// Where you are against the whole plan, kept apart from the 2-week pace (a
+// pace on target in amber read as a contradiction; owner, Nov 2026):
+// "1.8 lb behind plan", or null when not behind.
+function behindText(plan) {
+  return plan?.behind ? `${plan.behindLb.toFixed(1)} lb behind plan` : null;
 }
 
 function paceStartsOn(rows, phase, monthly) {
@@ -7409,9 +7409,10 @@ function weightStatus({ dietPhases, bwLog, today, followed = null, hold = null }
   const waitingText = paceWaitingText(dietPhases, phase, bwLog, today, pace);
   if (!pace.ready || waitingText) return { ...base, level: "waiting", label: `${goalPct < 0 ? "Lose" : "Gain"} ${goal}`, goal, waitingText };
   const actualPct = toUnits(pace.pctPerWeek);
-  const verdict = behindVerdict(paceVerdict(phase.phase_type, actualPct, goalPct), planStatus(phase, followed, bwLog, today));
+  const verdict = paceVerdict(phase.phase_type, actualPct, goalPct);
+  const behind = behindText(planStatus(phase, followed, bwLog, today));
   return {
-    ...base, level: verdict?.ok ? "ok" : "warn", label: verdict?.text || "", goal,
+    ...base, level: verdict?.ok ? "ok" : "warn", label: verdict?.text || "", goal, ...(behind ? { behind } : {}),
     rate: Math.abs(actualPct) < 0.005 || lb(actualPct) < 0.05 ? "holding steady" : `${actualPct < 0 ? "losing" : "gaining"} ${lb(actualPct).toFixed(1)} ${WEIGHT_UNIT}/${per}`,
   };
 }
@@ -7883,7 +7884,8 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   const lb = (pct) => (weight ? Math.abs((pct / 100) * weight) : null);
   const actualPct = pace.ready ? toUnits(pace.pctPerWeek) : null;
   const plan = planStatus(dietPhase, followed, bwLog, today);
-  const verdict = behindVerdict(paceVerdict(dietPhase.phase_type, actualPct, goalPct), plan);
+  const verdict = paceVerdict(dietPhase.phase_type, actualPct, goalPct);
+  const behind = behindText(plan);
   const maint = dietPhase.phase_type === "maintenance";
   const dir = (pct) => (pct < 0 ? "Losing" : pct > 0 ? "Gaining" : "Holding");
   // maintenance holds the weight it started at (after a cut or bulk, once the water settled)
@@ -7961,21 +7963,63 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                 )}
               </div>
 
-              {/* the evidence, one line under the verdict: now, from the start, to the goal */}
+              {/* the evidence under the verdict. Maintenance: one line, now and the
+                  weight it holds. Cuts and bulks: a track from start to goal with
+                  where you are now, and under it how far you've come, or, behind
+                  plan, the gap beside its fix (owner's design, Nov 2026). */}
               {wts && wts.now != null && (() => {
                 const startWord = maint || anchorDate === dietPhase.start_date ? "start" : "re-planned start";
-                // the date once: the note under this line already names the week it holds
+                // the date once: the note under this already names the week it holds
                 const when = wts.start != null ? (held.note ? (wts.provisional ? "provisional" : null) : `${held.when}${wts.provisional ? " · provisional" : ""}`)
-                  : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate);
-                const diff = wts.start != null ? wts.now - wts.start : null;
+                  : null;
                 const b = (t) => <b style={{ color: text, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{t}</b>;
+                const nowLb = `${wts.now.toFixed(1)} ${WEIGHT_UNIT}`;
+                if (wts.start == null) {
+                  return (
+                    <div style={S.pcEvidence}>
+                      {b(nowLb)} now · {startWord} {wts.startKind === "settling" ? `settling (${wts.count} of 3)` : "from your first full week of weigh-ins"}
+                    </div>
+                  );
+                }
+                const diff = wts.now - wts.start;
+                const sign = `${diff > 0.05 ? "+" : diff < -0.05 ? "−" : "±"}${Math.abs(diff).toFixed(1)}`;
+                if (maint || wts.goalEnd == null) {
+                  return (
+                    <div style={S.pcEvidence}>
+                      {b(nowLb)} now · {b(sign)} from your {b(wts.start.toFixed(1))} {startWord}{when ? ` (${when})` : ""}
+                    </div>
+                  );
+                }
+                const toward = goalPct < 0 ? -1 : 1; // a cut moves down, a bulk up
+                const moved = (wts.now - wts.start) * toward;
+                const total = (wts.goalEnd - wts.start) * toward;
+                const frac = total > 0 ? Math.max(0, Math.min(1, moved / total)) : 0;
+                const toGo = total - moved;
+                const progress = `${Math.abs(moved) < 0.05 ? "No change yet" : `${Math.abs(moved).toFixed(1)} ${WEIGHT_UNIT} ${(moved > 0) === (toward < 0) ? "down" : "up"}`} · ${toGo > 0.05 ? `${toGo.toFixed(1)} ${WEIGHT_UNIT} to go` : "goal reached"}`;
+                const small = { fontSize: 11, color: dim };
                 return (
-                  <div style={S.pcEvidence}>
-                    {b(`${wts.now.toFixed(1)} ${WEIGHT_UNIT}`)} now
-                    {wts.start != null
-                      ? <> · {b(`${diff > 0.05 ? "+" : diff < -0.05 ? "−" : "±"}${Math.abs(diff).toFixed(1)}`)} from your {b(wts.start.toFixed(1))} {startWord}{when ? ` (${when})` : ""}</>
-                      : <> · {startWord} {wts.startKind === "settling" ? `settling (${wts.count} of 3)` : `from your first full week of weigh-ins`}</>}
-                    {!maint && <> · goal {wts.goalEnd != null ? b(wts.goalEnd.toFixed(1)) : "—"} {dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"}</>}
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, fontVariantNumeric: "tabular-nums" }}>
+                      <span style={{ fontSize: 13, color: dim }}>{wts.start.toFixed(1)}</span>
+                      <div style={{ position: "relative", flex: 1, height: 6, borderRadius: 3, background: line }}>
+                        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${frac * 100}%`, borderRadius: 3, background: color }} />
+                        <div style={{ position: "absolute", top: "50%", left: `${frac * 100}%`, width: 12, height: 12, borderRadius: "50%", background: text, border: `2px solid ${color}`, transform: "translate(-50%, -50%)" }} />
+                      </div>
+                      <span style={{ fontSize: 13, color: dim }}>{wts.goalEnd.toFixed(1)}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
+                      <span style={small}>{startWord}{when ? ` ${when}` : ""}</span>
+                      <span style={{ fontSize: 13, color: dim }}>{b(nowLb)} now</span>
+                      <span style={small}>goal {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : ""}</span>
+                    </div>
+                    {behind ? (
+                      onReplan && followed
+                        ? <BehindPlan row={dietPhase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} onReplan={onReplan}
+                            lead={<span style={{ color: "#ffb454", fontSize: 13, fontWeight: 600 }}>▲ {behind} · </span>} />
+                        : <div style={{ color: "#ffb454", fontSize: 13, fontWeight: 600, marginTop: 8 }}>▲ {behind}</div>
+                    ) : (
+                      <div style={{ fontSize: 13, color: dim, marginTop: 8 }}>{progress}</div>
+                    )}
                   </div>
                 );
               })()}
@@ -7994,7 +8038,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               {!maint && wts?.now != null && wts.start != null && settleNote(wts, dietPhase, today) && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>{settleNote(wts, dietPhase, today)}</div>
               )}
-              {wts?.change != null && (
+              {maint && wts?.change != null && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
                   {maint
                     ? hold?.ratePct
@@ -8002,16 +8046,11 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                       : Math.abs((wts.change / wts.start) * 100) <= HOLD_TRIGGER_PCT
                         ? "Within your normal day-to-day range."
                         : `${wts.change < 0 ? "Down" : "Up"} ${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT} from ${held.when}. Your next check-in brings you back.`
-                    : wts.planNow != null
-                      ? `On plan you'd be at ${wts.planNow.toFixed(1)} today: ${Math.abs(wts.now - wts.planNow) < 0.05 ? "right on it" : `${Math.abs(wts.now - wts.planNow).toFixed(1)} ${WEIGHT_UNIT} ${(wts.now - wts.planNow) * goalPct < 0 ? "behind" : "ahead"}`}.`
-                      : ""}
+                    : ""}
                 </div>
               )}
 
 
-              {plan?.behind && followed && onReplan && (
-                <BehindPlan row={dietPhase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} onReplan={onReplan} />
-              )}
 
               <div style={S.ptMiniStats}>
                 <div><span style={{ fontWeight: 700 }}>{cal != null ? fmtK(cal) : "—"}</span> <span style={{ color: dim }}>kcal / day</span>{calNote ? <span style={{ color: dim }}> · {calNote}</span> : null}</div>
@@ -8021,7 +8060,7 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
 }
 
 // Behind plan: the three ways back, each one tap (onReplan does the writes).
-function BehindPlan({ row, preset, plan, today, dietPhases, onReplan, startOpen = false, canClose = true }) {
+function BehindPlan({ row, preset, plan, today, dietPhases, onReplan, startOpen = false, canClose = true, lead = null }) {
   const [open, setOpen] = useState(startOpen);
   const [busy, setBusy] = useState(false);
   const own = followingMaintenance(dietPhases, row);
@@ -8040,9 +8079,10 @@ function BehindPlan({ row, preset, plan, today, dietPhases, onReplan, startOpen 
   return (
     <div style={{ marginTop: 8 }}>
       {!open ? (
-        <button style={{ ...S.linkBtn, color: "#ffb454", fontSize: 13 }} onClick={() => setOpen(true)}>Get back on plan ›</button>
+        <div>{lead}<button style={{ ...S.linkBtn, color: "#ffb454", fontSize: 13 }} onClick={() => setOpen(true)}>Get back on plan ›</button></div>
       ) : (
         <div style={{ marginTop: 4 }}>
+          {lead && <div style={{ marginBottom: 4 }}>{lead}</div>}
           {o.restart && opt("restart", "Plan from today", `Keep ${pace} from ${plan.wts.now.toFixed(1)} lb.`, () => go("restart"))}
           {o.later && !o.later.blockedBy && opt("later", "Finish Plan Later", `Reach your goal (${o.later.goal.toFixed(1)} lb) by ${shortDate(o.later.end)} at the same ${pace}.`, () => go("later", o.later.end))}
           {o.later?.blockedBy && <div style={{ ...S.ptHint, marginBottom: 6 }}>Finishing later would run into the phase planned for {shortDate(o.later.blockedBy)}; move that on the calendar first.</div>}
@@ -9597,7 +9637,7 @@ function Style() {
 
 // Named exports for the tests (tests/): the real functions and components, never copies.
 export {
-  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindVerdict, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, weightStatus, paceWaitingText, settleNote, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
+  calVsMaintenance, intakeVsTarget, intakeWarning, IntakeWarning, alignPhaseTargets, PhaseCard, planStatus, behindOptions, behindText, checkinMaxChange, catchUpCopy, CatchUpProposal, checkinReasons, resolveCheckinReason, cantEatMinKcal, maintenanceHold, holdStartWeight, weightStatus, paceWaitingText, settleNote, AutoCheckinNotice, phaseWeights, paceVerdict, weightTrend, fatMinG, macroKcal, fitMacros, balanceMacros, checkMacros, phaseCalTarget, presetRatePct, realignPresets,
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
