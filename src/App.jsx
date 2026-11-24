@@ -1168,7 +1168,7 @@ function phaseWeights(row, log, today, anchorDate = row?.start_date) {
   const at = (w) => start * Math.pow(1 + rate / 100, w);
   const endWeeks = row.planned_end_date ? (daysBetween(planFrom, row.planned_end_date) + 1) / 7 : null;
   return {
-    start, now, change: now - start, weeks, ...heldInfo, ...settle, ...(settled && { startKind: "settled" }),
+    start, now, change: now - start, weeks, planFrom, ...heldInfo, ...settle, ...(settled && { startKind: "settled" }),
     planNow: rate ? at(weeks) : null,                       // where the goal pace puts you today
     goalEnd: rate && endWeeks ? at(endWeeks) : null,        // and at the planned end
   };
@@ -7896,6 +7896,21 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   // read -0.9 then +1.1 lb/week three days apart while the weekly averages
   // moved 0.4 lb). The headline says whether you're where you should be, on
   // the same 1% line that starts a catch-up (owner's choice, Nov 2026).
+  // drag (or tap) the track: the weight chart opens and follows your finger
+  const chart = (() => { try { return weightChartData({ row: dietPhase, wts, log: bwLog, today }); } catch { return null; } })();
+  const [chartOpen, setChartOpen] = useState(false);
+  const [chartSel, setChartSel] = useState(null);
+  const chartSvg = useRef(null);
+  const dragging = useRef(false);
+  const pick = (e) => { if (chart && chartSvg.current) setChartSel(weightChartPick(chart, chartSvg.current, e.clientX)); };
+  const chartDown = (e) => {
+    if (!chart || e.target.closest("button")) return;
+    dragging.current = true;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported */ }
+    if (chartOpen) pick(e); else { setChartOpen(true); setChartSel(today); }
+  };
+  const chartMove = (e) => { if (dragging.current) pick(e); };
+  const chartUp = () => { dragging.current = false; };
   const maintDrift = maint && wts?.change != null
     ? (hold?.ratePct || Math.abs((wts.change / wts.start) * 100) > HOLD_TRIGGER_PCT ? (wts.change > 0 ? "up" : "down") : "steady")
     : null;
@@ -7967,62 +7982,95 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                   weight it holds. Cuts and bulks: a track from start to goal with
                   where you are now, and under it how far you've come, or, behind
                   plan, the gap beside its fix (owner's design, Nov 2026). */}
-              {wts && wts.now != null && (() => {
-                const startWord = maint || anchorDate === dietPhase.start_date ? "start" : "re-planned start";
-                // the date once: the note under this already names the week it holds
-                const when = wts.start != null ? (held.note ? (wts.provisional ? "provisional" : null) : `${held.when}${wts.provisional ? " · provisional" : ""}`)
-                  : null;
-                const b = (t) => <b style={{ color: text, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{t}</b>;
-                const nowLb = `${wts.now.toFixed(1)} ${WEIGHT_UNIT}`;
-                if (wts.start == null) {
+
+              <div onPointerDown={chartDown} onPointerMove={chartMove} onPointerUp={chartUp} onPointerCancel={chartUp}
+                style={{ touchAction: "pan-y", cursor: chart ? "pointer" : undefined, userSelect: "none" }}>
+                {chartOpen && chart ? (() => {
+                  const r = weightChartReading(chart, chartSel || today);
                   return (
-                    <div style={S.pcEvidence}>
-                      {b(nowLb)} now · {startWord} {wts.startKind === "settling" ? `settling (${wts.count} of 3)` : "from your first full week of weigh-ins"}
-                    </div>
-                  );
-                }
-                const diff = wts.now - wts.start;
-                const sign = `${diff > 0.05 ? "+" : diff < -0.05 ? "−" : "±"}${Math.abs(diff).toFixed(1)}`;
-                if (maint || wts.goalEnd == null) {
-                  return (
-                    <div style={S.pcEvidence}>
-                      {b(nowLb)} now · {b(sign)} from your {b(wts.start.toFixed(1))} {startWord}{when ? ` (${when})` : ""}
-                    </div>
-                  );
-                }
-                const toward = goalPct < 0 ? -1 : 1; // a cut moves down, a bulk up
-                const moved = (wts.now - wts.start) * toward;
-                const total = (wts.goalEnd - wts.start) * toward;
-                const frac = total > 0 ? Math.max(0, Math.min(1, moved / total)) : 0;
-                const toGo = total - moved;
-                const progress = `${Math.abs(moved) < 0.05 ? "No change yet" : `${Math.abs(moved).toFixed(1)} ${WEIGHT_UNIT} ${(moved > 0) === (toward < 0) ? "down" : "up"}`} · ${toGo > 0.05 ? `${toGo.toFixed(1)} ${WEIGHT_UNIT} to go` : "goal reached"}`;
-                const small = { fontSize: 11, color: dim };
-                return (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, fontVariantNumeric: "tabular-nums" }}>
-                      <span style={{ fontSize: 13, color: dim }}>{wts.start.toFixed(1)}</span>
-                      <div style={{ position: "relative", flex: 1, height: 6, borderRadius: 3, background: line }}>
-                        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${frac * 100}%`, borderRadius: 3, background: color }} />
-                        <div style={{ position: "absolute", top: "50%", left: `${frac * 100}%`, width: 12, height: 12, borderRadius: "50%", background: text, border: `2px solid ${color}`, transform: "translate(-50%, -50%)" }} />
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                        <button style={{ ...S.linkBtn, color: dim, fontSize: 12 }} onClick={() => { setChartOpen(false); setChartSel(null); }}>close ✕</button>
                       </div>
-                      <span style={{ fontSize: 13, color: dim }}>{wts.goalEnd.toFixed(1)}</span>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
-                      <span style={small}>{startWord}{when ? ` ${when}` : ""}</span>
-                      <span style={{ fontSize: 13, color: dim }}>{b(nowLb)} now</span>
-                      <span style={small}>goal {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : ""}</span>
-                    </div>
-                    {behind ? (
+                      <PhaseWeightChart c={chart} sel={chartSel || today} color={color} svgRef={chartSvg} />
+                      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: dim, marginTop: 4 }}>
+                        <span style={{ color }}>━ your weekly average</span>
+                        <span>╌ {chart.maint ? "the weight it holds" : "plan"}</span>
+                        {!chart.maint && <span style={{ color }}>┈ from today at {Math.abs(((chart.rate * wts.now) * (rateIsMonthly(dietPhase.phase_type) ? WEEKS_PER_MONTH : 1))).toFixed(1)} {WEIGHT_UNIT}/{rateIsMonthly(dietPhase.phase_type) ? "mo" : "wk"}</span>}
+                      </div>
+                      <div style={{ fontSize: 14, color: text, fontWeight: 700, marginTop: 8 }}>{r.head}</div>
+                      {r.sub && <div style={{ fontSize: 13, color: dim, marginTop: 4 }}>{r.sub}</div>}
+                      {!maint && (behind ? (
                       onReplan && followed
                         ? <BehindPlan row={dietPhase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} onReplan={onReplan}
                             lead={<span style={{ color: "#ffb454", fontSize: 13, fontWeight: 600 }}>▲ {behind} · </span>} />
                         : <div style={{ color: "#ffb454", fontSize: 13, fontWeight: 600, marginTop: 8 }}>▲ {behind}</div>
-                    ) : (
-                      <div style={{ fontSize: 13, color: dim, marginTop: 8 }}>{progress}</div>
-                    )}
-                  </div>
-                );
-              })()}
+                    ) : null)}
+                    </div>
+                  );
+                })() : (
+                  <>
+
+                {wts && wts.now != null && (() => {
+                  const startWord = maint || anchorDate === dietPhase.start_date ? "start" : "re-planned start";
+                  // the date once: the note under this already names the week it holds
+                  const when = wts.start != null ? (held.note ? (wts.provisional ? "provisional" : null) : `${held.when}${wts.provisional ? " · provisional" : ""}`)
+                    : null;
+                  const b = (t) => <b style={{ color: text, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{t}</b>;
+                  const nowLb = `${wts.now.toFixed(1)} ${WEIGHT_UNIT}`;
+                  if (wts.start == null) {
+                    return (
+                      <div style={S.pcEvidence}>
+                        {b(nowLb)} now · {startWord} {wts.startKind === "settling" ? `settling (${wts.count} of 3)` : "from your first full week of weigh-ins"}
+                      </div>
+                    );
+                  }
+                  const diff = wts.now - wts.start;
+                  const sign = `${diff > 0.05 ? "+" : diff < -0.05 ? "−" : "±"}${Math.abs(diff).toFixed(1)}`;
+                  if (maint || wts.goalEnd == null) {
+                    return (
+                      <div style={S.pcEvidence}>
+                        {b(nowLb)} now · {b(sign)} from your {b(wts.start.toFixed(1))} {startWord}{when ? ` (${when})` : ""}
+                      </div>
+                    );
+                  }
+                  const toward = goalPct < 0 ? -1 : 1; // a cut moves down, a bulk up
+                  const moved = (wts.now - wts.start) * toward;
+                  const total = (wts.goalEnd - wts.start) * toward;
+                  const frac = total > 0 ? Math.max(0, Math.min(1, moved / total)) : 0;
+                  const toGo = total - moved;
+                  const progress = `${Math.abs(moved) < 0.05 ? "No change yet" : `${Math.abs(moved).toFixed(1)} ${WEIGHT_UNIT} ${(moved > 0) === (toward < 0) ? "down" : "up"}`} · ${toGo > 0.05 ? `${toGo.toFixed(1)} ${WEIGHT_UNIT} to go` : "goal reached"}`;
+                  const small = { fontSize: 11, color: dim };
+                  return (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, fontVariantNumeric: "tabular-nums" }}>
+                        <span style={{ fontSize: 13, color: dim }}>{wts.start.toFixed(1)}</span>
+                        <div style={{ position: "relative", flex: 1, height: 6, borderRadius: 3, background: line }}>
+                          <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${frac * 100}%`, borderRadius: 3, background: color }} />
+                          <div style={{ position: "absolute", top: "50%", left: `${frac * 100}%`, width: 12, height: 12, borderRadius: "50%", background: text, border: `2px solid ${color}`, transform: "translate(-50%, -50%)" }} />
+                        </div>
+                        <span style={{ fontSize: 13, color: dim }}>{wts.goalEnd.toFixed(1)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
+                        <span style={small}>{startWord}{when ? ` ${when}` : ""}</span>
+                        <span style={{ fontSize: 13, color: dim }}>{b(nowLb)} now</span>
+                        <span style={small}>goal {dietPhase.planned_end_date ? shortDate(dietPhase.planned_end_date) : ""}</span>
+                      </div>
+                      {behind ? (
+                        onReplan && followed
+                          ? <BehindPlan row={dietPhase} preset={followed} plan={plan} today={today} dietPhases={dietPhases} onReplan={onReplan}
+                              lead={<span style={{ color: "#ffb454", fontSize: 13, fontWeight: 600 }}>▲ {behind} · </span>} />
+                          : <div style={{ color: "#ffb454", fontSize: 13, fontWeight: 600, marginTop: 8 }}>▲ {behind}</div>
+                      ) : (
+                        <div style={{ fontSize: 13, color: dim, marginTop: 8 }}>{progress}</div>
+                      )}
+                    </div>
+                  );
+                })()}
+                    {chart && <div style={{ fontSize: 11, color: dim, marginTop: 6 }}>Drag {maint ? "here" : "the track"} to see your weight over time ⇠ ⇢</div>}
+                  </>
+                )}
+              </div>
               {wts?.now != null && (held.note || wts.start == null) && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
                   {wts.start == null
@@ -8057,6 +8105,96 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               </div>
     </>
   );
+}
+
+/* ---------- weight chart (drag the phase card's track) ----------
+   Time left to right, from where the plan starts to its planned end (open-
+   ended: 4 weeks past today). Past: the start, then each week's 7-day
+   average, then today's (the same averages the track uses). Future: the
+   plan line from the start at the goal rate, and a line from today's weight
+   at the goal rate. Never the scale's recent trend: 2 weeks of water would
+   swing it. Maintenance: the weight it holds, flat. (Owner's design, Nov 2026) */
+function weightChartData({ row, wts, log, today }) {
+  if (!row || !wts || wts.start == null || wts.now == null || !wts.planFrom) return null;
+  const maint = row.phase_type === "maintenance";
+  const rate = maint ? 0 : phaseRatePct(row) / 100;
+  const from = wts.planFrom;
+  const planned = row.planned_end_date && row.planned_end_date > today ? row.planned_end_date : null;
+  const end = planned || addDaysISO(today, 28);
+  const pts = (log || []).filter((r) => Number(r.weight) > 0);
+  const avg7 = (d) => { const w = pts.filter((r) => r.date > addDaysISO(d, -7) && r.date <= d).map((r) => Number(r.weight)); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : null; };
+  const past = [{ date: from, w: wts.start }];
+  for (let d = addDaysISO(from, 7); d < today; d = addDaysISO(d, 7)) { const a = avg7(d); if (a != null) past.push({ date: d, w: a }); }
+  if (today > from) past.push({ date: today, w: wts.now });
+  const future = [];
+  for (let d = addDaysISO(today, 7); d < end; d = addDaysISO(d, 7)) future.push(d);
+  future.push(end);
+  const plan = (d) => wts.start * Math.pow(1 + rate, daysBetween(from, d) / 7);
+  const pace = (d) => wts.now * Math.pow(1 + rate, daysBetween(today, d) / 7);
+  return { from, end, today, past, future, plan, pace, maint, rate, start: wts.start, goal: planned && !maint ? wts.goalEnd : null, goalDate: planned };
+}
+// What the chart says for a date (snapped to its weekly points).
+function weightChartReading(c, date) {
+  const f = (x) => x.toFixed(1);
+  const label = date === c.today ? "Today" : shortDate(date);
+  if (date <= c.today) {
+    const p = c.past.find((q) => q.date === date);
+    if (!p) return { head: `${label} · no weigh-ins that week`, sub: null };
+    return { head: `${label} · ${f(p.w)} ${WEIGHT_UNIT}${c.maint ? ` · holding ${f(c.start)}` : ` · plan ${f(c.plan(date))}`}`, sub: null };
+  }
+  if (c.maint) return { head: `${label} · holding ${f(c.start)} ${WEIGHT_UNIT}`, sub: null };
+  const pv = c.pace(date), pl = c.plan(date);
+  const head = Math.abs(pv - pl) < 0.05 ? `${label} · about ${f(pl)} ${WEIGHT_UNIT} on plan` : `${label} · about ${f(pv)} ${WEIGHT_UNIT} at your pace · plan ${f(pl)}`;
+  let sub = null;
+  if (c.goal != null) {
+    const atEnd = c.pace(addDaysISO(c.goalDate, 1)); // counted like the goal: through the end date
+    // from the numbers as shown, so the sentence adds up (172.3 − 169.3 = 3.0)
+    const short = (Number(f(c.goal)) - Number(f(atEnd))) * (c.rate < 0 ? -1 : 1);
+    if (short >= 0.1) sub = `${shortDate(c.goalDate)} at your pace: about ${f(atEnd)}, ${f(short)} ${WEIGHT_UNIT} short of your ${f(c.goal)} goal.`;
+  }
+  return { head, sub };
+}
+function PhaseWeightChart({ c, sel, color, svgRef }) {
+  const W = 320, H = 150, P = { l: 30, r: 8, t: 10, b: 20 };
+  const span = Math.max(1, daysBetween(c.from, c.end));
+  const x = (d) => P.l + (daysBetween(c.from, d) / span) * (W - P.l - P.r);
+  const vals = [...c.past.map((p) => p.w), c.plan(c.end), c.pace(c.end), c.start];
+  const lo = Math.floor(Math.min(...vals) - 0.5), hi = Math.ceil(Math.max(...vals) + 0.5);
+  const y = (v) => P.t + ((hi - v) / Math.max(1, hi - lo)) * (H - P.t - P.b);
+  const steps = [];
+  for (let d = c.from; d < c.end; d = addDaysISO(d, 3)) steps.push(d);
+  steps.push(c.end);
+  const path = (ds, fn) => ds.map((d, i) => `${i ? "L" : "M"}${x(d).toFixed(1)},${y(fn(d)).toFixed(1)}`).join("");
+  const futureDs = steps.filter((d) => d >= c.today);
+  const ticks = (() => { const step = Math.max(1, Math.ceil((hi - lo) / 3)); const t = []; for (let v = Math.ceil(lo); v <= hi; v += step) t.push(v); return t; })();
+  const selPt = sel ? (sel <= c.today ? c.past.find((p) => p.date === sel)?.w : c.maint ? c.start : c.pace(sel)) : null;
+  return (
+    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block", marginTop: 8 }}>
+      {ticks.map((v) => (
+        <g key={v}><line x1={P.l} x2={W - P.r} y1={y(v)} y2={y(v)} stroke={line} /><text x={0} y={y(v) + 4} fill={dim} fontSize={10}>{v}</text></g>
+      ))}
+      <line x1={x(c.today)} x2={x(c.today)} y1={P.t} y2={H - P.b} stroke={line} />
+      <path d={path(steps, c.maint ? () => c.start : c.plan)} fill="none" stroke={dim} strokeWidth={1.5} strokeDasharray="4 4" />
+      {!c.maint && <path d={path(futureDs, c.pace)} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="1.5 4" strokeLinecap="round" />}
+      <path d={c.past.map((p, i) => `${i ? "L" : "M"}${x(p.date).toFixed(1)},${y(p.w).toFixed(1)}`).join("")} fill="none" stroke={color} strokeWidth={2} />
+      {c.past.map((p) => <circle key={p.date} cx={x(p.date)} cy={y(p.w)} r={p.date === c.today ? 5 : 3} fill={p.date === c.today ? text : color} stroke={color} strokeWidth={2} />)}
+      {c.goal != null && <circle cx={x(c.end)} cy={y(c.goal)} r={4} fill="none" stroke={dim} strokeWidth={1.5} />}
+      {sel && <line x1={x(sel)} x2={x(sel)} y1={P.t} y2={H - P.b} stroke={text} />}
+      {sel && selPt != null && <circle cx={x(sel)} cy={y(selPt)} r={6} fill={text} stroke={ink} strokeWidth={2} />}
+      <text x={P.l} y={H - 4} fill={dim} fontSize={10}>{shortDate(c.from)}</text>
+      <text x={x(c.today)} y={H - 4} fill={text} fontSize={10} textAnchor="middle">today</text>
+      <text x={W - P.r} y={H - 4} fill={dim} fontSize={10} textAnchor="end">{shortDate(c.end)}</text>
+    </svg>
+  );
+}
+// The chart's x position → the nearest weekly point (past) or week (future).
+function weightChartPick(c, svg, clientX) {
+  const W = 320, l = 30, r = 8;
+  const rect = svg.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, ((clientX - rect.left) * (W / rect.width) - l) / (W - l - r)));
+  const day = frac * Math.max(1, daysBetween(c.from, c.end));
+  const all = [...c.past.map((p) => p.date), ...c.future];
+  return all.reduce((best, d) => (Math.abs(daysBetween(c.from, d) - day) < Math.abs(daysBetween(c.from, best) - day) ? d : best), all[0]);
 }
 
 // Behind plan: the three ways back, each one tap (onReplan does the writes).
@@ -9641,5 +9779,5 @@ export {
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
-  weightWeeks, WeightLog, WeightButton, Settings, TargetsCalculator, MacroBars, upsertWeighIn, withoutWeighIn, parseWeighIn, weighInOps, weeksBack, sbLogBodyweight, sbDeleteBodyweight,
+  weightWeeks, WeightLog, WeightButton, Settings, TargetsCalculator, MacroBars, weightChartData, weightChartReading, upsertWeighIn, withoutWeighIn, parseWeighIn, weighInOps, weeksBack, sbLogBodyweight, sbDeleteBodyweight,
 };

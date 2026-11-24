@@ -96,7 +96,7 @@ describe('the phase card', () => {
   it('shows the first full week it holds, and says where it comes from', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12));
     const t = card(OWNER);
-    expect(t).toContain('163.0 lb now · +0.8 from your 162.2 start Holding your first full week of weigh-ins (Oct 10–16).');
+    expect(t).toContain('163.0 lb now · +0.8 from your 162.2 start Drag here to see your weight over time ⇠ ⇢ Holding your first full week of weigh-ins (Oct 10–16).');
     expect(t).toContain('Holding your first full week of weigh-ins (Oct 10–16).');
     expect(t).toContain('Within your normal day-to-day range.');
   });
@@ -104,7 +104,7 @@ describe('the phase card', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12));
     const cut = { ...maint('2026-09-09'), phase_type: 'deficit', phase_name: 'Cut', target_rate_pct: -0.5, planned_end_date: '2026-12-31' };
     const t = text(React.createElement(PhaseCard, { dietPhases: [cut], bwLog: OWNER, presets: presets(), week: null, estimate: null, onOpenMonth: () => {}, onReplan: async () => {}, hasRepReport: false }));
-    expect(t).toContain('● On pace · goal 0.8 lb / week (0.50% of bodyweight) 162.2 153.2 start 163.0 lb now goal Dec 31 ▲ 4.0 lb behind plan Starting from your first full week of weigh-ins (Oct 10–16).');
+    expect(t).toContain('● On pace · goal 0.8 lb / week (0.50% of bodyweight) 162.2 153.2 start 163.0 lb now goal Dec 31 ▲ 4.0 lb behind plan Drag the track to see your weight over time ⇠ ⇢ Starting from your first full week of weigh-ins (Oct 10–16).');
     expect(t).toContain('Starting from your first full week of weigh-ins (Oct 10–16).');
   });
   it('before a full week, it says what it is waiting for', () => {
