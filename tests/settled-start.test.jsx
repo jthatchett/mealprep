@@ -83,7 +83,7 @@ describe('the card', () => {
   };
   it('provisional, and when it will settle', () => {
     const t = card(9);
-    expect(t).toContain('Start 163.0 lb Dec 1 · provisional');
+    expect(t).toContain('161.6 lb now · −1.4 from your 163.0 start (Dec 1 · provisional) · goal 153.5 by Feb 22');
     expect(t).toContain("A cut's first week drops some water, so your start is refined once that settles (Dec 22).");
   });
   it('settled: where it moved, for two weeks', () => {

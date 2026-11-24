@@ -5558,6 +5558,9 @@ function MacroBars({ total, target }) {
         const goal = target ? target[key] : 0;
         const pct = goal ? Math.min(100, (have / goal) * 100) : 0;
         const over = goal && have > goal;
+        // Protein over target is a met target, not a miss: the bar stays the
+        // number's green, a tick marks the target (owner's design, Nov 2026).
+        const met = key === "p" && over;
         return (
           <div key={key} style={S.barRow}>
             <div style={S.barTop}>
@@ -5573,16 +5576,18 @@ function MacroBars({ total, target }) {
               </span>
             </div>
             {target && (
-              <div style={S.barTrack}>
+              <div style={{ ...S.barTrack, position: "relative" }}>
                 <div
                   style={{
                     ...S.barFill,
                     width: pct + "%",
-                    background: over ? "#ff5d7a" : color,
+                    background: over && !met ? "#ff5d7a" : color,
                   }}
                 />
+                {met && <div style={{ position: "absolute", top: 0, bottom: 0, width: 2, background: text, left: `${(goal / have) * 100}%` }} />}
               </div>
             )}
+            {met && <div style={{ fontSize: 12, color: dim, marginTop: 3 }}>Target met · +{r0(have - goal)} g over</div>}
           </div>
         );
       })}
@@ -6855,6 +6860,16 @@ function TargetChanges({ rows }) {
   );
 }
 
+// A value filled in from RepReport: its amber and the ⇄ mark, the way every
+// synced piece shows in Meal Prep (owner's design, Nov 2026).
+function SyncedFrom({ detail = null }) {
+  return (
+    <div style={{ marginTop: 6, fontSize: 10, letterSpacing: 1.8, fontWeight: 800, color: REPREPORT_AMBER }}>
+      ⇄ FROM REPREPORT{detail ? <span style={{ fontWeight: 600, letterSpacing: 0.3, color: dim }}> · {detail}</span> : null}
+    </div>
+  );
+}
+
 // "Calculate my targets": a short profile -> a starting maintenance -> every
 // phase preset's targets, shown for review before anything is saved.
 // setupType: during onboarding setup, the phase they picked ("maintenance",
@@ -6964,7 +6979,7 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
                 <button key={d} style={{ ...opt(String(f.lift) === String(d)), padding: "8px 0" }} onClick={() => set("lift", d)}>{d}</button>
               ))}
             </div>
-            {liftFromRR && <div style={S.calcHint}>from your current RepReport block</div>}
+            {liftFromRR && <SyncedFrom detail="your current block" />}
             {training && !training.active && pr.lift_days == null && (
               <div style={S.calcHint}>
                 No active RepReport block — enter how often you lift right now
@@ -6977,7 +6992,7 @@ function TargetsCalculator({ presets, bwLog, profile, training, onApply, onClose
                 <button key={x.key} style={{ ...opt(exp === x.key), padding: "8px 0" }} onClick={() => { setExp(x.key); setExpFrom(null); }}>{x.label}</button>
               ))}
             </div>
-            {expFrom && <div style={S.calcHint}>from {expFrom}</div>}
+            {expFrom && <SyncedFrom />}
             {err && <div style={{ color: "#ff5d7a", fontSize: 12, marginTop: 8 }}>{err}</div>}
             <button style={{ ...S.primaryBtn, width: "100%", marginTop: 14 }} onClick={next}>See my targets</button>
           </div>
@@ -7885,7 +7900,8 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
   return (
     <>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-                <div style={{ ...S.ptWeek, color, fontSize: PHASE_HEADING_PX, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+                {/* the phase is the label; the weight verdict below is the one headline (owner's design, Nov 2026) */}
+                <div style={{ ...S.pcEyebrow, color, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
                   {heading}
                 </div>
                 {headerRight}
@@ -7906,11 +7922,11 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
               <div style={S.ptPaceBox}>
                 {maint ? (
                   <>
-                    <div style={S.pcKicker}>{maintDrift ? "YOUR WEIGHT" : "GOAL"}</div>
+                    {!maintDrift && <div style={S.pcKicker}>GOAL</div>}
                     {maintDrift ? (
                       <div style={S.ptPaceBig}>
                         <span style={{ color: maintDrift === "steady" ? accent : "#ffb454" }}>{maintDrift === "steady" ? "●" : "▲"}</span>{" "}
-                        {maintDrift === "steady" ? "Holding steady" : `Drifting ${maintDrift}`}
+                        {maintDrift === "steady" ? "Weight holding steady" : `Weight drifting ${maintDrift}`}
                       </div>
                     ) : (
                       <>
@@ -7945,21 +7961,23 @@ function PhaseOverview({ phase: dietPhase, dietPhases, bwLog, today, followed, w
                 )}
               </div>
 
-              {wts && wts.now != null && (
-                <div style={S.ptWeights}>
-                  {[
-                    [maint ? "Holding" : anchorDate === dietPhase.start_date ? "Start" : "Re-planned", wts.start != null ? `${wts.start.toFixed(1)}` : wts.soFar != null ? `${wts.soFar.toFixed(1)}` : "—", wts.start != null ? `${held.when}${wts.provisional ? " · provisional" : ""}` : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate)],
-                    ["Now", `${wts.now.toFixed(1)}`, wts.change != null && !maint ? `${wts.change > 0 ? "+" : wts.change < 0 ? "−" : "±"}${Math.abs(wts.change).toFixed(1)} ${WEIGHT_UNIT}` : ""],
-                    maint ? null : ["Goal", wts.goalEnd != null ? `${wts.goalEnd.toFixed(1)}` : "—", dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"],
-                  ].filter(Boolean).map(([lab, n, sub]) => (
-                    <div key={lab}>
-                      <div style={S.pcStatL}>{lab}</div>
-                      <div style={S.pcStatN}>{n} <span style={{ fontSize: 11, color: dim, fontWeight: 400 }}>{WEIGHT_UNIT}</span></div>
-                      <div style={{ fontSize: 11, color: dim }}>{sub}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
+              {/* the evidence, one line under the verdict: now, from the start, to the goal */}
+              {wts && wts.now != null && (() => {
+                const startWord = maint || anchorDate === dietPhase.start_date ? "start" : "re-planned start";
+                const when = wts.start != null ? `${held.when}${wts.provisional ? " · provisional" : ""}`
+                  : wts.startKind === "settling" ? `settling · ${wts.count} of 3` : shortDate(anchorDate);
+                const diff = wts.start != null ? wts.now - wts.start : null;
+                const b = (t) => <b style={{ color: text, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{t}</b>;
+                return (
+                  <div style={S.pcEvidence}>
+                    {b(`${wts.now.toFixed(1)} ${WEIGHT_UNIT}`)} now
+                    {wts.start != null
+                      ? <> · {b(`${diff > 0.05 ? "+" : diff < -0.05 ? "−" : "±"}${Math.abs(diff).toFixed(1)}`)} from your {b(wts.start.toFixed(1))} {startWord} ({when})</>
+                      : <> · {startWord} {wts.startKind === "settling" ? `settling (${wts.count} of 3)` : `from your first full week of weigh-ins`}</>}
+                    {!maint && <> · goal {wts.goalEnd != null ? b(wts.goalEnd.toFixed(1)) : "—"} {dietPhase.planned_end_date ? `by ${shortDate(dietPhase.planned_end_date)}` : "open-ended"}</>}
+                  </div>
+                );
+              })()}
               {wts?.now != null && (held.note || wts.start == null) && (
                 <div style={{ fontSize: 12, marginTop: 6, color: dim }}>
                   {wts.start == null
@@ -8994,6 +9012,8 @@ const S = {
     background: panel, borderRadius: 8, padding: "10px 12px", marginBottom: 6,
   },
   pcKicker: { color: dim, fontSize: 10, letterSpacing: 1.2, marginBottom: 3 },
+  pcEyebrow: { fontSize: 12, fontWeight: 800, letterSpacing: 1.4, marginTop: 4 },
+  pcEvidence: { fontSize: 14, color: dim, lineHeight: 1.5, marginTop: 8 },
   viHead: { display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 13, fontWeight: 600, marginTop: 16 },
   viBar: {
     position: "relative", height: 8, borderRadius: 4, marginTop: 10,
@@ -9580,5 +9600,5 @@ export {
   phaseStartUpdate, shiftForRate, estimateBasis, checkinOutcome, splitMacros, suggestTargets, paceKcal,
   checkPhaseRate, defaultRatePct, phaseRatePct, presetsAsOf, phaseOnDate, dietPhaseContext, volumeImpactPct,
   targetsFromMaintenance, buildProteinStatus, presetView, Phases, CheckInCard, SEED_PHASES, MACRO_KCAL_TOLERANCE,
-  weightWeeks, WeightLog, WeightButton, Settings, TargetsCalculator, upsertWeighIn, withoutWeighIn, parseWeighIn, weighInOps, weeksBack, sbLogBodyweight, sbDeleteBodyweight,
+  weightWeeks, WeightLog, WeightButton, Settings, TargetsCalculator, MacroBars, upsertWeighIn, withoutWeighIn, parseWeighIn, weighInOps, weeksBack, sbLogBodyweight, sbDeleteBodyweight,
 };

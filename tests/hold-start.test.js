@@ -96,7 +96,7 @@ describe('the phase card', () => {
   it('shows the first full week it holds, and says where it comes from', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12));
     const t = card(OWNER);
-    expect(t).toContain('Holding 162.2 lb Oct 10–16');
+    expect(t).toContain('163.0 lb now · +0.8 from your 162.2 start (Oct 10–16)');
     expect(t).toContain('Holding your first full week of weigh-ins (Oct 10–16).');
     expect(t).toContain('Within your normal day-to-day range.');
   });
@@ -104,7 +104,7 @@ describe('the phase card', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12));
     const cut = { ...maint('2026-09-09'), phase_type: 'deficit', phase_name: 'Cut', target_rate_pct: -0.5, planned_end_date: '2026-12-31' };
     const t = text(React.createElement(PhaseCard, { dietPhases: [cut], bwLog: OWNER, presets: presets(), week: null, estimate: null, onOpenMonth: () => {}, onReplan: async () => {}, hasRepReport: false }));
-    expect(t).toContain('Start 162.2 lb Oct 10–16');
+    expect(t).toContain('163.0 lb now · +0.8 from your 162.2 start (Oct 10–16) · goal 153.2 by Dec 31');
     expect(t).toContain('Starting from your first full week of weigh-ins (Oct 10–16).');
   });
   it('before a full week, it says what it is waiting for', () => {
@@ -114,7 +114,7 @@ describe('the phase card', () => {
   it('inside the start week, it says how many more weigh-ins it needs, and by when', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 8, 10, 12));
     const t = card(w([['2026-09-09', 164.0], ['2026-09-10', 162.6]]));
-    expect(t).toContain('Holding 163.3 lb settling · 2 of 3');
+    expect(t).toContain('163.3 lb now · start settling (2 of 3)');
     expect(t).toContain('The weight to hold is the average of 3 weigh-ins around Sep 9. You have 2: weigh in on 1 more morning by Sep 15. First thing in the morning');
   });
 });

@@ -23,7 +23,7 @@ describe('weightStatus', () => {
     const hold = maintenanceHold(maint, [maint], OWNER, '2026-11-10', []);
     const s = weightStatus({ dietPhases: [maint], bwLog: OWNER, today: '2026-11-10', hold });
     expect(s).toEqual({ asOf: '2026-11-10', phase: 'maintenance', level: 'ok', label: 'Holding steady', rate: '0.8 lb over 162.2', goal: 'hold your weight' });
-    expect(card([maint], OWNER, hold)).toContain('● Holding steady');
+    expect(card([maint], OWNER, hold)).toContain('● Weight holding steady 163.0 lb now · +0.8 from your 162.2 start');
   });
   it('maintenance, 1%+ off: drifting, the same as the card', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(2026, 10, 10, 12));
@@ -31,7 +31,7 @@ describe('weightStatus', () => {
     const hold = maintenanceHold(maint, [maint], low, '2026-11-10', []);
     const s = weightStatus({ dietPhases: [maint], bwLog: low, today: '2026-11-10', hold });
     expect(s).toMatchObject({ level: 'warn', label: 'Drifting down', rate: '2.6 lb under 162.2' });
-    expect(card([maint], low, hold)).toContain('▲ Drifting down');
+    expect(card([maint], low, hold)).toContain('▲ Weight drifting down 159.6 lb now · −2.6 from your 162.2 start');
   });
   it('a cut on pace: the verdict, the rate and the goal, as the card shows them', () => {
     const day = (n) => { const d = new Date(2026, 10, 10); d.setDate(d.getDate() + n); return iso(d); };
